@@ -1,10 +1,8 @@
 pub mod ecmwfapi_auth;
+pub mod jwt_auth;
+
 use crate::auth::ecmwfapi_auth::EcmwfApiAuth;
-
-pub struct Auth {
-    pub handlers: Vec<AuthHandler>,
-}
-
+use crate::auth::jwt_auth::JWTAuth;
 
 pub struct User {
     pub username: String,
@@ -12,8 +10,13 @@ pub struct User {
 
 }
 
+pub struct Auth {
+    pub handlers: Vec<AuthHandler>,
+}
+
 pub enum AuthHandler {
     EcmwfApiAuth(EcmwfApiAuth),
+    JWTAuth(JWTAuth),
     // Add other authentication handlers here
 }
 
@@ -21,6 +24,7 @@ impl AuthHandler {
     pub async fn authenticate(&self, credentials: &str) -> Option<User> {
         match self {
             AuthHandler::EcmwfApiAuth(handler) => handler.authenticate(credentials).await,
+            AuthHandler::JWTAuth(handler) => handler.authenticate(credentials).await,
         }
     }
 }
@@ -29,7 +33,8 @@ impl Auth {
     pub fn new() -> Self {
         Self {
             handlers: vec![
-                AuthHandler::EcmwfApiAuth(EcmwfApiAuth::new("https://api.ecmwf.int".to_string())),
+                AuthHandler::EcmwfApiAuth(EcmwfApiAuth::new("https://api.ecmwf.int/v1".to_string())),
+                AuthHandler::JWTAuth(JWTAuth::new("https://iam.ivv.desp.space/realms/desp/protocol/openid-connect/certs".to_string())),
                 // Add other handlers as needed
             ],
         }
