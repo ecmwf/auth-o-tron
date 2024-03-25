@@ -1,6 +1,6 @@
 mod auth;
 
-use auth::User;
+use std::sync::Arc;
 
 use axum::{
     body::Body,
@@ -10,8 +10,8 @@ use axum::{
     Extension, Router,
 };
 
-use crate::auth::Auth;
-use std::sync::Arc;
+use crate::auth::{Auth, User};
+
 
 // -- Error Handling
 
