@@ -4,11 +4,10 @@ use auth::User;
 
 use axum::{
     body::Body,
+    http::{header::HeaderMap, StatusCode},
     response::{self, IntoResponse, Response},
     routing::get,
-    Router,
-    http::{StatusCode, header::HeaderMap},
-    Extension
+    Extension, Router,
 };
 
 use crate::auth::Auth;
@@ -51,20 +50,29 @@ async fn extract_user_from_header(headers: &HeaderMap, auth: Arc<Auth>) -> Resul
 
     match auth.authenticate(auth_header).await {
         Some(user) => Ok(user),
-        None => Err(HTTPError::new(StatusCode::UNAUTHORIZED, "Unauthorized access")),
+        None => Err(HTTPError::new(
+            StatusCode::UNAUTHORIZED,
+            "Unauthorized access",
+        )),
     }
 }
 
 // -- API Routes
 
-async fn authenticate(headers: HeaderMap, Extension(auth): Extension<Arc<Auth>>) -> Result<impl IntoResponse, HTTPError> {
+async fn authenticate(
+    headers: HeaderMap,
+    Extension(auth): Extension<Arc<Auth>>,
+) -> Result<impl IntoResponse, HTTPError> {
     let user = extract_user_from_header(&headers, auth).await?;
     println!("Authenticated user: {:?}", user.username);
     let body = format!("User {} authenticated successfully", user.username);
     Ok((StatusCode::OK, body))
 }
 
-async fn create_token(headers: HeaderMap, Extension(auth): Extension<Arc<Auth>>) -> Result<impl IntoResponse, HTTPError> {
+async fn create_token(
+    headers: HeaderMap,
+    Extension(auth): Extension<Arc<Auth>>,
+) -> Result<impl IntoResponse, HTTPError> {
     let user = extract_user_from_header(&headers, auth).await?;
     println!("Authenticated user: {:?}", user.username);
     // Proceed with token creation logic...
@@ -79,16 +87,14 @@ async fn health_check() -> impl IntoResponse {
 
 #[tokio::main]
 async fn main() {
-
     let auth = Arc::new(Auth::new());
-    
+
     let app = Router::new()
         .route("/authenticate", get(authenticate))
         .route("/create_token", get(create_token))
         .layer(Extension(auth))
         .route("/health_check", get(health_check));
 
-    // run our app with hyper, listening globally on port 3000
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }

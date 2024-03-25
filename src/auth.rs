@@ -7,7 +7,6 @@ use crate::auth::jwt_auth::JWTAuth;
 pub struct User {
     pub username: String,
     pub realm: String,
-
 }
 
 pub struct Auth {
@@ -33,8 +32,13 @@ impl Auth {
     pub fn new() -> Self {
         Self {
             handlers: vec![
-                AuthHandler::EcmwfApiAuth(EcmwfApiAuth::new("https://api.ecmwf.int/v1".to_string())),
-                AuthHandler::JWTAuth(JWTAuth::new("https://iam.ivv.desp.space/realms/desp/protocol/openid-connect/certs".to_string())),
+                AuthHandler::EcmwfApiAuth(EcmwfApiAuth::new(
+                    "https://api.ecmwf.int/v1".to_string(),
+                )),
+                AuthHandler::JWTAuth(JWTAuth::new(
+                    "https://iam.ivv.desp.space/realms/desp/protocol/openid-connect/certs"
+                        .to_string(),
+                )),
                 // Add other handlers as needed
             ],
         }
@@ -42,7 +46,7 @@ impl Auth {
 
     pub async fn authenticate(&self, auth_header: &str) -> Option<User> {
         let parts: Vec<&str> = auth_header.split_whitespace().collect();
-        
+
         if parts.len() != 2 {
             return None;
         }
