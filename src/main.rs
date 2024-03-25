@@ -1,5 +1,7 @@
 mod auth;
 
+use auth::User;
+
 use axum::{
     body::Body,
     response::{self, IntoResponse, Response},
@@ -12,43 +14,79 @@ use axum::{
 use crate::auth::Auth;
 use std::sync::Arc;
 
-async fn authenticate(headers: HeaderMap, Extension(auth): Extension<Arc<Auth>>) -> impl IntoResponse {
-    
-    
-    let auth_header = headers
-    .get("authorization")
-    .and_then(|value| value.to_str().ok())
-    .unwrap_or("");
-    
-    match auth.authenticate(auth_header).await {
-        Some(user) => {
-            // Authentication successful
-            println!("Authenticated user: {:?}", user.username);
-            let body = Body::from(format!("User {} authenticated successfully", user.username));
-            Response::builder()
-            .status(StatusCode::OK)
-            .body(body)
-            .unwrap()
-        }
-        None => {
-            // Authentication failed
-            let body = Body::from("Authentication failed");
-            response::Response::builder()
-            .status(StatusCode::UNAUTHORIZED)
-            .body(body)
-            .unwrap()
+// -- Error Handling
+
+pub struct HTTPError {
+    status: StatusCode,
+    message: String,
+}
+
+impl HTTPError {
+    pub fn new(status: StatusCode, message: impl Into<String>) -> Self {
+        HTTPError {
+            status,
+            message: message.into(),
         }
     }
-    
 }
+
+impl IntoResponse for HTTPError {
+    fn into_response(self) -> Response {
+        let body = format!("{{\"error\": \"{}\"}}", self.message);
+        Response::builder()
+            .status(self.status)
+            .header("Content-Type", "application/json")
+            .body(body.into())
+            .unwrap()
+    }
+}
+
+// -- Authenticate Method
+
+async fn extract_user_from_header(headers: &HeaderMap, auth: Arc<Auth>) -> Result<User, HTTPError> {
+    let auth_header = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+
+    match auth.authenticate(auth_header).await {
+        Some(user) => Ok(user),
+        None => Err(HTTPError::new(StatusCode::UNAUTHORIZED, "Unauthorized access")),
+    }
+}
+
+// -- API Routes
+
+async fn authenticate(headers: HeaderMap, Extension(auth): Extension<Arc<Auth>>) -> Result<impl IntoResponse, HTTPError> {
+    let user = extract_user_from_header(&headers, auth).await?;
+    println!("Authenticated user: {:?}", user.username);
+    let body = format!("User {} authenticated successfully", user.username);
+    Ok((StatusCode::OK, body))
+}
+
+async fn create_token(headers: HeaderMap, Extension(auth): Extension<Arc<Auth>>) -> Result<impl IntoResponse, HTTPError> {
+    let user = extract_user_from_header(&headers, auth).await?;
+    println!("Authenticated user: {:?}", user.username);
+    // Proceed with token creation logic...
+    Ok((StatusCode::OK, "some_token"))
+}
+
+async fn health_check() -> impl IntoResponse {
+    response::Response::new(Body::from("OK"))
+}
+
+// -- Entrypoint
 
 #[tokio::main]
 async fn main() {
 
     let auth = Arc::new(Auth::new());
     
-    // build our application with a single route
-    let app = Router::new().route("/authenticate", get(authenticate)).layer(Extension(auth));
+    let app = Router::new()
+        .route("/authenticate", get(authenticate))
+        .route("/create_token", get(create_token))
+        .layer(Extension(auth))
+        .route("/health_check", get(health_check));
 
     // run our app with hyper, listening globally on port 3000
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
