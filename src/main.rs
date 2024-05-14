@@ -1,83 +1,61 @@
 mod auth;
+mod config;
+mod http_helpers;
+mod models;
+mod store;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::{
-    body::Body,
-    http::{header::HeaderMap, StatusCode},
-    response::{self, IntoResponse, Response},
-    routing::get,
-    Extension, Router,
-};
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::response::{self};
+use uuid::Uuid;
+use axum::routing::get;
+use axum::Router;
 
-use crate::auth::{Auth, User};
+use crate::auth::Auth;
+use crate::http_helpers::HTTPError;
+use crate::models::User;
+use crate::store::Store;
 
-
-// -- Error Handling
-
-pub struct HTTPError {
-    status: StatusCode,
-    message: String,
-}
-
-impl HTTPError {
-    pub fn new(status: StatusCode, message: impl Into<String>) -> Self {
-        HTTPError {
-            status,
-            message: message.into(),
-        }
-    }
-}
-
-impl IntoResponse for HTTPError {
-    fn into_response(self) -> Response {
-        let body = format!("{{\"error\": \"{}\"}}", self.message);
-        Response::builder()
-            .status(self.status)
-            .header("Content-Type", "application/json")
-            .body(body.into())
-            .unwrap()
-    }
-}
-
-// -- Authenticate Method
-
-async fn extract_user_from_header(headers: &HeaderMap, auth: Arc<Auth>) -> Result<User, HTTPError> {
-    let auth_header = headers
-        .get("authorization")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-
-    match auth.authenticate(auth_header).await {
-        Some(user) => Ok(user),
-        None => Err(HTTPError::new(
-            StatusCode::UNAUTHORIZED,
-            "Unauthorized access",
-        )),
-    }
-}
+use inline_colorization::*;
 
 // -- API Routes
 
-async fn authenticate(
-    headers: HeaderMap,
-    Extension(auth): Extension<Arc<Auth>>,
-) -> Result<impl IntoResponse, HTTPError> {
-    let user = extract_user_from_header(&headers, auth).await?;
-    println!("Authenticated user: {:?}", user.username);
-    let body = format!("User {} authenticated successfully", user.username);
-    Ok((StatusCode::OK, body))
+// GET /authenticate
+
+async fn authenticate(user: User) -> Result<impl IntoResponse, HTTPError> {
+
+    println!("✅ Authenticated user: {:?}", user);
+
+    let jwt = user.to_jwt();
+
+    let response = response::Response::builder()
+        .status(StatusCode::OK)
+        .header("Authorization", format!("Bearer {}", jwt))
+        .body(Body::from("Authenticated successfully"))
+        .unwrap();
+
+    Ok(response)
+
 }
 
+// GET /token
+
 async fn create_token(
-    headers: HeaderMap,
-    Extension(auth): Extension<Arc<Auth>>,
+    user: User,
+    State(state): State<AppState>,
 ) -> Result<impl IntoResponse, HTTPError> {
-    let user = extract_user_from_header(&headers, auth).await?;
     println!("Authenticated user: {:?}", user.username);
-    // Proceed with token creation logic...
-    Ok((StatusCode::OK, "some_token"))
+    let token = Uuid::new_v4().to_string();
+    state.store.add_token(&token, &user, 3600).await.unwrap();
+    Ok((StatusCode::OK, token))
 }
+
+// GET /health
 
 async fn health_check() -> impl IntoResponse {
     response::Response::new(Body::from("OK"))
@@ -85,16 +63,30 @@ async fn health_check() -> impl IntoResponse {
 
 // -- Entrypoint
 
+#[derive(Clone)]
+struct AppState {
+    auth: Arc<Auth>,
+    store: Arc<dyn Store>,
+}
+
 #[tokio::main]
 async fn main() {
-    let auth = Arc::new(Auth::new());
+    let config = config::load_config();
+
+    let store = store::create_store(&config.store);
+
+    let auth = Arc::new(Auth::new(config.providers));
+
+    let state = AppState { auth, store };
+
+    println!("{color_magenta}{style_bold}Starting server on {}...{color_reset}{style_reset}", config.bind_address);
 
     let app = Router::new()
         .route("/authenticate", get(authenticate))
-        .route("/create_token", get(create_token))
-        .layer(Extension(auth))
-        .route("/health_check", get(health_check));
+        .route("/token", get(create_token))
+        .route("/health", get(health_check))
+        .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(config.bind_address).await.unwrap();
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
 }

@@ -1,44 +1,67 @@
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::User;
+use inline_colorization::*;
+use cached::proc_macro::cached;
+
+// --- Config
+
+#[derive(Deserialize, Debug)]
+pub struct EcmwfApiAuthConfig {
+    pub uri: String,
+    pub realm: String
+}
+
+// --- Handler
 
 pub struct EcmwfApiAuth {
-    pub endpoint: String,
+    pub config: EcmwfApiAuthConfig,
 }
 
 impl EcmwfApiAuth {
-    pub fn new(endpoint: String) -> Self {
-        println!("Creating EcmwfApiAuth with endpoint: {}", endpoint);
-        Self { endpoint }
+
+    pub fn new(config: EcmwfApiAuthConfig) -> Self {
+        println!("  🔑 Creating {style_bold}{color_cyan}EcmwfApiAuth{style_reset}{color_reset} for realm {}", config.realm);
+        Self { config }
     }
 
-    pub async fn authenticate(&self, token: &str) -> Option<User> {
-        println!("Authenticating bearer token with ECMWF API: {}", token);
-        println!("Endpoint: {}", self.endpoint);
-        let client = reqwest::Client::new();
-        let url = format!("{}/who-am-i?token={}", self.endpoint, token);
+    pub async fn authenticate(&self, token: &str) -> Result<User, String> {
+        query(self.config.uri.to_string(), token.to_string(), self.config.realm.to_string()).await
+    }
+}
 
-        let res = client.get(&url).send().await;
+#[cached(time = 60, sync_writes = true)]
+async fn query(uri: String, token: String, realm: String) -> Result<User, String> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/who-am-i?token={}", uri, token);
+    let res = client.get(&url).send().await;
+    match res {
+        Ok(response) if response.status().is_success() => {
+            let body = response.text().await.unwrap();
+            let user_info: Value = serde_json::from_str(&body).unwrap();
+            let username = user_info["uid"].as_str().unwrap_or_default().to_string();
 
-        match res {
-            Ok(response) if response.status().is_success() => {
-                let body = response.text().await.ok()?;
-                println!("Raw response body: {}", body);
-                let user_info: Value = serde_json::from_str(&body).ok()?;
-                let username = user_info["uid"].as_str().unwrap_or_default().to_string();
-                Some(User {
-                    username,
-                    realm: "ecmwf".to_string(),
-                })
-            }
-            Ok(response) => {
-                println!("Non-success status code received: {}", response.status());
+            let user = Ok(User::new(
+                realm,
+                username,
+                None,
+                None,
+                None,
                 None
-            }
-            Err(e) => {
-                println!("Error sending request: {}", e);
-                None
-            }
+            ));
+            user
+
+        },
+        Ok(response) if response.status() == 403=> {
+            Err(format!("invalid API token"))
+        },
+        Ok(response) => {
+            Err(format!("unexpected status code: {}",response.status()))
+        }
+        Err(e) => {
+            Err(format!("error sending request: {}", e))
         }
     }
+
 }
