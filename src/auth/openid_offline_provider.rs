@@ -4,7 +4,8 @@ use serde_json::Value;
 
 use crate::models::User;
 
-use super::jwt_provider::{JWTAuthConfig, JWTProvider};
+use super::jwt_provider::JWTAuthConfig;
+use super::jwt_provider::JWTProvider;
 use super::Provider;
 
 #[derive(Deserialize, Debug, Hash, Clone, PartialEq, Eq)]
@@ -25,7 +26,6 @@ pub struct OpenIDOfflineProvider {
 
 impl OpenIDOfflineProvider {
     pub fn new(config: OpenIDOfflineProviderConfig) -> Self {
-
         // nested JWT auth will do the validation on the final access token
         let jwt_auth = JWTProvider::new(JWTAuthConfig {
             cert_uri: config.cert_uri.clone(),
@@ -36,11 +36,13 @@ impl OpenIDOfflineProvider {
 
         Self { config, jwt_auth }
     }
-
 }
 
 #[cached(time = 120, sync_writes = true)]
-async fn check_offline_access_token(config: OpenIDOfflineProviderConfig, token: String) -> Result<bool, String> {
+async fn check_offline_access_token(
+    config: OpenIDOfflineProviderConfig,
+    token: String,
+) -> Result<bool, String> {
     let introspection_url = format!(
         "{}/realms/{}/protocol/openid-connect/token/introspect",
         config.iam_url, config.iam_realm
@@ -52,15 +54,20 @@ async fn check_offline_access_token(config: OpenIDOfflineProviderConfig, token: 
         .basic_auth(config.private_client_id, Some(config.private_client_secret))
         .form(&[("token", token)])
         .send()
-        .await.map_err(|e| e.to_string())?
+        .await
+        .map_err(|e| e.to_string())?
         .json::<Value>()
-        .await.map_err(|e| e.to_string())?;
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(resp["active"].as_bool().unwrap_or(false) && resp["token_type"] == "Offline")
 }
 
 #[cached(time = 10, sync_writes = true)]
-async fn get_access_token(config: OpenIDOfflineProviderConfig, refresh_token: String) -> Result<String, String> {
+async fn get_access_token(
+    config: OpenIDOfflineProviderConfig,
+    refresh_token: String,
+) -> Result<String, String> {
     let refresh_data = [
         ("client_id", config.public_client_id.as_str()),
         ("grant_type", "refresh_token"),
@@ -77,12 +84,10 @@ async fn get_access_token(config: OpenIDOfflineProviderConfig, refresh_token: St
         .post(&token_endpoint)
         .form(&refresh_data)
         .send()
-        .await.map_err(|e| e.to_string())?;
-
-    let json_value = resp
-        .json::<Value>()
         .await
         .map_err(|e| e.to_string())?;
+
+    let json_value = resp.json::<Value>().await.map_err(|e| e.to_string())?;
 
     let access_token = json_value
         .get("access_token")
@@ -104,7 +109,6 @@ impl Provider for OpenIDOfflineProvider {
     }
 
     async fn authenticate(&self, credentials: &str) -> Result<User, String> {
-
         if !check_offline_access_token(self.config.clone(), credentials.to_string()).await? {
             return Err("not a valid offline_access token".into());
         }

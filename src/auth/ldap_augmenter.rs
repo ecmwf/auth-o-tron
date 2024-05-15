@@ -1,8 +1,10 @@
 use async_trait::async_trait;
-use ldap3::{LdapConnAsync, Scope, SearchEntry};
-use serde::Deserialize;
-use inline_colorization::*;
 use cached::proc_macro::cached;
+use inline_colorization::*;
+use ldap3::LdapConnAsync;
+use ldap3::Scope;
+use ldap3::SearchEntry;
+use serde::Deserialize;
 
 use crate::models::User;
 
@@ -28,18 +30,16 @@ impl LDAPAugmenter {
         println!("  🏷️  Creating {style_bold}{color_cyan}LDAPAugmenter{style_reset}{color_reset} for realm {}", config.realm);
         LDAPAugmenter { config }
     }
-
 }
 
 fn parse_cn(role: &str) -> Option<String> {
-    role.split(',')
-        .find_map(|part| {
-            let mut split = part.splitn(2, '=');
-            match (split.next(), split.next()) {
-                (Some("CN"), Some(cn)) => Some(cn.to_string()),
-                _ => None,
-            }
-        })
+    role.split(',').find_map(|part| {
+        let mut split = part.splitn(2, '=');
+        match (split.next(), split.next()) {
+            (Some("CN"), Some(cn)) => Some(cn.to_string()),
+            _ => None,
+        }
+    })
 }
 
 #[cached(time = 120, sync_writes = true)]
@@ -47,20 +47,33 @@ async fn retrieve_ldap_user_roles(
     config: LDAPAugmenterConfig,
     uid: String,
 ) -> Result<Vec<String>, String> {
-
-    let (conn, mut ldap) = LdapConnAsync::new(&config.url).await.map_err(|e| e.to_string())?;
+    let (conn, mut ldap) = LdapConnAsync::new(&config.url)
+        .await
+        .map_err(|e| e.to_string())?;
     ldap3::drive!(conn);
 
-    let bind_dn = format!("CN={},OU=Connectors,OU=Service Accounts,DC=ecmwf,DC=int", &config.ldap_user);
-    ldap.simple_bind(&bind_dn, &config.ldap_password).await.map_err(|e| e.to_string())?.success().map_err(|e| e.to_string())?;
+    let bind_dn = format!(
+        "CN={},OU=Connectors,OU=Service Accounts,DC=ecmwf,DC=int",
+        &config.ldap_user
+    );
+    ldap.simple_bind(&bind_dn, &config.ldap_password)
+        .await
+        .map_err(|e| e.to_string())?
+        .success()
+        .map_err(|e| e.to_string())?;
 
     let search_filter = format!("(&(objectClass=person)(cn={}))", uid);
-    let (result, _res) = ldap.search(
-        &config.search_base,
-        Scope::Subtree,
-        &search_filter,
-        vec!["memberOf"]
-    ).await.map_err(|e| e.to_string())?.success().map_err(|e| e.to_string())?;
+    let (result, _res) = ldap
+        .search(
+            &config.search_base,
+            Scope::Subtree,
+            &search_filter,
+            vec!["memberOf"],
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        .success()
+        .map_err(|e| e.to_string())?;
 
     let mut roles = Vec::new();
     for entry in result {
@@ -107,9 +120,7 @@ impl Augmenter for LDAPAugmenter {
                 user.roles.extend(roles);
                 Ok(())
             }
-            Err(err) => {
-                Err(format!("Failed to retrieve LDAP user roles: {:?}", err))
-            }
+            Err(err) => Err(format!("Failed to retrieve LDAP user roles: {:?}", err)),
         }
     }
 }

@@ -67,9 +67,7 @@ impl FromRequestParts<AppState> for User {
             .authenticate(auth_header, &client_ip.to_string())
             .await
         {
-            Some(user) => {
-                Ok(user)
-            }
+            Some(user) => Ok(user),
             None => Err(HTTPError::new(
                 StatusCode::UNAUTHORIZED,
                 "Unauthorized access",

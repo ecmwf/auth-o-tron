@@ -28,7 +28,6 @@ use inline_colorization::*;
 // GET /authenticate
 
 async fn authenticate(user: User) -> Result<impl IntoResponse, HTTPError> {
-
     let jwt = user.to_jwt();
 
     let response = response::Response::builder()

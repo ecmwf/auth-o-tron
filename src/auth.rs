@@ -1,16 +1,16 @@
 pub mod ecmwfapi_provider;
 pub mod jwt_provider;
-pub mod openid_offline_provider;
 pub mod ldap_augmenter;
+pub mod openid_offline_provider;
 
 use serde::Deserialize;
 
 use self::ecmwfapi_provider::EcmwfApiProvider;
 use self::ecmwfapi_provider::EcmwfApiProviderConfig;
-use self::jwt_provider::JWTProvider;
 use self::jwt_provider::JWTAuthConfig;
-use self::openid_offline_provider::OpenIDOfflineProviderConfig;
+use self::jwt_provider::JWTProvider;
 use self::openid_offline_provider::OpenIDOfflineProvider;
+use self::openid_offline_provider::OpenIDOfflineProviderConfig;
 use crate::models::User;
 use futures::future::join_all;
 
@@ -38,7 +38,6 @@ pub enum ProviderConfig {
 pub enum AugmenterConfig {
     #[serde(rename = "ldap")]
     LDAPAugmenterConfig(LDAPAugmenterConfig),
-
 }
 
 // --- Providers
@@ -57,7 +56,6 @@ pub trait Augmenter: Send + Sync {
     fn get_realm(&self) -> &str;
     async fn augment(&self, user: &mut User) -> Result<(), String>;
 }
-
 
 // ---
 
@@ -93,12 +91,26 @@ pub fn create_auth_augmenter(config: AugmenterConfig) -> Box<dyn Augmenter> {
 }
 
 impl Auth {
-    pub fn new(provider_config: Vec<ProviderConfig>, augmenter_config: Vec<AugmenterConfig>) -> Self {
+    pub fn new(
+        provider_config: Vec<ProviderConfig>,
+        augmenter_config: Vec<AugmenterConfig>,
+    ) -> Self {
         println!("{color_magenta}{style_bold}Creating auth providers...{color_reset}{style_reset}");
-        let providers = provider_config.into_iter().map(create_auth_provider).collect();
-        println!("{color_magenta}{style_bold}Creating auth augmenters...{color_reset}{style_reset}");
-        let augmenters = augmenter_config.into_iter().map(create_auth_augmenter).collect();
-        Auth { providers, augmenters }
+        let providers = provider_config
+            .into_iter()
+            .map(create_auth_provider)
+            .collect();
+        println!(
+            "{color_magenta}{style_bold}Creating auth augmenters...{color_reset}{style_reset}"
+        );
+        let augmenters = augmenter_config
+            .into_iter()
+            .map(create_auth_augmenter)
+            .collect();
+        Auth {
+            providers,
+            augmenters,
+        }
     }
 
     pub async fn authenticate(&self, auth_header: &str, ip: &str) -> Option<User> {
@@ -162,7 +174,7 @@ impl Auth {
             Some(user) => {
                 println!("  👤 found user {style_bold}{color_bright_magenta}{}{color_reset}{style_reset} in realm {style_bold}{}{style_reset}", user.username, user.realm);
                 user
-            },
+            }
             None => {
                 println!("  ❌ no provider could authenticate the user.");
                 return None;
@@ -171,12 +183,12 @@ impl Auth {
 
         let realm = user.realm.clone();
 
-        let valid_augmenters = self.augmenters.iter().filter(|augmenter| {
-            augmenter.get_realm() == realm
-        });
+        let valid_augmenters = self
+            .augmenters
+            .iter()
+            .filter(|augmenter| augmenter.get_realm() == realm);
 
         for augmenter in valid_augmenters {
-
             match augmenter.augment(&mut user).await {
                 Ok(_) => {
                     println!(
@@ -191,10 +203,9 @@ impl Auth {
                         e
                     );
                 }
-            
             }
         }
-        
+
         println!("  🎉 authenticated user: {:?}", user);
 
         Some(user)

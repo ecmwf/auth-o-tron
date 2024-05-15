@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 
 use cached::proc_macro::cached;
@@ -50,7 +49,6 @@ impl JWTProvider {
         );
         Self { config }
     }
-
 }
 
 #[async_trait::async_trait]
@@ -60,7 +58,6 @@ impl super::Provider for JWTProvider {
     }
 
     async fn authenticate(&self, token: &str) -> Result<User, String> {
-
         let certs = get_certs(self.config.cert_uri.to_string()).await?;
 
         let header = match decode_header(token) {
@@ -80,26 +77,30 @@ impl super::Provider for JWTProvider {
 
         let kid = header.kid.ok_or("missing kid in JWT header")?;
 
-        let jwk = jwks.find(&kid).ok_or(format!("failed to find certificate with matching kid {}", kid))?;
+        let jwk = jwks.find(&kid).ok_or(format!(
+            "failed to find certificate with matching kid {}",
+            kid
+        ))?;
 
         let decoding_key = DecodingKey::from_jwk(&jwk).expect("failed to create decoding key");
-        
+
         let validation = Validation::new(alg.parse::<Algorithm>().unwrap());
-        
+
         let decoded = match decode::<Claims>(token, &decoding_key, &validation) {
             Ok(decoded) => decoded,
             Err(e) => return Err(format!("failed to decode JWT: {}", e)),
         };
 
-
         let user = User::new(
             self.config.realm.to_string(),
             decoded.claims.sub,
-            decoded.claims.resource_access.and_then(|resource_access| resource_access.roles.get(&self.config.iam_realm).cloned()),
+            decoded.claims.resource_access.and_then(|resource_access| {
+                resource_access.roles.get(&self.config.iam_realm).cloned()
+            }),
             None,
             None,
-            None
-            );
+            None,
+        );
 
         Ok(user)
     }
@@ -111,17 +112,16 @@ impl super::Provider for JWTProvider {
 
 #[cached(time = 600, sync_writes = true)]
 pub async fn get_certs(cert_uri: String) -> Result<String, String> {
-
     let res = reqwest::get(&cert_uri)
         .await
         .map_err(|e| format!("failed to download certificates: {}", e))?;
-    
+
     if res.status().is_success() {
         let json: Value = res
             .json()
             .await
             .map_err(|e| format!("failed to download certificates: {}", e))?;
-        
+
         Ok(json.to_string())
     } else {
         Err(format!("failed to download certificates: {}", res.status()))
