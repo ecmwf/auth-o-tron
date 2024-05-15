@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 
+use chrono::Utc;
+use jsonwebtoken::encode;
+use jsonwebtoken::EncodingKey;
+use jsonwebtoken::Header;
 use serde::Deserialize;
 use serde::Serialize;
-use jsonwebtoken::{encode, Header, EncodingKey};
-use chrono::Utc;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct User {
@@ -40,15 +42,13 @@ impl User {
             username: username,
             roles: roles.unwrap_or_default(),
             attributes: attributes.unwrap_or_default(),
-            scopes: scopes
+            scopes: scopes,
         }
     }
 
     pub fn to_jwt(self: &User) -> String {
-
         #[derive(Serialize)]
         struct Claims<'a> {
-            
             // Registered Claims
             sub: &'a String,
             iss: &'a String,
@@ -64,7 +64,6 @@ impl User {
             // Private Claims
             realm: &'a String,
             attributes: &'a HashMap<String, String>,
-
         }
 
         let sub = format!("{}-{}", self.realm, self.username);
@@ -85,8 +84,8 @@ impl User {
         };
 
         let encoding_key = EncodingKey::from_secret("your-secret-key".as_ref());
-        let token = encode(&Header::default(), &claims, &encoding_key)
-            .expect("Failed to encode JWT");
+        let token =
+            encode(&Header::default(), &claims, &encoding_key).expect("Failed to encode JWT");
 
         token
     }
@@ -108,7 +107,6 @@ impl Token {
     }
 }
 
-
 // Test the User struct
 #[test]
 fn test_user_new() {
@@ -116,8 +114,18 @@ fn test_user_new() {
         "realm".to_string(),
         "username".to_string(),
         Some(vec!["role1".to_string(), "role2".to_string()]),
-        Some([("key1".to_string(), "value1".to_string())].iter().cloned().collect()),
-        Some([("service1".to_string(), vec!["scope1".to_string()])].iter().cloned().collect()),
+        Some(
+            [("key1".to_string(), "value1".to_string())]
+                .iter()
+                .cloned()
+                .collect(),
+        ),
+        Some(
+            [("service1".to_string(), vec!["scope1".to_string()])]
+                .iter()
+                .cloned()
+                .collect(),
+        ),
         Some(1),
     );
 
@@ -125,8 +133,22 @@ fn test_user_new() {
     assert_eq!(user.realm, "realm");
     assert_eq!(user.username, "username");
     assert_eq!(user.roles, vec!["role1".to_string(), "role2".to_string()]);
-    assert_eq!(user.attributes, [("key1".to_string(), "value1".to_string())].iter().cloned().collect());
-    assert_eq!(user.scopes, Some([("service1".to_string(), vec!["scope1".to_string()])].iter().cloned().collect()));
+    assert_eq!(
+        user.attributes,
+        [("key1".to_string(), "value1".to_string())]
+            .iter()
+            .cloned()
+            .collect()
+    );
+    assert_eq!(
+        user.scopes,
+        Some(
+            [("service1".to_string(), vec!["scope1".to_string()])]
+                .iter()
+                .cloned()
+                .collect()
+        )
+    );
 }
 
 #[test]
@@ -135,8 +157,18 @@ fn test_user_to_jwt() {
         "realm".to_string(),
         "username".to_string(),
         Some(vec!["role1".to_string(), "role2".to_string()]),
-        Some([("key1".to_string(), "value1".to_string())].iter().cloned().collect()),
-        Some([("service1".to_string(), vec!["scope1".to_string()])].iter().cloned().collect()),
+        Some(
+            [("key1".to_string(), "value1".to_string())]
+                .iter()
+                .cloned()
+                .collect(),
+        ),
+        Some(
+            [("service1".to_string(), vec!["scope1".to_string()])]
+                .iter()
+                .cloned()
+                .collect(),
+        ),
         Some(1),
     );
 

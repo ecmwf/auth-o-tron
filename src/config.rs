@@ -1,4 +1,5 @@
-use crate::auth::AuthHandlerConfig;
+use crate::auth::AugmenterConfig;
+use crate::auth::ProviderConfig;
 use crate::store::MongoDBConfig;
 use figment::providers::Format;
 use figment::providers::Yaml;
@@ -16,7 +17,8 @@ pub enum Config {
 pub struct ConfigV1 {
     pub store: TokenStoreConfig,
     pub services: Vec<ServiceConfig>,
-    pub providers: Vec<AuthHandlerConfig>,
+    pub providers: Vec<ProviderConfig>,
+    pub augmenters: Vec<AugmenterConfig>,
     pub bind_address: String,
 }
 
@@ -62,5 +64,3 @@ pub enum TokenStoreConfig {
     #[serde(rename = "mongo")]
     MongoDB(MongoDBConfig),
 }
-
-

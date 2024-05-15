@@ -12,9 +12,9 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::{self};
-use uuid::Uuid;
 use axum::routing::get;
 use axum::Router;
+use uuid::Uuid;
 
 use crate::auth::Auth;
 use crate::http_helpers::HTTPError;
@@ -29,8 +29,6 @@ use inline_colorization::*;
 
 async fn authenticate(user: User) -> Result<impl IntoResponse, HTTPError> {
 
-    println!("✅ Authenticated user: {:?}", user);
-
     let jwt = user.to_jwt();
 
     let response = response::Response::builder()
@@ -40,7 +38,6 @@ async fn authenticate(user: User) -> Result<impl IntoResponse, HTTPError> {
         .unwrap();
 
     Ok(response)
-
 }
 
 // GET /token
@@ -49,7 +46,6 @@ async fn create_token(
     user: User,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, HTTPError> {
-    println!("Authenticated user: {:?}", user.username);
     let token = Uuid::new_v4().to_string();
     state.store.add_token(&token, &user, 3600).await.unwrap();
     Ok((StatusCode::OK, token))
@@ -75,11 +71,14 @@ async fn main() {
 
     let store = store::create_store(&config.store);
 
-    let auth = Arc::new(Auth::new(config.providers));
+    let auth = Arc::new(Auth::new(config.providers, config.augmenters));
 
     let state = AppState { auth, store };
 
-    println!("{color_magenta}{style_bold}Starting server on {}...{color_reset}{style_reset}", config.bind_address);
+    println!(
+        "{color_magenta}{style_bold}Starting server on {}...{color_reset}{style_reset}",
+        config.bind_address
+    );
 
     let app = Router::new()
         .route("/authenticate", get(authenticate))
@@ -87,6 +86,13 @@ async fn main() {
         .route("/health", get(health_check))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(config.bind_address).await.unwrap();
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(config.bind_address)
+        .await
+        .unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }
