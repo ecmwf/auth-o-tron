@@ -64,7 +64,7 @@ pub struct Auth {
     pub augmenters: Vec<Box<dyn Augmenter>>,
 }
 
-pub fn create_auth_provider(config: ProviderConfig) -> Box<dyn Provider> {
+pub fn create_auth_provider(config: &ProviderConfig) -> Box<dyn Provider> {
     match config {
         ProviderConfig::EcmwfApiAuthConfig(config) => {
             let provider = EcmwfApiProvider::new(config);
@@ -81,7 +81,7 @@ pub fn create_auth_provider(config: ProviderConfig) -> Box<dyn Provider> {
     }
 }
 
-pub fn create_auth_augmenter(config: AugmenterConfig) -> Box<dyn Augmenter> {
+pub fn create_auth_augmenter(config: &AugmenterConfig) -> Box<dyn Augmenter> {
     match config {
         AugmenterConfig::LDAPAugmenterConfig(config) => {
             let augmenter = ldap_augmenter::LDAPAugmenter::new(config);
@@ -92,8 +92,8 @@ pub fn create_auth_augmenter(config: AugmenterConfig) -> Box<dyn Augmenter> {
 
 impl Auth {
     pub fn new(
-        provider_config: Vec<ProviderConfig>,
-        augmenter_config: Vec<AugmenterConfig>,
+        provider_config: &Vec<ProviderConfig>,
+        augmenter_config: &Vec<AugmenterConfig>,
     ) -> Self {
         println!("{color_magenta}{style_bold}Creating auth providers...{color_reset}{style_reset}");
         let providers = provider_config

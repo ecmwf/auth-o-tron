@@ -27,8 +27,9 @@ use inline_colorization::*;
 
 // GET /authenticate
 
-async fn authenticate(user: User) -> Result<impl IntoResponse, HTTPError> {
-    let jwt = user.to_jwt();
+async fn authenticate(user: User, State(state): State<AppState>) -> Result<impl IntoResponse, HTTPError> {
+
+    let jwt = user.to_jwt(&state.config.jwt);
 
     let response = response::Response::builder()
         .status(StatusCode::OK)
@@ -46,7 +47,7 @@ async fn create_token(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, HTTPError> {
     let token = Uuid::new_v4().to_string();
-    state.store.add_token(&token, &user, 3600).await.unwrap();
+    // state.store.add_token(&token, &user, 3600).await.unwrap();
     Ok((StatusCode::OK, token))
 }
 
@@ -60,24 +61,27 @@ async fn health_check() -> impl IntoResponse {
 
 #[derive(Clone)]
 struct AppState {
+    config: Arc<config::ConfigV1>,
     auth: Arc<Auth>,
     store: Arc<dyn Store>,
 }
 
 #[tokio::main]
 async fn main() {
-    let config = config::load_config();
-
-    let store = store::create_store(&config.store);
-
-    let auth = Arc::new(Auth::new(config.providers, config.augmenters));
-
-    let state = AppState { auth, store };
+    
+    let config = Arc::new(config::load_config());
+    
+    let store = store::create_store(&config.store).await;
+    
+    let auth = Arc::new(Auth::new(&config.providers, &config.augmenters));
 
     println!(
         "{color_magenta}{style_bold}Starting server on {}...{color_reset}{style_reset}",
-        config.bind_address
+        &config.bind_address
     );
+
+    let state = AppState { config: config.clone(), auth, store };
+
 
     let app = Router::new()
         .route("/authenticate", get(authenticate))
@@ -85,7 +89,7 @@ async fn main() {
         .route("/health", get(health_check))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(config.bind_address)
+    let listener = tokio::net::TcpListener::bind(&config.bind_address)
         .await
         .unwrap();
     axum::serve(

@@ -20,6 +20,7 @@ pub struct ConfigV1 {
     pub providers: Vec<ProviderConfig>,
     pub augmenters: Vec<AugmenterConfig>,
     pub bind_address: String,
+    pub jwt: JWTConfig,
 }
 
 pub fn load_config() -> ConfigV1 {
@@ -49,7 +50,11 @@ pub fn load_config() -> ConfigV1 {
 
 #[derive(Deserialize, Debug)]
 pub struct JWTConfig {
-    pub issuer_name: String,
+    pub iss: String,
+    pub aud: Option<String>,
+    pub exp: i64,
+    pub secret: String,
+    
 }
 
 #[derive(Deserialize, Debug)]

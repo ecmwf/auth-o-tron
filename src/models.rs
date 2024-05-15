@@ -7,6 +7,8 @@ use jsonwebtoken::Header;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::config::JWTConfig;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct User {
     pub version: i32,
@@ -20,7 +22,7 @@ pub struct User {
 type Service = String;
 type Scopes = Vec<String>;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Token {
     pub version: i32,
     pub token_string: String,
@@ -46,13 +48,13 @@ impl User {
         }
     }
 
-    pub fn to_jwt(self: &User) -> String {
+    pub fn to_jwt(self: &User, jwtconfig: &JWTConfig) -> String {
         #[derive(Serialize)]
         struct Claims<'a> {
             // Registered Claims
             sub: &'a String,
             iss: &'a String,
-            aud: &'a String,
+            aud: &'a Option<String>,
             exp: i64,
             iat: i64,
 
@@ -72,9 +74,9 @@ impl User {
 
         let claims = Claims {
             sub: &sub,
-            iss: &"https://example.com".to_string(),
-            aud: &"https://example.com".to_string(),
-            exp: now + 360,
+            iss: &jwtconfig.iss,
+            aud: &jwtconfig.aud,
+            exp: now + jwtconfig.exp,
             iat: now,
             roles: &self.roles,
             username: &self.username,
@@ -83,7 +85,7 @@ impl User {
             attributes: &self.attributes,
         };
 
-        let encoding_key = EncodingKey::from_secret("your-secret-key".as_ref());
+        let encoding_key = EncodingKey::from_secret(jwtconfig.secret.as_ref());
         let token =
             encode(&Header::default(), &claims, &encoding_key).expect("Failed to encode JWT");
 

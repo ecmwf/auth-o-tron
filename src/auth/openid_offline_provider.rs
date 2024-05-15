@@ -25,16 +25,16 @@ pub struct OpenIDOfflineProvider {
 }
 
 impl OpenIDOfflineProvider {
-    pub fn new(config: OpenIDOfflineProviderConfig) -> Self {
+    pub fn new(config: &OpenIDOfflineProviderConfig) -> Self {
         // nested JWT auth will do the validation on the final access token
-        let jwt_auth = JWTProvider::new(JWTAuthConfig {
+        let jwt_auth = JWTProvider::new(&JWTAuthConfig {
             cert_uri: config.cert_uri.clone(),
             realm: config.iam_realm.clone(),
             name: config.name.clone(),
             iam_realm: config.iam_realm.clone(),
         });
 
-        Self { config, jwt_auth }
+        Self { config: config.clone(), jwt_auth }
     }
 }
 

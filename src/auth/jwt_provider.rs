@@ -16,7 +16,7 @@ use jsonwebtoken::Validation;
 
 // --- Config
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct JWTAuthConfig {
     pub cert_uri: String,
     pub realm: String,
@@ -42,12 +42,12 @@ struct ResourceAccess {
 }
 
 impl JWTProvider {
-    pub fn new(config: JWTAuthConfig) -> Self {
+    pub fn new(config: &JWTAuthConfig) -> Self {
         println!(
             "  🔑 Creating {style_bold}{color_cyan}JWTAuth{style_reset}{color_reset} for realm {}",
             config.realm
         );
-        Self { config }
+        Self { config: config.clone() }
     }
 }
 

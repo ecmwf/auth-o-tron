@@ -7,7 +7,7 @@ use inline_colorization::*;
 
 // --- Config
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct EcmwfApiProviderConfig {
     pub uri: String,
     pub realm: String,
@@ -21,9 +21,9 @@ pub struct EcmwfApiProvider {
 }
 
 impl EcmwfApiProvider {
-    pub fn new(config: EcmwfApiProviderConfig) -> Self {
+    pub fn new(config: &EcmwfApiProviderConfig) -> Self {
         println!("  🔑 Creating {style_bold}{color_cyan}EcmwfApiAuth{style_reset}{color_reset} for realm {}", config.realm);
-        Self { config }
+        Self { config: config.clone() }
     }
 }
 
