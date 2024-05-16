@@ -34,7 +34,10 @@ impl OpenIDOfflineProvider {
             iam_realm: config.iam_realm.clone(),
         });
 
-        Self { config: config.clone(), jwt_auth }
+        Self {
+            config: config.clone(),
+            jwt_auth,
+        }
     }
 }
 

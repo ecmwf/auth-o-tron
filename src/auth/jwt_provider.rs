@@ -47,7 +47,9 @@ impl JWTProvider {
             "  🔑 Creating {style_bold}{color_cyan}JWTAuth{style_reset}{color_reset} for realm {}",
             config.realm
         );
-        Self { config: config.clone() }
+        Self {
+            config: config.clone(),
+        }
     }
 }
 

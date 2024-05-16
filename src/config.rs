@@ -21,6 +21,7 @@ pub struct ConfigV1 {
     pub augmenters: Vec<AugmenterConfig>,
     pub bind_address: String,
     pub jwt: JWTConfig,
+    pub include_legacy_headers: Option<bool>,
 }
 
 pub fn load_config() -> ConfigV1 {
@@ -54,7 +55,6 @@ pub struct JWTConfig {
     pub aud: Option<String>,
     pub exp: i64,
     pub secret: String,
-    
 }
 
 #[derive(Deserialize, Debug)]

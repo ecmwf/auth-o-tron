@@ -23,7 +23,9 @@ pub struct EcmwfApiProvider {
 impl EcmwfApiProvider {
     pub fn new(config: &EcmwfApiProviderConfig) -> Self {
         println!("  🔑 Creating {style_bold}{color_cyan}EcmwfApiAuth{style_reset}{color_reset} for realm {}", config.realm);
-        Self { config: config.clone() }
+        Self {
+            config: config.clone(),
+        }
     }
 }
 

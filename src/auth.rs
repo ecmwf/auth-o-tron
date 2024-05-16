@@ -3,6 +3,10 @@ pub mod jwt_provider;
 pub mod ldap_augmenter;
 pub mod openid_offline_provider;
 
+use std::iter::once;
+use std::ops::Deref;
+use std::sync::Arc;
+
 use serde::Deserialize;
 
 use self::ecmwfapi_provider::EcmwfApiProvider;
@@ -12,6 +16,7 @@ use self::jwt_provider::JWTProvider;
 use self::openid_offline_provider::OpenIDOfflineProvider;
 use self::openid_offline_provider::OpenIDOfflineProviderConfig;
 use crate::models::User;
+use crate::store::Store;
 use futures::future::join_all;
 
 use inline_colorization::*;
@@ -62,6 +67,7 @@ pub trait Augmenter: Send + Sync {
 pub struct Auth {
     pub providers: Vec<Box<dyn Provider>>,
     pub augmenters: Vec<Box<dyn Augmenter>>,
+    token_store: Arc<dyn Store>,
 }
 
 pub fn create_auth_provider(config: &ProviderConfig) -> Box<dyn Provider> {
@@ -92,24 +98,33 @@ pub fn create_auth_augmenter(config: &AugmenterConfig) -> Box<dyn Augmenter> {
 
 impl Auth {
     pub fn new(
-        provider_config: &Vec<ProviderConfig>,
-        augmenter_config: &Vec<AugmenterConfig>,
+        provider_config: &[ProviderConfig],
+        augmenter_config: &[AugmenterConfig],
+        token_store: Arc<dyn Store>,
     ) -> Self {
         println!("{color_magenta}{style_bold}Creating auth providers...{color_reset}{style_reset}");
+
         let providers = provider_config
             .into_iter()
             .map(create_auth_provider)
+            .chain(std::iter::once(
+                Box::new(token_store.clone()) as Box<dyn Provider>
+            ))
             .collect();
+
         println!(
             "{color_magenta}{style_bold}Creating auth augmenters...{color_reset}{style_reset}"
         );
+
         let augmenters = augmenter_config
             .into_iter()
             .map(create_auth_augmenter)
             .collect();
+
         Auth {
             providers,
             augmenters,
+            token_store: token_store,
         }
     }
 
@@ -149,6 +164,7 @@ impl Auth {
             .iter()
             .map(|provider| provider.authenticate(auth_credentials))
             .collect();
+
         let results = join_all(futures).await;
 
         for (provider, result) in valid_providers.iter().zip(results) {

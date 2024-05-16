@@ -97,7 +97,6 @@ impl User {
 impl Token {
     pub fn new(
         token_string: String,
-        user_id: i32,
         scopes: HashMap<Service, Scopes>,
         version: Option<i32>,
     ) -> Self {

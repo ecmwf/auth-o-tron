@@ -28,7 +28,9 @@ pub struct LDAPAugmenter {
 impl LDAPAugmenter {
     pub fn new(config: &LDAPAugmenterConfig) -> LDAPAugmenter {
         println!("  🏷️  Creating {style_bold}{color_cyan}LDAPAugmenter{style_reset}{color_reset} for realm {}", config.realm);
-        LDAPAugmenter { config: config.clone() }
+        LDAPAugmenter {
+            config: config.clone(),
+        }
     }
 }
 
