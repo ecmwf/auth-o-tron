@@ -39,7 +39,7 @@ async fn authenticate(
     user: User,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, HTTPError> {
-    
+
     let jwt = user.to_jwt(&state.config.jwt);
 
     let mut response_builder = axum::http::response::Response::builder()
@@ -118,7 +118,7 @@ async fn get_tokens(
     Ok((StatusCode::OK, Json(GetTokensResponse { tokens })))
 }
 
-// DELETE /token
+// DELETE /token/<token>
 
 #[derive(Serialize, Deserialize)]
 struct DeleteTokenRequest {
