@@ -7,8 +7,8 @@
 Effortless authentication and authorization for web APIs.
 
 * Easily configure HTTP APIs to use a variety of authentication providers.
-* Serves a simple portal for creating and managing scoped API tokens.
-* Integrate into your code or simply use the service as an auth proxy.
+* [TODO] Serves a simple portal for creating and managing scoped API tokens.
+* Make requests to Auth-O-Tron from your service, or simply use Auth-O-Tron as an ingress auth proxy.
 
 
 ## Why do I need Auth-O-Tron?
@@ -22,7 +22,7 @@ Auth-O-Tron must be deployed as a standalone service, with ingress-level auth re
 
 Auth-O-Tron can be configured to use a variety of authentication providers simultaneously and cumulatively. 
 
-The Auth-O-Tron service can serve a web portal to provide an interactive page for your users to generate access tokens. Users will log into the portal with the same credentials they use to log into your API, and will be able to generate access tokens with different scopes, which they can then use to access your API.
+[TODO] The Auth-O-Tron service can serve a web portal to provide an interactive page for your users to generate access tokens. Users will log into the portal with the same credentials they use to log into your API, and will be able to generate access tokens with different scopes, which they can then use to access your API.
 
 
 ## What are roles, attributes, and scopes?
@@ -33,9 +33,9 @@ Auth-O-Tron uses the following terminology:
 
 * **Attributes**: An attribute is metadata associated with a user. Attributes are assigned to users by authentication providers. For example, a user may have the attribute `department:engineering` assigned by an authentication provider. Users may have multiple attributes. You can protect API endpoints by requiring that users have certain attributes, or attribute values.
 
-* **Scopes**: A scope is a property of an access token. When a user generates an access token, they can assign scopes to that token to limit its use. Endpoints can be associated with a scope, and only tokens with that scope will be allowed to access those endpoints. For example, a user may generate an access token with the scope `read:users`, and then use that token to access endpoints that require the `read:users` scope. Users may assign multiple scopes to a token. A user authenticated directly (i.e. not through an access token) is treated as having all available scopes.
+* **Scopes**: [TODO] A scope is a property of an access token. When a user generates an access token, they can assign scopes to that token to limit its use. Endpoints can be associated with a scope, and only tokens with that scope will be allowed to access those endpoints. For example, a user may generate an access token with the scope `read:users`, and then use that token to access endpoints that require the `read:users` scope. Users may assign multiple scopes to a token. A user authenticated directly (i.e. not through an access token) is treated as having all available scopes.
 
-It is important to understand that **roles** and **attributes** are used by a service to allow or restrict API access to different users. **Scopes** are set by the user, on a token, to limit the capabilities of particular access tokens, which can make them more secure.
+It is important to understand that **roles** and **attributes** are used by a service to allow or restrict API access to different users. [TODO] **Scopes** are set by the user, on a token, to limit the capabilities of particular access tokens, which can make them more secure.
 
 ## FAQ
 
