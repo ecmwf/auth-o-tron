@@ -7,8 +7,8 @@
 Effortless authentication and authorization for web APIs.
 
 * Easily configure HTTP APIs to use a variety of authentication providers.
-* [TODO] Serves a simple portal for creating and managing scoped API tokens.
 * Make requests to Auth-O-Tron from your service, or simply use Auth-O-Tron as an ingress auth proxy.
+* [TODO] Serves a simple portal for creating and managing scoped API tokens.
 
 
 ## Why do I need Auth-O-Tron?
