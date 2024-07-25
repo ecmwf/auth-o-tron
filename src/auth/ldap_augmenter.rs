@@ -16,7 +16,7 @@ use super::Augmenter;
 pub struct LDAPAugmenterConfig {
     pub name: String,
     pub realm: String,
-    pub url: String,
+    pub uri: String,
     pub search_base: String,
     pub filter: Option<String>,
     pub ldap_user: String,
@@ -51,7 +51,7 @@ async fn retrieve_ldap_user_roles(
     config: LDAPAugmenterConfig,
     uid: String,
 ) -> Result<Vec<String>, String> {
-    let (conn, mut ldap) = LdapConnAsync::new(&config.url)
+    let (conn, mut ldap) = LdapConnAsync::new(&config.uri)
         .await
         .map_err(|e| e.to_string())?;
     ldap3::drive!(conn);

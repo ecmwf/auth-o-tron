@@ -10,7 +10,7 @@ use inline_colorization::*;
 
 #[derive(Deserialize, Serialize, Debug, JsonSchema, Clone)]
 pub struct EcmwfApiProviderConfig {
-    pub uri: String,
+pub uri: String,
     pub realm: String,
     pub name: String,
 }
