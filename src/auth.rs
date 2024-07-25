@@ -7,7 +7,9 @@ use std::iter::once;
 use std::ops::Deref;
 use std::sync::Arc;
 
+use schemars::JsonSchema;
 use serde::Deserialize;
+use serde::Serialize;
 
 use self::ecmwfapi_provider::EcmwfApiProvider;
 use self::ecmwfapi_provider::EcmwfApiProviderConfig;
@@ -25,7 +27,7 @@ use self::ldap_augmenter::LDAPAugmenterConfig;
 
 // --- Config
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, JsonSchema, Debug)]
 #[serde(tag = "type")]
 pub enum ProviderConfig {
     #[serde(rename = "ecmwf-api")]
@@ -38,7 +40,7 @@ pub enum ProviderConfig {
     OpenIDOfflineAuthConfig(OpenIDOfflineProviderConfig),
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, JsonSchema, Debug)]
 #[serde(tag = "type")]
 pub enum AugmenterConfig {
     #[serde(rename = "ldap")]

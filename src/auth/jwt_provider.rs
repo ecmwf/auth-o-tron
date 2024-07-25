@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use cached::proc_macro::cached;
 use jsonwebtoken::jwk::JwkSet;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -16,7 +17,7 @@ use jsonwebtoken::Validation;
 
 // --- Config
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, JsonSchema, Debug, Clone)]
 pub struct JWTAuthConfig {
     pub cert_uri: String,
     pub realm: String,

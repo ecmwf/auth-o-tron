@@ -13,6 +13,7 @@ use mongodb::options::IndexOptions;
 use mongodb::Client;
 use mongodb::Collection;
 use mongodb::IndexModel;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -58,7 +59,7 @@ impl Provider for Arc<dyn Store> {
 
 // --- MongoDB Store
 
-#[derive(serde::Deserialize, serde::Serialize, Debug)]
+#[derive(serde::Deserialize, serde::Serialize, JsonSchema, Debug)]
 pub struct MongoDBConfig {
     pub uri: String,
     pub database: String,

@@ -4,13 +4,15 @@ use inline_colorization::*;
 use ldap3::LdapConnAsync;
 use ldap3::Scope;
 use ldap3::SearchEntry;
+use schemars::JsonSchema;
 use serde::Deserialize;
+use serde::Serialize;
 
 use crate::models::User;
 
 use super::Augmenter;
 
-#[derive(Deserialize, Debug, Hash, PartialEq, Eq, Clone)]
+#[derive(Deserialize, Serialize, JsonSchema, Debug, Hash, PartialEq, Eq, Clone)]
 pub struct LDAPAugmenterConfig {
     pub name: String,
     pub realm: String,

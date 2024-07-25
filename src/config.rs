@@ -4,16 +4,19 @@ use crate::store::MongoDBConfig;
 use figment::providers::Format;
 use figment::providers::Yaml;
 use figment::Figment;
+use serde::Serialize;
 use serde::Deserialize;
+use schemars::schema_for;
+use schemars::JsonSchema;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "version")]
 pub enum Config {
     #[serde(rename = "1.0.0")]
     ConfigV1(ConfigV1),
 }
 
-#[derive(serde::Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, JsonSchema)]
 pub struct ConfigV1 {
     pub store: TokenStoreConfig,
     pub services: Vec<ServiceConfig>,
@@ -47,9 +50,14 @@ pub fn load_config() -> ConfigV1 {
     // handle configuration migration between versions here when necessary
 }
 
+pub fn print_schema() -> () {
+    let schema = schema_for!(Config);
+    println!("{}", serde_json::to_string_pretty(&schema).unwrap());
+}
+
 // --- Subconfigs
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, JsonSchema, Debug)]
 pub struct JWTConfig {
     pub iss: String,
     pub aud: Option<String>,
@@ -57,13 +65,13 @@ pub struct JWTConfig {
     pub secret: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, JsonSchema, Debug)]
 pub struct ServiceConfig {
     pub name: String,
     pub scopes: Vec<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, JsonSchema, Debug)]
 #[serde(tag = "type")]
 pub enum TokenStoreConfig {
     #[serde(rename = "mongo")]

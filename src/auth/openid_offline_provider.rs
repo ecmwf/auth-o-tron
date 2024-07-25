@@ -1,5 +1,7 @@
 use cached::proc_macro::cached;
+use schemars::JsonSchema;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::models::User;
@@ -8,7 +10,7 @@ use super::jwt_provider::JWTAuthConfig;
 use super::jwt_provider::JWTProvider;
 use super::Provider;
 
-#[derive(Deserialize, Debug, Hash, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Debug, Serialize, JsonSchema, Hash, Clone, PartialEq, Eq)]
 pub struct OpenIDOfflineProviderConfig {
     pub name: String,
     pub cert_uri: String,

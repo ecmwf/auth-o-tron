@@ -1,4 +1,5 @@
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::User;
@@ -7,7 +8,7 @@ use inline_colorization::*;
 
 // --- Config
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, JsonSchema, Clone)]
 pub struct EcmwfApiProviderConfig {
     pub uri: String,
     pub realm: String,

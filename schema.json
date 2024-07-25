@@ -1,0 +1,281 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Config",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "augmenters",
+        "bind_address",
+        "jwt",
+        "providers",
+        "services",
+        "store",
+        "version"
+      ],
+      "properties": {
+        "augmenters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/AugmenterConfig"
+          }
+        },
+        "bind_address": {
+          "type": "string"
+        },
+        "include_legacy_headers": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "jwt": {
+          "$ref": "#/definitions/JWTConfig"
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ProviderConfig"
+          }
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ServiceConfig"
+          }
+        },
+        "store": {
+          "$ref": "#/definitions/TokenStoreConfig"
+        },
+        "version": {
+          "type": "string",
+          "enum": [
+            "1.0.0"
+          ]
+        }
+      }
+    }
+  ],
+  "definitions": {
+    "AugmenterConfig": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "ldap_password",
+            "ldap_user",
+            "name",
+            "realm",
+            "search_base",
+            "type",
+            "url"
+          ],
+          "properties": {
+            "filter": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ldap_password": {
+              "type": "string"
+            },
+            "ldap_user": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "realm": {
+              "type": "string"
+            },
+            "search_base": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "ldap"
+              ]
+            },
+            "url": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "JWTConfig": {
+      "type": "object",
+      "required": [
+        "exp",
+        "iss",
+        "secret"
+      ],
+      "properties": {
+        "aud": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "exp": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "iss": {
+          "type": "string"
+        },
+        "secret": {
+          "type": "string"
+        }
+      }
+    },
+    "ProviderConfig": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "name",
+            "realm",
+            "type",
+            "uri"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "realm": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "ecmwf-api"
+              ]
+            },
+            "uri": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "cert_uri",
+            "iam_realm",
+            "name",
+            "realm",
+            "type"
+          ],
+          "properties": {
+            "cert_uri": {
+              "type": "string"
+            },
+            "iam_realm": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "realm": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "jwt"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "cert_uri",
+            "iam_realm",
+            "iam_url",
+            "name",
+            "private_client_id",
+            "private_client_secret",
+            "public_client_id",
+            "type"
+          ],
+          "properties": {
+            "cert_uri": {
+              "type": "string"
+            },
+            "iam_realm": {
+              "type": "string"
+            },
+            "iam_url": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "private_client_id": {
+              "type": "string"
+            },
+            "private_client_secret": {
+              "type": "string"
+            },
+            "public_client_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "openid-offline"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ServiceConfig": {
+      "type": "object",
+      "required": [
+        "name",
+        "scopes"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "TokenStoreConfig": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "database",
+            "type",
+            "uri"
+          ],
+          "properties": {
+            "database": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "mongo"
+              ]
+            },
+            "uri": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

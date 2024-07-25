@@ -7,6 +7,7 @@ mod store;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::env;
 
 use axum::body::Body;
 use axum::extract::Path;
@@ -155,6 +156,15 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
+
+    let args: Vec<String> = env::args().collect();
+
+    if args.contains(&"--schema".to_string()) {
+        config::print_schema();
+        return;
+    }
+
+
     let config = Arc::new(config::load_config());
 
     let store = store::create_store(&config.store).await;
