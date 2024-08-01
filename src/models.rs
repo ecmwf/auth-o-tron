@@ -173,7 +173,14 @@ fn test_user_to_jwt() {
         Some(1),
     );
 
-    let jwt = user.to_jwt();
+    let jwtconfig = JWTConfig {
+        iss: "issuer".to_string(),
+        aud: Some("audience".to_string()),
+        exp: 3600,
+        secret: "secret".to_string(),
+    };
+
+    let jwt = user.to_jwt(&jwtconfig);
     assert_eq!(jwt.is_empty(), false);
     println!("JWT: {}", jwt)
 }
