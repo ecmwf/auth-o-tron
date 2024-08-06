@@ -35,11 +35,18 @@ pub struct JWTProvider {
 struct Claims {
     sub: String,
     resource_access: Option<ResourceAccess>,
+    scope: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ResourceAccess {
-    roles: HashMap<String, Vec<String>>,
+    #[serde(rename = "polytope-api-public")]
+    polytope_api_public: PolytopeAPIPublic,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PolytopeAPIPublic {
+    roles: Vec<String>,
 }
 
 impl JWTProvider {
@@ -93,15 +100,18 @@ impl super::Provider for JWTProvider {
             Ok(decoded) => decoded,
             Err(e) => return Err(format!("failed to decode JWT: {}", e)),
         };
-
+        // collect scopes into vec of Strings
+        let scopes_list = decoded.claims.scope.split_whitespace().map(|s| s.to_string()).collect::<Vec<String>>();
+        
+        // let scopes = HashMap
         let user = User::new(
             self.config.realm.to_string(),
             decoded.claims.sub,
             decoded.claims.resource_access.and_then(|resource_access| {
-                resource_access.roles.get(&self.config.iam_realm).cloned()
+                Some(resource_access.polytope_api_public.roles)
             }),
             None,
-            None,
+            Some(HashMap::from([(self.config.name.clone(),scopes_list)])),
             None,
         );
 

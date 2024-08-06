@@ -21,6 +21,7 @@ pub struct ConfigV1 {
     pub store: TokenStoreConfig,
     pub services: Vec<ServiceConfig>,
     pub providers: Vec<ProviderConfig>,
+    #[serde(default)]
     pub augmenters: Vec<AugmenterConfig>,
     pub bind_address: String,
     pub jwt: JWTConfig,
