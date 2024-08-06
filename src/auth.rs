@@ -151,6 +151,11 @@ impl Auth {
             auth_type, ip
         );
 
+        self.providers.iter().for_each(|provider| {
+            println!("  🛡️ {style_bold}{}{style_reset} provider", provider.get_type());
+        });
+        // print number of providers
+        println!("  🛡️ {style_bold}{}{style_reset} providers", self.providers.len());
         let valid_providers: Vec<&Box<dyn Provider>> = self
             .providers
             .iter()
