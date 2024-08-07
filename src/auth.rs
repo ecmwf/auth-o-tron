@@ -3,8 +3,6 @@ pub mod jwt_provider;
 pub mod ldap_augmenter;
 pub mod openid_offline_provider;
 
-use std::iter::once;
-use std::ops::Deref;
 use std::sync::Arc;
 
 use schemars::JsonSchema;
@@ -59,6 +57,7 @@ pub trait Provider: Send + Sync {
 #[async_trait::async_trait]
 pub trait Augmenter: Send + Sync {
     fn get_name(&self) -> &str;
+    #[allow(unused)]
     fn get_type(&self) -> &str;
     fn get_realm(&self) -> &str;
     async fn augment(&self, user: &mut User) -> Result<(), String>;
@@ -69,6 +68,7 @@ pub trait Augmenter: Send + Sync {
 pub struct Auth {
     pub providers: Vec<Box<dyn Provider>>,
     pub augmenters: Vec<Box<dyn Augmenter>>,
+    #[allow(dead_code)]
     token_store: Arc<dyn Store>,
 }
 
@@ -151,11 +151,6 @@ impl Auth {
             auth_type, ip
         );
 
-        self.providers.iter().for_each(|provider| {
-            println!("  🛡️ {style_bold}{}{style_reset} provider", provider.get_type());
-        });
-        // print number of providers
-        println!("  🛡️ {style_bold}{}{style_reset} providers", self.providers.len());
         let valid_providers: Vec<&Box<dyn Provider>> = self
             .providers
             .iter()

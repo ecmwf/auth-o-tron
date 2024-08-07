@@ -34,18 +34,14 @@ pub struct JWTProvider {
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sub: String,
-    resource_access: Option<ResourceAccess>,
+    resource_access: Option<HashMap<String, RolesContainer>>,
     scope: String,
+    realm_access: Option<RolesContainer>,
+    entitlements: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ResourceAccess {
-    #[serde(rename = "polytope-api-public")]
-    polytope_api_public: PolytopeAPIPublic,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct PolytopeAPIPublic {
+struct RolesContainer {
     roles: Vec<String>,
 }
 
@@ -94,24 +90,40 @@ impl super::Provider for JWTProvider {
 
         let decoding_key = DecodingKey::from_jwk(&jwk).expect("failed to create decoding key");
 
-        let validation = Validation::new(alg.parse::<Algorithm>().unwrap());
+        let mut validation = Validation::new(alg.parse::<Algorithm>().unwrap());
 
+        validation.validate_aud = false;
         let decoded = match decode::<Claims>(token, &decoding_key, &validation) {
             Ok(decoded) => decoded,
             Err(e) => return Err(format!("failed to decode JWT: {}", e)),
         };
-        // collect scopes into vec of Strings
-        let scopes_list = decoded.claims.scope.split_whitespace().map(|s| s.to_string()).collect::<Vec<String>>();
-        
-        // let scopes = HashMap
+
+        let mut roles = decoded
+            .claims
+            .realm_access
+            .and_then(|realm_access| Some(realm_access.roles))
+            .unwrap_or_default();
+
+        roles.extend(decoded.claims.entitlements.unwrap_or_default());
+        if let Some(resource_access) = decoded.claims.resource_access {
+            for (_, roles_container) in resource_access {
+                roles.extend(roles_container.roles);
+            }
+        }
         let user = User::new(
             self.config.realm.to_string(),
             decoded.claims.sub,
-            decoded.claims.resource_access.and_then(|resource_access| {
-                Some(resource_access.polytope_api_public.roles)
-            }),
+            Some(roles),
             None,
-            Some(HashMap::from([(self.config.name.clone(),scopes_list)])),
+            Some(HashMap::from([(
+                self.config.name.clone(),
+                decoded
+                    .claims
+                    .scope
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<String>>(),
+            )])),
             None,
         );
 

@@ -64,8 +64,11 @@ async fn check_offline_access_token(
         .json::<Value>()
         .await
         .map_err(|e| e.to_string())?;
-
-    Ok(resp["active"].as_bool().unwrap_or(false) && resp["token_type"] == "Offline")
+    Ok(resp["active"].as_bool().unwrap_or(false)
+        && resp["scope"]
+            .as_str()
+            .unwrap_or("")
+            .contains("offline_access"))
 }
 
 #[cached(time = 10, sync_writes = true)]
@@ -85,16 +88,18 @@ async fn get_access_token(
     );
 
     let client = reqwest::Client::new();
-    let resp = client
+    let resp: reqwest::Response = client
         .post(&token_endpoint)
+        .basic_auth(config.private_client_id, Some(config.private_client_secret))
         .form(&refresh_data)
         .send()
         .await
         .map_err(|e| e.to_string())?;
 
-    let json_value = resp.json::<Value>().await.map_err(|e| e.to_string())?;
-
-    let access_token = json_value
+    let access_token = resp
+        .json::<Value>()
+        .await
+        .map_err(|e| e.to_string())?
         .get("access_token")
         .and_then(|token| token.as_str())
         .ok_or_else(|| "failed to retrieve access token")?
