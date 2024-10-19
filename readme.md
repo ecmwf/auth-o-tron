@@ -13,7 +13,7 @@ Effortless authentication and authorization for web APIs.
 
 ## Why do I need Auth-O-Tron?
 
-Modern authentication providers are great for securely authenticating and authorizing interactive users in a browser. However, they often lack sensible flows for access to web APIs, especially in a machine-to-machine environment. Auth-O-Tron is a simple service that sits between your API and your authentication providers, allowing you to easily configure your API to use a variety of authentication providers, and allowing users to generate scoped access tokens for long-lived, browserless API access.
+Modern authentication providers are great for securely authenticating and authorizing interactive users in a browser. However, they often lack sensible flows for access to web APIs, especially in a machine-to-machine environment. Auth-O-Tron is a simple service that sits between your API and your authentication providers, allowing you to easily configure your API to use a variety of authentication providers, and [TODO] allowing users to generate scoped access tokens for long-lived, browserless API access.
 
 
 ## How do I use Auth-O-Tron?
@@ -53,7 +53,7 @@ Auth-O-Tron does pass on short-lived JWT tokens to the backend services, so that
 
 ### Why not just use OAuth2?
 
-OAuth2 is a great protocol for interactive users, but it is not well-suited for machine-to-machine communication. OAuth2 tokens are short-lived, and require a refresh token to be exchanged for a new token. This is not a good fit for machine to machine access.
+OAuth2 is a great protocol for interactive users, but it is not well-suited for machine-to-machine communication. OAuth2 tokens are short-lived, and require a refresh token to be exchanged for a new token. This is not a good fit for machine to machine access. The offline_access token flow is closer to our needs, but it is still a complex flow for every application to manage -- auth-o-tron helps by managing this outside the application.
 
 
 
