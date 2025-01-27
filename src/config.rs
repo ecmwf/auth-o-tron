@@ -4,10 +4,10 @@ use crate::store::MongoDBConfig;
 use figment::providers::Format;
 use figment::providers::Yaml;
 use figment::Figment;
-use serde::Serialize;
-use serde::Deserialize;
 use schemars::schema_for;
 use schemars::JsonSchema;
+use serde::Deserialize;
+use serde::Serialize;
 
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "version")]
