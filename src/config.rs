@@ -1,6 +1,6 @@
 use crate::auth::AugmenterConfig;
 use crate::auth::ProviderConfig;
-use crate::store::MongoDBConfig;
+use crate::store::mongodb_store::MongoDBConfig;
 use figment::providers::Format;
 use figment::providers::Yaml;
 use figment::Figment;
