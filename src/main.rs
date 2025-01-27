@@ -5,9 +5,9 @@ mod models;
 mod store;
 
 use std::collections::HashMap;
+use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::env;
 
 use axum::body::Body;
 use axum::extract::Path;
@@ -40,7 +40,6 @@ async fn authenticate(
     user: User,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, HTTPError> {
-
     let jwt = user.to_jwt(&state.config.jwt);
 
     let mut response_builder = axum::http::response::Response::builder()
@@ -156,14 +155,12 @@ struct AppState {
 
 #[tokio::main]
 async fn main() {
-
     let args: Vec<String> = env::args().collect();
 
     if args.contains(&"--schema".to_string()) {
         config::print_schema();
         return;
     }
-
 
     let config = Arc::new(config::load_config());
 
