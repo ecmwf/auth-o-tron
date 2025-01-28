@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use crate::auth::Provider;
 use crate::config::TokenStoreConfig;
@@ -58,7 +58,7 @@ impl Provider for Arc<dyn Store> {
                 Ok(user)
             }
             Ok(None) => {
-                warn!("Token not found in store.");
+                debug!("Token not found in store.");
                 Err("Token not found".to_string())
             }
             Err(e) => {
