@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod http_helpers;
+mod logger;
 mod models;
 mod store;
 
@@ -10,32 +11,25 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::Path;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use axum::response::{self};
-use axum::routing::delete;
-use axum::routing::get;
-use axum::Json;
-use axum::Router;
+use axum::response::{self, IntoResponse};
+use axum::routing::{delete, get};
+use axum::{Json, Router};
 use http::HeaderValue;
-use models::Token;
-use serde::Deserialize;
-use serde::Serialize;
+use logger::init_logging;
+use serde::{Deserialize, Serialize};
+use tracing::{error, info};
 use uuid::Uuid;
 
 use crate::auth::Auth;
 use crate::http_helpers::HTTPError;
-use crate::models::User;
+use crate::models::{Token, User};
 use crate::store::Store;
-
-use inline_colorization::*;
 
 // -- API Routes
 
 // GET /authenticate
-
 async fn authenticate(
     user: User,
     State(state): State<AppState>,
@@ -59,18 +53,18 @@ async fn authenticate(
             "X-Auth-Roles",
             HeaderValue::from_str(&user.roles.join(",")).unwrap(),
         );
-        // TODO: scopes and attributes if needed
+        // If needed, you can append more legacy headers here.
     }
 
     Ok(response_builder)
 }
 
 // GET /token
-
 #[derive(Serialize, Deserialize)]
 struct CreateUserRequest {
     user: User,
 }
+
 #[derive(Serialize, Deserialize)]
 struct CreateTokenResponse {
     token: String,
@@ -81,17 +75,16 @@ async fn create_token(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, StatusCode> {
     let token_str = Uuid::new_v4().to_string();
-    let token = Token::new(
-        token_str.clone(),
-        HashMap::new(), // Populate with appropriate scopes if needed
-        None,
-    );
+    let token = Token::new(token_str.clone(), HashMap::new(), None);
 
     state
         .store
         .add_token(&token, &user, 3600)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            error!("Failed to add token to store: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     Ok((
         StatusCode::OK,
@@ -100,7 +93,6 @@ async fn create_token(
 }
 
 // GET /tokens
-
 #[derive(Serialize, Deserialize)]
 struct GetTokensResponse {
     tokens: Vec<Token>,
@@ -110,16 +102,14 @@ async fn get_tokens(
     user: User,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let tokens = state
-        .store
-        .get_tokens(&user)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let tokens = state.store.get_tokens(&user).await.map_err(|e| {
+        error!("Failed to retrieve tokens: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     Ok((StatusCode::OK, Json(GetTokensResponse { tokens })))
 }
 
 // DELETE /token/<token>
-
 #[derive(Serialize, Deserialize)]
 struct DeleteTokenRequest {
     token: String,
@@ -130,16 +120,14 @@ async fn delete_token(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    state
-        .store
-        .delete_token(&token)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state.store.delete_token(&token).await.map_err(|e| {
+        error!("Failed to delete token: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 // GET /health
-
 async fn health_check() -> impl IntoResponse {
     response::Response::new(Body::from("OK"))
 }
@@ -164,18 +152,17 @@ async fn main() {
 
     let config = Arc::new(config::load_config());
 
-    let store = store::create_store(&config.store).await;
+    // Initialize logging from config
+    init_logging(&config.logging);
 
+    let store = store::create_store(&config.store).await;
     let auth = Arc::new(Auth::new(
         &config.providers,
         &config.augmenters,
         store.clone(),
     ));
 
-    println!(
-        "{color_magenta}{style_bold}Starting server on {}...{color_reset}{style_reset}",
-        &config.bind_address
-    );
+    info!("Starting server on {}", &config.bind_address);
 
     let state = AppState {
         config: config.clone(),
@@ -193,7 +180,8 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(&config.bind_address)
         .await
-        .unwrap();
+        .expect("Could not bind to specified address");
+
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
