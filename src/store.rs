@@ -4,8 +4,10 @@ use async_trait::async_trait;
 use tracing::{debug, error, info};
 
 use crate::auth::Provider;
-use crate::config::TokenStoreConfig;
+use crate::config::{StoreBackend, StoreConfig};
 use crate::models::{Token, User};
+use crate::store::mongodb_store::MongoDBStore;
+use crate::store::no_store::NoStore;
 
 /// The `Store` trait abstracts our token storage.
 /// Different implementations (e.g., MongoDB) can fulfill this.
@@ -24,23 +26,32 @@ pub trait Store: Send + Sync {
     async fn delete_token(&self, token: &str) -> Result<(), String>;
 }
 
-/// Creates a store implementation based on the `TokenStoreConfig`.
-/// If creation fails, we log an error and exit.
-pub async fn create_store(config: &TokenStoreConfig) -> Arc<dyn Store> {
-    match config {
-        TokenStoreConfig::MongoDB(mongo_config) => {
-            // Attempt to create a MongoDB-backed store.
-            match crate::store::mongodb_store::MongoDBStore::new(mongo_config).await {
-                Ok(store) => {
-                    info!("Successfully created MongoDB store.");
-                    Arc::new(store)
-                }
-                Err(e) => {
-                    error!("Failed to create MongoDB store: {}", e);
-                    std::process::exit(1);
-                }
+/// Creates a store implementation based on the `StoreConfig`.
+/// - If `enabled = false`, returns a `NoStore`.
+/// - If `enabled = true`, we use the specified backend (e.g., MongoDB).
+pub async fn create_store(config: &StoreConfig) -> Arc<dyn Store> {
+    if !config.enabled {
+        // Return a disabled store
+        info!("Token store is disabled. Using NoStore.");
+        return Arc::new(NoStore::new());
+    }
+
+    // If enabled, we must have a backend
+    match &config.backend {
+        Some(StoreBackend::MongoDB(mongo_config)) => match MongoDBStore::new(mongo_config).await {
+            Ok(store) => {
+                info!("Successfully created MongoDB store.");
+                Arc::new(store)
             }
-        } // If we add more store types in the future, we can handle them here.
+            Err(e) => {
+                error!("Failed to create MongoDB store: {}", e);
+                std::process::exit(1);
+            }
+        },
+        None => {
+            error!("Store is enabled, but no backend config is provided!");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -48,8 +59,6 @@ pub async fn create_store(config: &TokenStoreConfig) -> Arc<dyn Store> {
 /// This means the `Store` can be used as an Auth Provider (by token).
 #[async_trait]
 impl Provider for Arc<dyn Store> {
-    /// If we have a token, we try to retrieve the associated `User`.
-    /// If `None` is returned, we treat it as "token not found".
     async fn authenticate(&self, token: &str) -> Result<User, String> {
         debug!("Authenticating using token-store with token='{}'", token);
         match self.get_user(token).await {
@@ -72,11 +81,11 @@ impl Provider for Arc<dyn Store> {
         "token-store"
     }
 
-    /// The store acts as a "Bearer" provider,
-    /// so we match the "Bearer" type in `Auth::authenticate`.
+    /// The store acts as a "Bearer" provider
     fn get_type(&self) -> &str {
         "Bearer"
     }
 }
 
 pub mod mongodb_store;
+pub mod no_store;
