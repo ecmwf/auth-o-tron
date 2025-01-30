@@ -20,7 +20,6 @@ use ldap_augmenter::LDAPAugmenterConfig;
 use openid_offline_provider::{OpenIDOfflineProvider, OpenIDOfflineProviderConfig};
 use plain_provider::{PlainAuthConfig, PlainAuthProvider};
 
-
 /// A config enum to select which provider we use (ECMWF API, JWT, OpenID Offline, Plain).
 #[derive(Deserialize, Serialize, JsonSchema, Debug)]
 #[serde(tag = "type")]
