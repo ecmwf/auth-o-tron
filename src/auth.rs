@@ -12,13 +12,16 @@ pub mod ecmwfapi_provider;
 pub mod jwt_provider;
 pub mod ldap_augmenter;
 pub mod openid_offline_provider;
+pub mod plain_provider;
 
 use ecmwfapi_provider::{EcmwfApiProvider, EcmwfApiProviderConfig};
 use jwt_provider::{JWTAuthConfig, JWTProvider};
 use ldap_augmenter::LDAPAugmenterConfig;
 use openid_offline_provider::{OpenIDOfflineProvider, OpenIDOfflineProviderConfig};
+use plain_provider::{PlainAuthConfig, PlainAuthProvider};
 
-/// A config enum to select which provider we use (ECMWF API, JWT, OpenID Offline).
+
+/// A config enum to select which provider we use (ECMWF API, JWT, OpenID Offline, Plain).
 #[derive(Deserialize, Serialize, JsonSchema, Debug)]
 #[serde(tag = "type")]
 pub enum ProviderConfig {
@@ -30,6 +33,9 @@ pub enum ProviderConfig {
 
     #[serde(rename = "openid-offline")]
     OpenIDOfflineAuthConfig(OpenIDOfflineProviderConfig),
+
+    #[serde(rename = "plain")]
+    PlainAuthConfig(PlainAuthConfig),
 }
 
 /// A config enum to select which augmenter we use (LDAP, etc.).
@@ -64,6 +70,7 @@ pub fn create_auth_provider(config: &ProviderConfig) -> Box<dyn Provider> {
         ProviderConfig::EcmwfApiAuthConfig(cfg) => Box::new(EcmwfApiProvider::new(cfg)),
         ProviderConfig::JWTAuthConfig(cfg) => Box::new(JWTProvider::new(cfg)),
         ProviderConfig::OpenIDOfflineAuthConfig(cfg) => Box::new(OpenIDOfflineProvider::new(cfg)),
+        ProviderConfig::PlainAuthConfig(cfg) => Box::new(PlainAuthProvider::new(cfg)),
     }
 }
 
