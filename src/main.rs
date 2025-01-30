@@ -27,9 +27,31 @@ use crate::http_helpers::HTTPError;
 use crate::models::{Token, User};
 use crate::store::Store;
 
-// -- API Routes
 
-// GET /authenticate
+#[derive(Serialize)]
+struct ErrorResponse {
+    error: String,
+}
+
+
+fn map_store_error(e: String) -> (StatusCode, Json<ErrorResponse>) {
+    error!("Store error: {}", e);
+
+    if e.to_lowercase().contains("disabled") {
+        // If the store is "disabled", return 503
+        let body = ErrorResponse {
+            error: "Token store is disabled".to_string(),
+        };
+        (StatusCode::SERVICE_UNAVAILABLE, Json(body))
+    } else {
+        // Otherwise, something else is wrong => 500
+        let body = ErrorResponse {
+            error: format!("Store error: {}", e),
+        };
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(body))
+    }
+}
+
 async fn authenticate(
     user: User,
     State(state): State<AppState>,
@@ -53,7 +75,6 @@ async fn authenticate(
             "X-Auth-Roles",
             HeaderValue::from_str(&user.roles.join(",")).unwrap(),
         );
-        // If needed, you can append more legacy headers here.
     }
 
     Ok(response_builder)
@@ -64,16 +85,17 @@ async fn authenticate(
 struct CreateUserRequest {
     user: User,
 }
-
 #[derive(Serialize, Deserialize)]
 struct CreateTokenResponse {
     token: String,
 }
 
+/// If successful, returns 200 + JSON with the new token.
+/// If store is disabled or there's an error, returns JSON error with 503 or 500.
 async fn create_token(
     user: User,
     State(state): State<AppState>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<(StatusCode, Json<CreateTokenResponse>), (StatusCode, Json<ErrorResponse>)> {
     let token_str = Uuid::new_v4().to_string();
     let token = Token::new(token_str.clone(), HashMap::new(), None);
 
@@ -81,10 +103,7 @@ async fn create_token(
         .store
         .add_token(&token, &user, 3600)
         .await
-        .map_err(|e| {
-            error!("Failed to add token to store: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        .map_err(map_store_error)?;
 
     Ok((
         StatusCode::OK,
@@ -98,14 +117,13 @@ struct GetTokensResponse {
     tokens: Vec<Token>,
 }
 
+/// Lists all tokens associated with the authenticated user.
 async fn get_tokens(
     user: User,
     State(state): State<AppState>,
-) -> Result<impl IntoResponse, StatusCode> {
-    let tokens = state.store.get_tokens(&user).await.map_err(|e| {
-        error!("Failed to retrieve tokens: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+) -> Result<(StatusCode, Json<GetTokensResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let tokens = state.store.get_tokens(&user).await.map_err(map_store_error)?;
+
     Ok((StatusCode::OK, Json(GetTokensResponse { tokens })))
 }
 
@@ -115,15 +133,18 @@ struct DeleteTokenRequest {
     token: String,
 }
 
+/// Deletes the given token if found. Returns 204 or an error JSON.
 async fn delete_token(
     _user: User,
     State(state): State<AppState>,
     Path(token): Path<String>,
-) -> Result<impl IntoResponse, StatusCode> {
-    state.store.delete_token(&token).await.map_err(|e| {
-        error!("Failed to delete token: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    state
+        .store
+        .delete_token(&token)
+        .await
+        .map_err(map_store_error)?;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -132,7 +153,6 @@ async fn health_check() -> impl IntoResponse {
     response::Response::new(Body::from("OK"))
 }
 
-// -- Entrypoint
 
 #[derive(Clone)]
 struct AppState {
@@ -155,7 +175,10 @@ async fn main() {
     // Initialize logging from config
     init_logging(&config.logging);
 
+    // Potentially returns a NoStore if store.enabled = false
     let store = store::create_store(&config.store).await;
+
+    // Build the Auth object
     let auth = Arc::new(Auth::new(
         &config.providers,
         &config.augmenters,
