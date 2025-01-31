@@ -5,24 +5,30 @@ use mongodb::options::{ClientOptions, IndexOptions};
 use mongodb::{Client, Collection, IndexModel};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info};
 
 use crate::models::{Token, User};
 use crate::store::Store;
 
-/// The config struct for MongoDB
+/// The config struct for MongoDB connections.
+/// Contains the URI and database name.
 #[derive(Deserialize, Serialize, JsonSchema, Debug)]
 pub struct MongoDBConfig {
     pub uri: String,
     pub database: String,
 }
 
-/// A concrete `Store` implementation using MongoDB.
+/// A concrete `Store` implementation that uses MongoDB.
+///
+/// This struct holds references to two collections:
+/// - `token_collection`: For storing issued tokens
+/// - `user_collection`: For storing user data
 pub struct MongoDBStore {
     token_collection: Collection<TokenDocument>,
     user_collection: Collection<UserDocument>,
 }
 
-/// The MongoDB document used to store tokens.
+/// Document shape for storing tokens in MongoDB.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct TokenDocument {
     _id: ObjectId,
@@ -31,7 +37,7 @@ struct TokenDocument {
     token: Token,
 }
 
-/// The MongoDB document used to store users.
+/// Document shape for storing users in MongoDB.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct UserDocument {
     _id: ObjectId,
@@ -41,30 +47,33 @@ struct UserDocument {
 }
 
 impl MongoDBStore {
-    /// Create a new `MongoDBStore`, returning an error message on failure.
+    /// Creates a new `MongoDBStore` from the given config.
+    /// It initializes client connections, sets up indexes, etc.
     pub async fn new(config: &MongoDBConfig) -> Result<Self, String> {
-        println!("🔌 Connecting to MongoDB: {}...", config.uri);
+        info!("Connecting to MongoDB at URI: {}", config.uri);
 
-        // Parse connection string
+        // Parse the connection string from the config
         let mut client_options = ClientOptions::parse(&config.uri)
             .await
             .map_err(|e| format!("Failed to parse MongoDB URI: {}", e))?;
 
-        // Set an optional app name
+        // Optionally set the client application name
         client_options.app_name = Some("Auth-O-Tron".to_string());
 
-        // Create the client
+        // Create a new MongoDB client
         let client = Client::with_options(client_options)
             .map_err(|e| format!("Failed to create MongoDB client: {}", e))?;
 
-        println!("✅ MongoDB connection established successfully!");
+        info!("MongoDB connection established successfully.");
 
-        // Get references to the database and collections
+        // Retrieve the specified database and relevant collections
         let database = client.database(&config.database);
         let token_collection = database.collection::<TokenDocument>("tokens");
         let user_collection = database.collection::<UserDocument>("users");
 
-        // 1) Unique on "token.token_string"
+        // Setup indexes for uniqueness and performance
+
+        // 1) Unique index on token.token_string
         let mut unique_on_token = IndexModel::default();
         unique_on_token.keys = doc! { "token.token_string": 1 };
         unique_on_token.options = Some(IndexOptions::builder().unique(true).build());
@@ -74,7 +83,7 @@ impl MongoDBStore {
             .await
             .map_err(|e| format!("Failed to create unique index on token_string: {}", e))?;
 
-        // 2) Unique on (username, realm)
+        // 2) Unique index on (username, realm) in the user collection
         let mut unique_on_user_realm = IndexModel::default();
         unique_on_user_realm.keys = doc! { "user.username": 1, "user.realm": 1 };
         unique_on_user_realm.options = Some(IndexOptions::builder().unique(true).build());
@@ -84,7 +93,7 @@ impl MongoDBStore {
             .await
             .map_err(|e| format!("Failed to create unique index on (username, realm): {}", e))?;
 
-        // 3) Unique on user_id
+        // 3) Unique index on user_id
         let mut unique_on_user_id = IndexModel::default();
         unique_on_user_id.keys = doc! { "user_id": 1 };
         unique_on_user_id.options = Some(IndexOptions::builder().unique(true).build());
@@ -100,7 +109,7 @@ impl MongoDBStore {
         })
     }
 
-    /// Helper: Convert a `User` struct into a MongoDB `UserDocument`.
+    /// Helper function to convert a `User` struct to our `UserDocument`.
     fn user_to_doc(user: &User) -> UserDocument {
         UserDocument {
             _id: ObjectId::new(),
@@ -110,12 +119,12 @@ impl MongoDBStore {
         }
     }
 
-    /// Helper: Convert a MongoDB `UserDocument` into a `User` struct.
+    /// Convert a `UserDocument` back into a `User` struct.
     fn doc_to_user(doc: &UserDocument) -> User {
         doc.user.clone()
     }
 
-    /// Helper: Convert a `Token` struct into a MongoDB `TokenDocument`.
+    /// Convert a `Token` to a `TokenDocument`, referencing the user by user_id.
     fn token_to_doc(token: &Token, user_id: String) -> TokenDocument {
         TokenDocument {
             _id: ObjectId::new(),
@@ -125,7 +134,7 @@ impl MongoDBStore {
         }
     }
 
-    /// Helper: Convert a MongoDB `TokenDocument` into a `Token` struct.
+    /// Convert a `TokenDocument` back to a `Token` struct.
     fn doc_to_token(doc: &TokenDocument) -> Token {
         doc.token.clone()
     }
@@ -133,8 +142,9 @@ impl MongoDBStore {
 
 #[async_trait]
 impl Store for MongoDBStore {
+    /// Adds a token to the DB. If the user does not exist yet, create a user record.
     async fn add_token(&self, token: &Token, user: &User, _expiry: i64) -> Result<(), String> {
-        // 1) Attempt to find the user document
+        // 1) Attempt to find existing user in the DB
         let user_doc = self
             .user_collection
             .find_one(
@@ -144,11 +154,11 @@ impl Store for MongoDBStore {
             .await
             .map_err(|e| format!("Failed to query user: {}", e))?;
 
-        // 2) If it doesn't exist, create it
+        // 2) If no user doc, insert a new one
         let user_doc = match user_doc {
             Some(ud) => ud,
             None => {
-                println!("User not found, inserting new user document");
+                debug!("User not found in DB, inserting new user document.");
                 let new_user_doc = Self::user_to_doc(user);
                 self.user_collection
                     .insert_one(new_user_doc.clone(), None)
@@ -158,7 +168,7 @@ impl Store for MongoDBStore {
             }
         };
 
-        // 3) Insert the token for that user
+        // 3) Insert the new token referencing this user
         let token_doc = Self::token_to_doc(token, user_doc.user_id.clone());
         self.token_collection
             .insert_one(token_doc, None)
@@ -168,8 +178,9 @@ impl Store for MongoDBStore {
         Ok(())
     }
 
+    /// Lists all tokens for a given user.
     async fn get_tokens(&self, user: &User) -> Result<Vec<Token>, String> {
-        // 1) Find the user document
+        // 1) Look up the corresponding user document
         let user_doc = self
             .user_collection
             .find_one(
@@ -180,7 +191,7 @@ impl Store for MongoDBStore {
             .map_err(|e| format!("Failed to query user document: {}", e))?
             .ok_or_else(|| "User not found".to_string())?;
 
-        // 2) Find all tokens referencing that user
+        // 2) Find all token documents that reference this user by user_id
         let mut cursor = self
             .token_collection
             .find(doc! { "user_id": user_doc.user_id }, None)
@@ -199,17 +210,18 @@ impl Store for MongoDBStore {
         Ok(tokens)
     }
 
+    /// Given a token string, returns the associated `User`, if any.
     async fn get_user(&self, token: &str) -> Result<Option<User>, String> {
-        // 1) Look up the token document
+        // 1) Look up the token document by token string
         let token_doc = self
             .token_collection
             .find_one(doc! { "token.token_string": token }, None)
             .await
             .map_err(|e| format!("Failed to query token document: {}", e))?;
 
-        // 2) If it doesn't exist, return None
+        // 2) If token not found, return None
         if let Some(td) = token_doc {
-            // 3) Then fetch the user that token belongs to
+            // 3) Look up the user doc that corresponds to this token’s user_id
             let user_doc = self
                 .user_collection
                 .find_one(doc! { "user_id": &td.user_id }, None)
@@ -217,15 +229,16 @@ impl Store for MongoDBStore {
                 .map_err(|e| format!("Failed to fetch user by user_id: {}", e))?;
 
             if let Some(ud) = user_doc {
-                println!("User doc found: {:?}", &ud);
+                debug!("User document found for token. user_id = {}", ud.user_id);
                 return Ok(Some(Self::doc_to_user(&ud)));
             }
         }
 
-        // Token or user doc not found
+        // If the token or user doc wasn't found, return None
         Ok(None)
     }
 
+    /// Deletes a token document matching the provided token string.
     async fn delete_token(&self, token: &str) -> Result<(), String> {
         self.token_collection
             .delete_one(doc! { "token.token_string": token }, None)

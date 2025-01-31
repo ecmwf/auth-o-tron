@@ -1,23 +1,23 @@
 use std::net::SocketAddr;
 
+use axum::async_trait;
+use axum::extract::{ConnectInfo, FromRequestParts};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use http::request::Parts;
+use tracing::warn;
+
 use crate::models::User;
 use crate::AppState;
-use axum::async_trait;
-use axum::extract::ConnectInfo;
-use axum::extract::FromRequestParts;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use axum::response::Response;
-use http::request::Parts;
 
-// -- Error Handling
-
+/// A general purpose HTTP error type that can be converted into an `IntoResponse`.
 pub struct HTTPError {
     status: StatusCode,
     message: String,
 }
 
 impl HTTPError {
+    /// Creates a new HTTP error with the given status code and message.
     pub fn new(status: StatusCode, message: impl Into<String>) -> Self {
         HTTPError {
             status,
@@ -26,6 +26,7 @@ impl HTTPError {
     }
 }
 
+/// Converts our `HTTPError` into an HTTP response.
 impl IntoResponse for HTTPError {
     fn into_response(self) -> Response {
         let body = format!("{{\"error\": \"{}\"}}", self.message);
@@ -37,8 +38,8 @@ impl IntoResponse for HTTPError {
     }
 }
 
-// -- User Authentication
-
+/// Extractor implementation: tries to convert the request parts into a `User`.
+/// This uses the `authorization` header and calls `Auth::authenticate`.
 #[async_trait]
 impl FromRequestParts<AppState> for User {
     type Rejection = HTTPError;
@@ -47,21 +48,25 @@ impl FromRequestParts<AppState> for User {
         parts: &'a mut Parts,
         state: &'b AppState,
     ) -> Result<User, HTTPError> {
+        // Retrieve the authorization header
         let auth_header = parts
             .headers
             .get("authorization")
             .and_then(|value| value.to_str().ok())
             .unwrap_or("");
 
+        // Try to read the client IP from the connection info
         let client_ip = parts
             .extensions
             .get::<ConnectInfo<SocketAddr>>()
             .map(|ConnectInfo(addr)| addr.ip())
             .unwrap_or_else(|| {
-                println!("Failed to get client IP address.");
+                // Log a warning if we cannot get the IP address
+                warn!("Unable to determine client IP address.");
                 "unknown".parse().unwrap()
             });
 
+        // Ask our Auth object to handle the authentication
         match state
             .auth
             .authenticate(auth_header, &client_ip.to_string())

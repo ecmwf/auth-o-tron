@@ -1,14 +1,13 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
-use jsonwebtoken::encode;
-use jsonwebtoken::EncodingKey;
-use jsonwebtoken::Header;
-use serde::Deserialize;
-use serde::Serialize;
+use jsonwebtoken::{encode, EncodingKey, Header};
+use serde::{Deserialize, Serialize};
 
 use crate::config::JWTConfig;
 
+/// The `User` struct defines the authenticated user,
+/// including realm, username, roles, attributes, and optional scopes.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct User {
     pub version: i32,
@@ -19,9 +18,13 @@ pub struct User {
     pub scopes: Option<HashMap<Service, Scopes>>,
 }
 
+/// A simple type alias for service names.
 type Service = String;
+/// Another alias for scopes, which is a vector of strings.
 type Scopes = Vec<String>;
 
+/// A `Token` struct that holds metadata about an issued token.
+/// This is often stored in the database for easy revocation or lookup.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Token {
     pub version: i32,
@@ -30,6 +33,7 @@ pub struct Token {
 }
 
 impl User {
+    /// Create a new `User` with optional roles, attributes, scopes, and version.
     pub fn new(
         realm: String,
         username: String,
@@ -40,15 +44,16 @@ impl User {
     ) -> Self {
         User {
             version: version.unwrap_or(1),
-            realm: realm,
-            username: username,
+            realm,
+            username,
             roles: roles.unwrap_or_default(),
             attributes: attributes.unwrap_or_default(),
-            scopes: scopes,
+            scopes,
         }
     }
 
-    pub fn to_jwt(self: &User, jwtconfig: &JWTConfig) -> String {
+    /// Convert a `User` into a signed JWT string, using the provided JWT config.
+    pub fn to_jwt(&self, jwtconfig: &JWTConfig) -> String {
         #[derive(Serialize)]
         struct Claims<'a> {
             // Registered Claims
@@ -69,7 +74,6 @@ impl User {
         }
 
         let sub = format!("{}-{}", self.realm, self.username);
-
         let now = Utc::now().timestamp();
 
         let claims = Claims {
@@ -86,15 +90,14 @@ impl User {
         };
 
         let encoding_key = EncodingKey::from_secret(jwtconfig.secret.as_ref());
-        let token =
-            encode(&Header::default(), &claims, &encoding_key).expect("Failed to encode JWT");
-
-        token
+        encode(&Header::default(), &claims, &encoding_key).expect("Failed to encode JWT")
     }
 }
 
 #[allow(dead_code, unused_variables)]
 impl Token {
+    /// Creates a new `Token` with optional version,
+    /// automatically generating a new UUID token string.
     pub fn new(
         token_string: String,
         scopes: HashMap<Service, Scopes>,
@@ -102,13 +105,14 @@ impl Token {
     ) -> Self {
         Token {
             version: version.unwrap_or(1),
+            // Overwrites the passed-in token_string with a new UUID
             token_string: uuid::Uuid::new_v4().to_string(),
-            scopes: scopes,
+            scopes,
         }
     }
 }
 
-// Test the User struct
+// Simple tests to verify the `User` struct and JWT encoding.
 #[test]
 fn test_user_new() {
     let user = User::new(
@@ -133,7 +137,7 @@ fn test_user_new() {
     assert_eq!(user.version, 1);
     assert_eq!(user.realm, "realm");
     assert_eq!(user.username, "username");
-    assert_eq!(user.roles, vec!["role1".to_string(), "role2".to_string()]);
+    assert_eq!(user.roles, vec!["role1", "role2"]);
     assert_eq!(
         user.attributes,
         [("key1".to_string(), "value1".to_string())]
@@ -181,6 +185,6 @@ fn test_user_to_jwt() {
     };
 
     let jwt = user.to_jwt(&jwtconfig);
-    assert_eq!(jwt.is_empty(), false);
+    assert!(!jwt.is_empty());
     println!("JWT: {}", jwt)
 }

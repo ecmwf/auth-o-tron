@@ -14,7 +14,7 @@ chrono = "~0.4.39"
 figment = { version = "~0.10.19", features = ["yaml"] }
 futures = "~0.3.31"
 http = "~1.1.0"
-hyper = "~1.4.0"
+hyper = "~1.4.1"
 inline_colorization = "~0.1.6"
 jsonwebtoken = "~9.3.0"
 ldap3 = "~0.11.5"
@@ -28,3 +28,9 @@ serde_json = "~1.0.137"
 tokio = { version = "~1.36.0", features = ["full"] }
 tower = "~0.4.13"
 uuid = { version = "~1.8.0", features = ["v4"] }
+# Core tracing
+tracing = "~0.1"
+# Subscriber implementations & formatting layers
+tracing-subscriber = { version = "~0.3", features = ["env-filter","json"] }
+# Bridge older `log` calls into `tracing`
+tracing-log = "~0.1"
