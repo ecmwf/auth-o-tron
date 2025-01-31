@@ -3,14 +3,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, info};
 
-use super::User;
+use crate::models::User;
 use cached::proc_macro::cached;
 use reqwest;
 
-/// The config needed for the ECMWF API provider:
-/// - `uri` indicates the who-am-i endpoint
-/// - `realm` is the user realm
-/// - `name` is this provider’s display name
+/// The config needed for the ECMWF API provider (who-am-i endpoint).
 #[derive(Deserialize, Serialize, Debug, JsonSchema, Clone)]
 pub struct EcmwfApiProviderConfig {
     pub uri: String,
@@ -18,13 +15,12 @@ pub struct EcmwfApiProviderConfig {
     pub name: String,
 }
 
-/// A provider that queries the ECMWF API (`who-am-i`) endpoint to authenticate a token.
+/// A provider that calls the ECMWF who-am-i endpoint to validate a token.
 pub struct EcmwfApiProvider {
     pub config: EcmwfApiProviderConfig,
 }
 
 impl EcmwfApiProvider {
-    /// Creates a new ECMWF API provider.
     pub fn new(config: &EcmwfApiProviderConfig) -> Self {
         info!(
             "Creating EcmwfApiAuth provider for realm '{}', name='{}'",
@@ -38,29 +34,20 @@ impl EcmwfApiProvider {
 
 #[async_trait::async_trait]
 impl super::Provider for EcmwfApiProvider {
-    /// Provider type is typically "Bearer".
     fn get_type(&self) -> &str {
         "Bearer"
     }
 
-    /// Makes an HTTP call to the ECMWF API to validate the token and retrieve user info.
     async fn authenticate(&self, token: &str) -> Result<User, String> {
-        query(
-            self.config.uri.to_string(),
-            token.to_string(),
-            self.config.realm.to_string(),
-        )
-        .await
+        query(self.config.uri.clone(), token.to_string(), self.config.realm.clone()).await
     }
 
-    /// The display name for this provider, used in logs or debugging.
     fn get_name(&self) -> &str {
         &self.config.name
     }
 }
 
-/// This function calls the ECMWF `who-am-i` endpoint with the provided token.
-/// We cache results for 60 seconds.
+/// Queries the ECMWF who-am-i endpoint with the provided token, returning a User on success.
 #[cached(time = 60, sync_writes = true)]
 async fn query(uri: String, token: String, realm: String) -> Result<User, String> {
     let client = reqwest::Client::new();
@@ -73,7 +60,6 @@ async fn query(uri: String, token: String, realm: String) -> Result<User, String
     };
 
     if response.status().is_success() {
-        // Parse the JSON body
         let body = response
             .text()
             .await
@@ -82,9 +68,7 @@ async fn query(uri: String, token: String, realm: String) -> Result<User, String
             serde_json::from_str(&body).map_err(|e| format!("Error parsing JSON: {}", e))?;
 
         let username = user_info["uid"].as_str().unwrap_or_default().to_string();
-
-        let user = User::new(realm, username, None, None, None, None);
-        Ok(user)
+        Ok(User::new(realm, username, None, None, None, None))
     } else if response.status() == 403 {
         Err("Invalid API token".to_string())
     } else {
