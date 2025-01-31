@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
+use crate::models::User;
+use crate::store::Store;
 use futures::future;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
-use crate::models::User;
-use crate::store::Store;
 
 use super::ecmwfapi_provider::{EcmwfApiProvider, EcmwfApiProviderConfig};
 use super::jwt_provider::{JWTAuthConfig, JWTProvider};
@@ -89,7 +89,9 @@ impl Auth {
         let providers = provider_config
             .iter()
             .map(create_auth_provider)
-            .chain(std::iter::once(Box::new(token_store.clone()) as Box<dyn Provider>))
+            .chain(std::iter::once(
+                Box::new(token_store.clone()) as Box<dyn Provider>
+            ))
             .collect();
 
         info!("Creating auth augmenters...");
@@ -172,7 +174,11 @@ impl Auth {
 
         for aug in matching_augmenters {
             match aug.augment(&mut user).await {
-                Ok(_) => info!("Augmenter '{}' succeeded for '{}'!", aug.get_name(), user.username),
+                Ok(_) => info!(
+                    "Augmenter '{}' succeeded for '{}'!",
+                    aug.get_name(),
+                    user.username
+                ),
                 Err(e) => warn!("Augmenter '{}' failed: {}", aug.get_name(), e),
             }
         }

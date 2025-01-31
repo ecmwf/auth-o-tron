@@ -3,9 +3,9 @@ use figment::Figment;
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{AugmenterConfig, ProviderConfig};
-use super::store::StoreConfig;
 use super::logging::LoggingConfig;
+use super::store::StoreConfig;
+use crate::auth::{AugmenterConfig, ProviderConfig};
 
 /// A top-level enum for versioned configurations.
 #[derive(Deserialize, Serialize, JsonSchema)]

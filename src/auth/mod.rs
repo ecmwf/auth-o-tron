@@ -6,10 +6,4 @@ pub mod openid_offline_provider;
 pub mod plain_provider;
 
 // Re-export from auth.rs so we can do "use crate::auth::*;"
-pub use auth::{
-    Auth,
-    Augmenter,
-    AugmenterConfig,
-    Provider,
-    ProviderConfig,
-};
+pub use auth::{Augmenter, AugmenterConfig, Auth, Provider, ProviderConfig};

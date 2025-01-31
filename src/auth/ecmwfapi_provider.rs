@@ -39,7 +39,12 @@ impl super::Provider for EcmwfApiProvider {
     }
 
     async fn authenticate(&self, token: &str) -> Result<User, String> {
-        query(self.config.uri.clone(), token.to_string(), self.config.realm.clone()).await
+        query(
+            self.config.uri.clone(),
+            token.to_string(),
+            self.config.realm.clone(),
+        )
+        .await
     }
 
     fn get_name(&self) -> &str {
