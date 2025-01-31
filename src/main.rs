@@ -186,6 +186,7 @@ async fn main() {
         &config.providers,
         &config.augmenters,
         store.clone(),
+        config.auth.clone(),
     ));
 
     info!("Starting server on {}", &config.bind_address);
