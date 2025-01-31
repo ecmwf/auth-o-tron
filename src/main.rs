@@ -182,11 +182,12 @@ async fn main() {
     let store = create_store(&config.store).await;
 
     // Create the Auth object including all configured providers and augmenters
+    let auth_config = config.auth.clone().unwrap_or_default();
     let auth = Arc::new(Auth::new(
         &config.providers,
         &config.augmenters,
         store.clone(),
-        config.auth.clone(),
+        auth_config,
     ));
 
     info!("Starting server on {}", &config.bind_address);

@@ -27,7 +27,7 @@ pub struct ConfigV1 {
     pub jwt: JWTConfig,
     pub include_legacy_headers: Option<bool>,
     pub logging: LoggingConfig,
-    pub auth: AuthConfig,
+    pub auth: Option<AuthConfig>,
 }
 
 /// Load config from a YAML file named "config.yaml" in the current directory.
@@ -67,10 +67,15 @@ pub struct ServiceConfig {
     pub scopes: Vec<String>,
 }
 
+fn default_timeout_in_ms() -> u64 {
+    5000 // default to 5000 ms
+}
+
 /// Configuration for the authentication timeout.
 /// This is used for select_ok operation in the auth module.
 /// We kill ongoing futures if they take too long.
-#[derive(Deserialize, Serialize, Debug, JsonSchema, Clone)]
+#[derive(Deserialize, Serialize, Debug, JsonSchema, Clone, Default)]
 pub struct AuthConfig {
+    #[serde(default = "default_timeout_in_ms")]
     pub timeout_in_ms: u64,
 }
