@@ -14,16 +14,6 @@ pub enum Config {
     ConfigV1(ConfigV1),
 }
 
-/// This struct holds the logging settings for the application.
-///
-/// - `level`: The log verbosity level (trace, debug, info, warn, error).
-/// - `format`: The output format ("console" or "json").
-#[derive(Deserialize, Serialize, Debug, JsonSchema)]
-pub struct LoggingConfig {
-    pub level: String,
-    pub format: String,
-}
-
 /// This struct represents the entire configuration for version 1.0.0.
 ///
 /// It includes the token store, any services, providers, augmenters,
@@ -95,4 +85,14 @@ pub struct ServiceConfig {
 pub enum TokenStoreConfig {
     #[serde(rename = "mongo")]
     MongoDB(MongoDBConfig),
+}
+
+/// This struct holds the logging settings for the application.
+///
+/// - `level`: The log verbosity level (trace, debug, info, warn, error).
+/// - `format`: The output format ("console" or "json").
+#[derive(Deserialize, Serialize, Debug, JsonSchema)]
+pub struct LoggingConfig {
+    pub level: String,
+    pub format: String,
 }
