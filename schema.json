@@ -3,11 +3,12 @@
   "title": "Config",
   "oneOf": [
     {
+      "description": "Main config for v1.0.0, including store, providers, etc.",
       "type": "object",
       "required": [
-        "augmenters",
         "bind_address",
         "jwt",
+        "logging",
         "providers",
         "services",
         "store",
@@ -15,6 +16,7 @@
       ],
       "properties": {
         "augmenters": {
+          "default": [],
           "type": "array",
           "items": {
             "$ref": "#/definitions/AugmenterConfig"
@@ -32,6 +34,9 @@
         "jwt": {
           "$ref": "#/definitions/JWTConfig"
         },
+        "logging": {
+          "$ref": "#/definitions/LoggingConfig"
+        },
         "providers": {
           "type": "array",
           "items": {
@@ -45,7 +50,7 @@
           }
         },
         "store": {
-          "$ref": "#/definitions/TokenStoreConfig"
+          "$ref": "#/definitions/StoreConfig"
         },
         "version": {
           "type": "string",
@@ -58,8 +63,10 @@
   ],
   "definitions": {
     "AugmenterConfig": {
+      "description": "A config enum to select which augmenter we use (LDAP, etc.).",
       "oneOf": [
         {
+          "description": "Configuration required to connect to LDAP and fetch user roles.",
           "type": "object",
           "required": [
             "ldap_password",
@@ -68,7 +75,7 @@
             "realm",
             "search_base",
             "type",
-            "url"
+            "uri"
           ],
           "properties": {
             "filter": {
@@ -98,7 +105,7 @@
                 "ldap"
               ]
             },
-            "url": {
+            "uri": {
               "type": "string"
             }
           }
@@ -131,9 +138,42 @@
         }
       }
     },
+    "LoggingConfig": {
+      "type": "object",
+      "required": [
+        "format",
+        "level"
+      ],
+      "properties": {
+        "format": {
+          "type": "string"
+        },
+        "level": {
+          "type": "string"
+        }
+      }
+    },
+    "PlainUserEntry": {
+      "description": "Represents a single user entry (username + password).",
+      "type": "object",
+      "required": [
+        "password",
+        "username"
+      ],
+      "properties": {
+        "password": {
+          "type": "string"
+        },
+        "username": {
+          "type": "string"
+        }
+      }
+    },
     "ProviderConfig": {
+      "description": "A config enum to select which provider we use (ECMWF API, JWT, OpenID Offline, Plain).",
       "oneOf": [
         {
+          "description": "The config needed for the ECMWF API provider: - `uri` indicates the who-am-i endpoint - `realm` is the user realm - `name` is this provider’s display name",
           "type": "object",
           "required": [
             "name",
@@ -160,6 +200,7 @@
           }
         },
         {
+          "description": "JWT config structure for external usage",
           "type": "object",
           "required": [
             "cert_uri",
@@ -190,6 +231,7 @@
           }
         },
         {
+          "description": "Config for an OpenID provider that also supports offline tokens.",
           "type": "object",
           "required": [
             "cert_uri",
@@ -230,6 +272,39 @@
               ]
             }
           }
+        },
+        {
+          "description": "PlainAuthConfig defines the data for Basic authentication.",
+          "type": "object",
+          "required": [
+            "name",
+            "realm",
+            "type",
+            "users"
+          ],
+          "properties": {
+            "name": {
+              "description": "A friendly name for logs.",
+              "type": "string"
+            },
+            "realm": {
+              "description": "The realm associated with this provider.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "plain"
+              ]
+            },
+            "users": {
+              "description": "A list of username/password pairs.",
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/PlainUserEntry"
+              }
+            }
+          }
         }
       ]
     },
@@ -251,9 +326,12 @@
         }
       }
     },
-    "TokenStoreConfig": {
+    "StoreConfig": {
+      "description": "A wrapper for the store configuration. - `enabled`: if false, the store is effectively disabled (NoStore). - `backend`: actual store backend config, if any.",
+      "type": "object",
       "oneOf": [
         {
+          "description": "The config struct for MongoDB connections. Contains the URI and database name.",
           "type": "object",
           "required": [
             "database",
@@ -275,7 +353,15 @@
             }
           }
         }
-      ]
+      ],
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
     }
   }
 }
