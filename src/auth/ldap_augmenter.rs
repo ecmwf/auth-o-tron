@@ -157,3 +157,29 @@ impl Augmenter for LDAPAugmenter {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that a valid DN returns the correct CN.
+    #[test]
+    fn test_parse_cn_valid() {
+        let dn = "CN=SomeRole,OU=SomeOU,DC=example,DC=com";
+        assert_eq!(parse_cn(dn), Some("SomeRole".to_string()));
+    }
+
+    /// Test that a DN with no CN returns None.
+    #[test]
+    fn test_parse_cn_invalid() {
+        let dn = "OU=SomeOU,DC=example,DC=com";
+        assert_eq!(parse_cn(dn), None);
+    }
+
+    /// Test that when multiple parts are present, the first CN is returned.
+    #[test]
+    fn test_parse_cn_multiple_entries() {
+        let dn = "OU=SomeOU,CN=RoleA,CN=RoleB,DC=example,DC=com";
+        assert_eq!(parse_cn(dn), Some("RoleA".to_string()));
+    }
+}
