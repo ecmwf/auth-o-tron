@@ -248,3 +248,63 @@ impl Store for MongoDBStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{Token, User};
+    use std::collections::HashMap;
+
+    /// Test that converting a User to a MongoDB document and back preserves the original user data.
+    #[test]
+    fn test_user_doc_conversion() {
+        let user = User::new(
+            "test".to_string(),
+            "user1".to_string(),
+            Some(vec!["role1".to_string()]),
+            None,
+            None,
+            Some(1),
+        );
+        let doc = MongoDBStore::user_to_doc(&user);
+        let user_converted = MongoDBStore::doc_to_user(&doc);
+        assert_eq!(user.username, user_converted.username);
+        assert_eq!(user.realm, user_converted.realm);
+    }
+
+    /// Test that converting a Token to a MongoDB document and back preserves the token data.
+    #[test]
+    fn test_token_doc_conversion() {
+        // Create a token with empty scopes.
+        let token = Token::new("dummy".to_string(), HashMap::new(), Some(1));
+        let user_id = "some_user_id".to_string();
+
+        // Convert the token to a document and then back to a token.
+        let doc = MongoDBStore::token_to_doc(&token, user_id);
+        let token_converted = MongoDBStore::doc_to_token(&doc);
+
+        // Verify that all fields are preserved.
+        assert_eq!(token.version, token_converted.version);
+        assert_eq!(token.token_string, token_converted.token_string);
+        assert_eq!(token.scopes, token_converted.scopes);
+    }
+
+    /// Test a round-trip token conversion with non-empty scopes.
+    #[test]
+    fn test_round_trip_token_conversion() {
+        let mut scopes = HashMap::new();
+        scopes.insert(
+            "service".to_string(),
+            vec!["read".to_string(), "write".to_string()],
+        );
+        let token = Token::new("another_dummy".to_string(), scopes.clone(), Some(2));
+        let user_id = "some_user_id".to_string();
+
+        // Convert to document and back.
+        let doc = MongoDBStore::token_to_doc(&token, user_id);
+        let token_converted = MongoDBStore::doc_to_token(&doc);
+
+        // Assert that the original token and the converted token are equal.
+        assert_eq!(token, token_converted);
+    }
+}
