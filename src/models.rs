@@ -77,7 +77,7 @@ impl User {
 }
 
 /// A token stored in a database for lookup/revocation.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct Token {
     pub version: i32,
     pub token_string: String,
