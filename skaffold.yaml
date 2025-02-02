@@ -11,11 +11,12 @@ build:
     customTemplate:
       template: "{{.PREFIX}}{{.GIT_TAG}}"
       components:
-        - name: PREFIX
-          envTemplate:
-            template: '{{default "auth-o-tron:" .PREFIX}}'
-        - name: GIT_TAG
-          gitCommit: {}
+      - name: PREFIX
+        envTemplate:
+          template: '{{default "" .PREFIX}}'
+      - name: GIT_TAG
+        gitCommit:
+          ignoreChanges: true
 
   artifacts:
     - image: "auth-o-tron"
