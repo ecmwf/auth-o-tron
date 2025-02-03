@@ -1,11 +1,13 @@
-use crate::store::mongodb_store::MongoDBConfig;
 use figment::providers::{Format, Yaml};
 use figment::Figment;
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 
+use super::logging::LoggingConfig;
+use super::store::StoreConfig;
 use crate::auth::{AugmenterConfig, ProviderConfig};
 
+/// A top-level enum for versioned configurations.
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "version")]
 pub enum Config {
@@ -13,7 +15,7 @@ pub enum Config {
     ConfigV1(ConfigV1),
 }
 
-/// Main config for v1.0.0, including store, providers, etc.
+/// Main config for v1.0.0, containing store, providers, augmenters, etc.
 #[derive(Deserialize, Serialize, Debug, JsonSchema)]
 pub struct ConfigV1 {
     pub store: StoreConfig,
@@ -27,7 +29,7 @@ pub struct ConfigV1 {
     pub logging: LoggingConfig,
 }
 
-/// Loads config from `config.yaml`
+/// Load config from a YAML file named "config.yaml" in the current directory.
 pub fn load_config() -> ConfigV1 {
     let figment = Figment::new().merge(Yaml::file("./config.yaml"));
     let config = match figment.extract::<Config>() {
@@ -42,32 +44,13 @@ pub fn load_config() -> ConfigV1 {
     }
 }
 
-/// Prints the JSON schema for this config.
+/// Print the JSON schema for the configuration to stdout.
 pub fn print_schema() {
     let schema = schema_for!(Config);
     println!("{}", serde_json::to_string_pretty(&schema).unwrap());
 }
 
-/// A wrapper for the store configuration.  
-/// - `enabled`: if false, the store is effectively disabled (NoStore).
-/// - `backend`: actual store backend config, if any.
-#[derive(Deserialize, Serialize, Debug, JsonSchema)]
-pub struct StoreConfig {
-    pub enabled: bool,
-
-    /// The store backend definition. We flatten so that `type: mongo` etc. is recognized.
-    #[serde(flatten)]
-    pub backend: Option<StoreBackend>,
-}
-
-/// The existing store backend(s), using `#[serde(tag = "type")]`.
-#[derive(Deserialize, Serialize, Debug, JsonSchema)]
-#[serde(tag = "type")]
-pub enum StoreBackend {
-    #[serde(rename = "mongo")]
-    MongoDB(MongoDBConfig),
-}
-
+/// A simple definition for JWT usage in tokens.
 #[derive(Deserialize, Serialize, Debug, JsonSchema)]
 pub struct JWTConfig {
     pub iss: String,
@@ -76,14 +59,9 @@ pub struct JWTConfig {
     pub secret: String,
 }
 
+/// A declaration of services we might need (e.g., to store scopes).
 #[derive(Deserialize, Serialize, JsonSchema, Debug)]
 pub struct ServiceConfig {
     pub name: String,
     pub scopes: Vec<String>,
-}
-
-#[derive(Deserialize, Serialize, Debug, JsonSchema)]
-pub struct LoggingConfig {
-    pub level: String,
-    pub format: String,
 }
