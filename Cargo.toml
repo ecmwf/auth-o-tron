@@ -1,13 +1,13 @@
 [package]
 name = "rust-authotron"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 aide = { version = "~0.13.5", features = ["axum", "axum-multipart", "axum-headers"] }
-async-trait = "~0.1.85"
+async-trait = "~0.1.86"
 axum = "~0.7.9"
 cached = { version = "~0.51.4", features = ["async", "tokio"] }
 chrono = "~0.4.39"
@@ -35,3 +35,4 @@ tracing-subscriber = { version = "~0.3", features = ["env-filter","json"] }
 # Bridge older `log` calls into `tracing`
 tracing-log = "~0.1"
 base64 = "~0.22.1"
+mockito = "~1.6.1"

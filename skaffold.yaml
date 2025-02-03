@@ -1,0 +1,32 @@
+apiVersion: skaffold/v4beta2
+kind: Config
+metadata:
+  name: auth-o-tron
+build:
+  local:
+    useBuildkit: true
+    concurrency: 1
+
+  tagPolicy:
+    customTemplate:
+      template: "{{.PREFIX}}{{.GIT_TAG}}"
+      components:
+      - name: PREFIX
+        envTemplate:
+          template: '{{default "" .PREFIX}}'
+      - name: GIT_TAG
+        gitCommit:
+          ignoreChanges: true
+
+  artifacts:
+    - image: "auth-o-tron"
+      context: .
+      docker:
+        dockerfile: Dockerfile
+        target: release
+
+    - image: "auth-o-tron-debug"
+      context: .
+      docker:
+        dockerfile: Dockerfile
+        target: debug

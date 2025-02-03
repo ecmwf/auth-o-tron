@@ -1,9 +1,10 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Config",
+  "description": "A top-level enum for versioned configurations.",
   "oneOf": [
     {
-      "description": "Main config for v1.0.0, including store, providers, etc.",
+      "description": "Main config for v1.0.0, containing store, providers, augmenters, etc.",
       "type": "object",
       "required": [
         "bind_address",
@@ -21,6 +22,16 @@
           "items": {
             "$ref": "#/definitions/AugmenterConfig"
           }
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "bind_address": {
           "type": "string"
@@ -63,7 +74,7 @@
   ],
   "definitions": {
     "AugmenterConfig": {
-      "description": "A config enum to select which augmenter we use (LDAP, etc.).",
+      "description": "Configuration options for augmenters (e.g. an LDAP roles augmenter).",
       "oneOf": [
         {
           "description": "Configuration required to connect to LDAP and fetch user roles.",
@@ -112,7 +123,20 @@
         }
       ]
     },
+    "AuthConfig": {
+      "description": "Configuration for the authentication timeout. This is used for select_ok operation in the auth module. We kill ongoing futures if they take too long.",
+      "type": "object",
+      "properties": {
+        "timeout_in_ms": {
+          "default": 5000,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
     "JWTConfig": {
+      "description": "A simple definition for JWT usage in tokens.",
       "type": "object",
       "required": [
         "exp",
@@ -139,6 +163,7 @@
       }
     },
     "LoggingConfig": {
+      "description": "LoggingConfig controls how we initialize tracing/logging.",
       "type": "object",
       "required": [
         "format",
@@ -170,10 +195,10 @@
       }
     },
     "ProviderConfig": {
-      "description": "A config enum to select which provider we use (ECMWF API, JWT, OpenID Offline, Plain).",
+      "description": "Configuration options for each authentication provider.",
       "oneOf": [
         {
-          "description": "The config needed for the ECMWF API provider: - `uri` indicates the who-am-i endpoint - `realm` is the user realm - `name` is this provider’s display name",
+          "description": "The config needed for the ECMWF API provider (who-am-i endpoint).",
           "type": "object",
           "required": [
             "name",
@@ -309,6 +334,7 @@
       ]
     },
     "ServiceConfig": {
+      "description": "A declaration of services we might need (e.g., to store scopes).",
       "type": "object",
       "required": [
         "name",
@@ -327,7 +353,7 @@
       }
     },
     "StoreConfig": {
-      "description": "A wrapper for the store configuration. - `enabled`: if false, the store is effectively disabled (NoStore). - `backend`: actual store backend config, if any.",
+      "description": "A wrapper for the store configuration: - enabled: if false, the store is effectively disabled (NoStore). - backend: the actual store backend (MongoDB, etc.).",
       "type": "object",
       "oneOf": [
         {

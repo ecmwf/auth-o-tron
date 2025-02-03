@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, info};
 
-use super::User;
+use crate::models::User;
 
 /// JWT config structure for external usage
 #[derive(Deserialize, Serialize, JsonSchema, Debug, Clone)]
@@ -156,5 +156,81 @@ pub async fn get_certs(cert_uri: String) -> Result<String, String> {
         Ok(json.to_string())
     } else {
         Err(format!("Failed to download certificates: {}", res.status()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::auth::Provider;
+    use mockito::Server;
+    use tokio;
+
+    /// Test that `get_certs` returns the expected JSON when the endpoint is successful.
+    #[tokio::test]
+    async fn test_get_certs_success() {
+        let jwks = r#"{"keys": []}"#;
+        // Create an async mock server.
+        let mut server = Server::new_async().await;
+        let m = server
+            .mock("GET", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(jwks)
+            .create_async()
+            .await;
+        let url = server.url();
+        let result = get_certs(url.to_string()).await;
+        m.assert_async().await;
+        assert!(result.is_ok());
+
+        // Parse both the expected and actual JSON strings.
+        let expected: serde_json::Value =
+            serde_json::from_str(jwks).expect("Invalid expected JSON");
+        let actual: serde_json::Value =
+            serde_json::from_str(&result.unwrap()).expect("Invalid actual JSON");
+        assert_eq!(actual, expected);
+    }
+
+    /// Test that `get_certs` returns an error when the endpoint returns a failure status.
+    #[tokio::test]
+    async fn test_get_certs_failure() {
+        let mut server = Server::new_async().await;
+        let m = server
+            .mock("GET", "/")
+            .with_status(500)
+            .with_body("Internal Server Error")
+            .create_async()
+            .await;
+        let url = server.url();
+        let result = get_certs(url.to_string()).await;
+        m.assert_async().await;
+        assert!(result.is_err());
+    }
+
+    /// Test that JWTProvider::authenticate fails with an invalid token.
+    #[tokio::test]
+    async fn test_jwt_provider_invalid_token() {
+        // Simulate a JWKS endpoint that returns an empty keys array.
+        let jwks = r#"{"keys": []}"#;
+        let mut server = Server::new_async().await;
+        let m = server
+            .mock("GET", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(jwks)
+            .create_async()
+            .await;
+        let url = server.url();
+        let config = JWTAuthConfig {
+            cert_uri: url.to_string(),
+            realm: "test".to_string(),
+            name: "TestJWT".to_string(),
+            iam_realm: "test".to_string(),
+        };
+        let provider = JWTProvider::new(&config);
+        let result = provider.authenticate("invalid.token").await;
+        m.assert_async().await;
+        assert!(result.is_err());
     }
 }

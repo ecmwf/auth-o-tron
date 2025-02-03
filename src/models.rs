@@ -6,8 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::JWTConfig;
 
-/// The `User` struct defines the authenticated user,
-/// including realm, username, roles, attributes, and optional scopes.
+/// The User struct represents an authenticated user in the system.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct User {
     pub version: i32,
@@ -15,31 +14,18 @@ pub struct User {
     pub username: String,
     pub roles: Vec<String>,
     pub attributes: HashMap<String, String>,
-    pub scopes: Option<HashMap<Service, Scopes>>,
-}
-
-/// A simple type alias for service names.
-type Service = String;
-/// Another alias for scopes, which is a vector of strings.
-type Scopes = Vec<String>;
-
-/// A `Token` struct that holds metadata about an issued token.
-/// This is often stored in the database for easy revocation or lookup.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Token {
-    pub version: i32,
-    pub token_string: String,
-    pub scopes: HashMap<Service, Scopes>,
+    /// A map of service -> scopes
+    pub scopes: Option<HashMap<String, Vec<String>>>,
 }
 
 impl User {
-    /// Create a new `User` with optional roles, attributes, scopes, and version.
+    /// Construct a new User with optional roles, attributes, scopes.
     pub fn new(
         realm: String,
         username: String,
         roles: Option<Vec<String>>,
         attributes: Option<HashMap<String, String>>,
-        scopes: Option<HashMap<Service, Scopes>>,
+        scopes: Option<HashMap<String, Vec<String>>>,
         version: Option<i32>,
     ) -> Self {
         User {
@@ -52,29 +38,25 @@ impl User {
         }
     }
 
-    /// Convert a `User` into a signed JWT string, using the provided JWT config.
+    /// Convert a User into a signed JWT string, using the config from `JWTConfig`.
     pub fn to_jwt(&self, jwtconfig: &JWTConfig) -> String {
         #[derive(Serialize)]
         struct Claims<'a> {
-            // Registered Claims
             sub: &'a String,
             iss: &'a String,
             aud: &'a Option<String>,
             exp: i64,
             iat: i64,
 
-            // Public Claims
             roles: &'a Vec<String>,
             username: &'a String,
-            scopes: &'a Option<HashMap<Service, Scopes>>,
-
-            // Private Claims
+            scopes: &'a Option<HashMap<String, Vec<String>>>,
             realm: &'a String,
             attributes: &'a HashMap<String, String>,
         }
 
-        let sub = format!("{}-{}", self.realm, self.username);
         let now = Utc::now().timestamp();
+        let sub = format!("{}-{}", self.realm, self.username);
 
         let claims = Claims {
             sub: &sub,
@@ -94,97 +76,81 @@ impl User {
     }
 }
 
-#[allow(dead_code, unused_variables)]
+/// A token stored in a database for lookup/revocation.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Token {
+    pub version: i32,
+    pub token_string: String,
+    /// A map from service -> scopes
+    pub scopes: HashMap<String, Vec<String>>,
+}
+
 impl Token {
-    /// Creates a new `Token` with optional version,
-    /// automatically generating a new UUID token string.
+    /// Create a new Token with optional version.
+    /// We automatically generate a new token_string (UUID).
     pub fn new(
-        token_string: String,
-        scopes: HashMap<Service, Scopes>,
+        _suggested_token_str: String,
+        scopes: HashMap<String, Vec<String>>,
         version: Option<i32>,
     ) -> Self {
         Token {
             version: version.unwrap_or(1),
-            // Overwrites the passed-in token_string with a new UUID
             token_string: uuid::Uuid::new_v4().to_string(),
             scopes,
         }
     }
 }
 
-// Simple tests to verify the `User` struct and JWT encoding.
-#[test]
-fn test_user_new() {
-    let user = User::new(
-        "realm".to_string(),
-        "username".to_string(),
-        Some(vec!["role1".to_string(), "role2".to_string()]),
-        Some(
-            [("key1".to_string(), "value1".to_string())]
-                .iter()
-                .cloned()
-                .collect(),
-        ),
-        Some(
-            [("service1".to_string(), vec!["scope1".to_string()])]
-                .iter()
-                .cloned()
-                .collect(),
-        ),
-        Some(1),
-    );
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::JWTConfig;
+    use jsonwebtoken::{decode, DecodingKey, Validation};
 
-    assert_eq!(user.version, 1);
-    assert_eq!(user.realm, "realm");
-    assert_eq!(user.username, "username");
-    assert_eq!(user.roles, vec!["role1", "role2"]);
-    assert_eq!(
-        user.attributes,
-        [("key1".to_string(), "value1".to_string())]
-            .iter()
-            .cloned()
-            .collect()
-    );
-    assert_eq!(
-        user.scopes,
-        Some(
-            [("service1".to_string(), vec!["scope1".to_string()])]
-                .iter()
-                .cloned()
-                .collect()
+    /// Test that converting a User to a JWT and then decoding it yields the expected claims.
+    ///
+    /// Note: We disable audience validation in this test (as in production code)
+    /// by setting `validation.validate_aud = false`. This prevents the decoder from
+    /// failing with an "InvalidAudience" error.
+    #[test]
+    fn test_to_jwt_and_decode() {
+        // Create a user with test data.
+        let user = User::new(
+            "test".to_string(),
+            "user1".to_string(),
+            Some(vec!["role1".to_string()]),
+            None,
+            None,
+            Some(1),
+        );
+        // Create a JWT configuration with an audience.
+        let jwt_config = JWTConfig {
+            iss: "test_issuer".to_string(),
+            aud: Some("test_audience".to_string()),
+            exp: 3600,
+            secret: "secretkey".to_string(),
+        };
+        // Convert the user into a JWT.
+        let token = user.to_jwt(&jwt_config);
+
+        // Create a default validation instance and disable audience validation.
+        let mut validation = Validation::default();
+        validation.validate_aud = false;
+
+        // Decode the token using the secret from jwt_config.
+        let token_data = decode::<serde_json::Value>(
+            &token,
+            &DecodingKey::from_secret(jwt_config.secret.as_ref()),
+            &validation,
         )
-    );
-}
+        .expect("Failed to decode JWT");
 
-#[test]
-fn test_user_to_jwt() {
-    let user = User::new(
-        "realm".to_string(),
-        "username".to_string(),
-        Some(vec!["role1".to_string(), "role2".to_string()]),
-        Some(
-            [("key1".to_string(), "value1".to_string())]
-                .iter()
-                .cloned()
-                .collect(),
-        ),
-        Some(
-            [("service1".to_string(), vec!["scope1".to_string()])]
-                .iter()
-                .cloned()
-                .collect(),
-        ),
-        Some(1),
-    );
-
-    let jwtconfig = JWTConfig {
-        iss: "issuer".to_string(),
-        aud: Some("audience".to_string()),
-        exp: 3600,
-        secret: "secret".to_string(),
-    };
-
-    let jwt = user.to_jwt(&jwtconfig);
-    assert!(!jwt.is_empty());
-    println!("JWT: {}", jwt)
+        let claims = token_data.claims;
+        // Assert that the issuer claim matches.
+        assert_eq!(claims["iss"], jwt_config.iss);
+        // Assert that the username claim matches.
+        assert_eq!(claims["username"], user.username);
+        // (Optionally) Assert that the audience claim is present and equals what we set.
+        assert_eq!(claims["aud"], jwt_config.aud.unwrap());
+    }
 }

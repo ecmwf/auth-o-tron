@@ -4,7 +4,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use super::{Provider, User};
+use super::Provider;
+use crate::models::User;
 
 /// PlainAuthConfig defines the data for Basic authentication.
 #[derive(Deserialize, Serialize, Debug, JsonSchema, Clone)]
@@ -99,5 +100,61 @@ impl Provider for PlainAuthProvider {
         }
 
         Err("Wrong username or password".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that valid credentials (username:password) are correctly authenticated.
+    #[tokio::test]
+    async fn test_authenticate_valid_credentials() {
+        let config = PlainAuthConfig {
+            name: "TestPlain".to_string(),
+            realm: "test".to_string(),
+            users: vec![PlainUserEntry {
+                username: "user1".to_string(),
+                password: "password1".to_string(),
+            }],
+        };
+        let provider = PlainAuthProvider::new(&config);
+        let credentials = general_purpose::STANDARD.encode("user1:password1");
+        let result = provider.authenticate(&credentials).await;
+        assert!(result.is_ok());
+        let user = result.unwrap();
+        assert_eq!(user.username, "user1");
+        assert_eq!(user.realm, "test");
+    }
+
+    /// Test that an invalid password returns an error.
+    #[tokio::test]
+    async fn test_authenticate_invalid_credentials() {
+        let config = PlainAuthConfig {
+            name: "TestPlain".to_string(),
+            realm: "test".to_string(),
+            users: vec![PlainUserEntry {
+                username: "user1".to_string(),
+                password: "password1".to_string(),
+            }],
+        };
+        let provider = PlainAuthProvider::new(&config);
+        let credentials = general_purpose::STANDARD.encode("user1:wrongpassword");
+        let result = provider.authenticate(&credentials).await;
+        assert!(result.is_err());
+    }
+
+    /// Test that credentials that are not valid base64 yield an error.
+    #[tokio::test]
+    async fn test_authenticate_invalid_base64() {
+        let config = PlainAuthConfig {
+            name: "TestPlain".to_string(),
+            realm: "test".to_string(),
+            users: vec![],
+        };
+        let provider = PlainAuthProvider::new(&config);
+        let credentials = "not_base64";
+        let result = provider.authenticate(credentials).await;
+        assert!(result.is_err());
     }
 }

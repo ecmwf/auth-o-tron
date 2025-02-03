@@ -30,3 +30,59 @@ impl Store for NoStore {
         Err("Token store is disabled".into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{Token, User};
+
+    /// Test that adding a token with NoStore returns an error.
+    #[tokio::test]
+    async fn test_no_store_add_token() {
+        let no_store = NoStore::new();
+        let token = Token::new("dummy".to_string(), Default::default(), None);
+        let user = User::new(
+            "test".to_string(),
+            "user".to_string(),
+            None,
+            None,
+            None,
+            Some(1),
+        );
+        let res = no_store.add_token(&token, &user, 3600).await;
+        assert!(res.is_err(), "Expected add_token to return an error");
+    }
+
+    /// Test that retrieving tokens with NoStore returns an error.
+    #[tokio::test]
+    async fn test_no_store_get_tokens() {
+        let no_store = NoStore::new();
+        let user = User::new(
+            "test".to_string(),
+            "user".to_string(),
+            None,
+            None,
+            None,
+            Some(1),
+        );
+        let res = no_store.get_tokens(&user).await;
+        assert!(res.is_err(), "Expected get_tokens to return an error");
+    }
+
+    /// Test that retrieving a user with NoStore returns an error.
+    #[tokio::test]
+    async fn test_no_store_get_user() {
+        let no_store = NoStore::new();
+        // Attempt to retrieve a user using any token string.
+        let res = no_store.get_user("dummy_token").await;
+        assert!(res.is_err(), "Expected get_user to return an error");
+    }
+
+    /// Test that deleting a token with NoStore returns an error.
+    #[tokio::test]
+    async fn test_no_store_delete_token() {
+        let no_store = NoStore::new();
+        let res = no_store.delete_token("dummy_token").await;
+        assert!(res.is_err(), "Expected delete_token to return an error");
+    }
+}
