@@ -80,3 +80,62 @@ async fn query(uri: String, token: String, realm: String) -> Result<User, String
         Err(format!("Unexpected status code: {}", response.status()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mockito::Server;
+    use tokio;
+
+    /// Test that a valid token returns a User with the expected UID.
+    #[tokio::test]
+    async fn test_ecmwf_api_provider_success() {
+        let token = "valid_token";
+        let response_body = r#"{"uid": "user_ecmwf"}"#;
+        let realm = "test";
+
+        // Create an async mock server (mutable).
+        let mut server = Server::new_async().await;
+        // Build the expected path for the who-am-i endpoint.
+        let path = format!("/who-am-i?token={}", token);
+        // Create a mock for the GET request.
+        let m = server
+            .mock("GET", path.as_str())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body)
+            .create_async()
+            .await;
+
+        // Get the base URL from the mock server.
+        let uri = server.url();
+        let result = query(uri, token.to_string(), realm.to_string()).await;
+        m.assert_async().await;
+        assert!(result.is_ok());
+        let user = result.unwrap();
+        assert_eq!(user.username, "user_ecmwf");
+        assert_eq!(user.realm, realm);
+    }
+
+    /// Test that an invalid token (simulated with a 403 response) returns an error.
+    #[tokio::test]
+    async fn test_ecmwf_api_provider_invalid_token() {
+        let token = "invalid_token";
+        let realm = "test";
+        let response_body = "Forbidden";
+
+        let mut server = Server::new_async().await;
+        let path = format!("/who-am-i?token={}", token);
+        let m = server
+            .mock("GET", path.as_str())
+            .with_status(403)
+            .with_body(response_body)
+            .create_async()
+            .await;
+
+        let uri = server.url();
+        let result = query(uri, token.to_string(), realm.to_string()).await;
+        m.assert_async().await;
+        assert!(result.is_err());
+    }
+}

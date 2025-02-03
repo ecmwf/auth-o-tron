@@ -150,3 +150,111 @@ impl Provider for OpenIDOfflineProvider {
         self.jwt_auth.authenticate(&access_token).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mockito::Server;
+    use tokio;
+
+    /// Test that check_offline_access_token returns true
+    /// when the introspection endpoint indicates a valid offline token.
+    #[tokio::test]
+    async fn test_check_offline_access_token_valid() {
+        // Define the expected introspection response.
+        let response_body = r#"{"active": true, "scope": "offline_access other_scope"}"#;
+        let realm = "test";
+
+        // Create an asynchronous mock server.
+        let mut server = Server::new_async().await;
+        // Build the path for the introspection endpoint.
+        let path = format!("/realms/{}/protocol/openid-connect/token/introspect", realm);
+        let m = server
+            .mock("POST", path.as_str())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body)
+            .create_async()
+            .await;
+
+        // Use the mock server's URL as iam_url.
+        let config = OpenIDOfflineProviderConfig {
+            name: "TestOpenID".to_string(),
+            cert_uri: "".to_string(),
+            public_client_id: "public".to_string(),
+            private_client_id: "private".to_string(),
+            private_client_secret: "secret".to_string(),
+            iam_url: server.url(),
+            iam_realm: realm.to_string(),
+        };
+
+        let result = check_offline_access_token(config, "dummy_token".to_string()).await;
+        m.assert_async().await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), true);
+    }
+
+    /// Test that check_offline_access_token returns false when the introspection endpoint indicates an inactive token.
+    #[tokio::test]
+    async fn test_check_offline_access_token_invalid() {
+        let response_body = r#"{"active": false, "scope": ""}"#;
+        let realm = "test";
+
+        let mut server = Server::new_async().await;
+        let path = format!("/realms/{}/protocol/openid-connect/token/introspect", realm);
+        let m = server
+            .mock("POST", path.as_str())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body)
+            .create_async()
+            .await;
+
+        let config = OpenIDOfflineProviderConfig {
+            name: "TestOpenID".to_string(),
+            cert_uri: "".to_string(),
+            public_client_id: "public".to_string(),
+            private_client_id: "private".to_string(),
+            private_client_secret: "secret".to_string(),
+            iam_url: server.url(),
+            iam_realm: realm.to_string(),
+        };
+
+        let result = check_offline_access_token(config, "dummy_token".to_string()).await;
+        m.assert_async().await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), false);
+    }
+
+    /// Test that get_access_token successfully exchanges a refresh token for an access token.
+    #[tokio::test]
+    async fn test_get_access_token_success() {
+        let response_body = r#"{"access_token": "new_access_token"}"#;
+        let realm = "test";
+
+        let mut server = Server::new_async().await;
+        let path = format!("/realms/{}/protocol/openid-connect/token", realm);
+        let m = server
+            .mock("POST", path.as_str())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(response_body)
+            .create_async()
+            .await;
+
+        let config = OpenIDOfflineProviderConfig {
+            name: "TestOpenID".to_string(),
+            cert_uri: "".to_string(),
+            public_client_id: "public".to_string(),
+            private_client_id: "private".to_string(),
+            private_client_secret: "secret".to_string(),
+            iam_url: server.url(),
+            iam_realm: realm.to_string(),
+        };
+
+        let result = get_access_token(config, "dummy_refresh_token".to_string()).await;
+        m.assert_async().await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "new_access_token".to_string());
+    }
+}
