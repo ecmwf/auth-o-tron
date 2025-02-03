@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
+use crate::config::AuthConfig;
 use crate::models::User;
 use crate::store::Store;
-use futures::future;
+use futures::future::{select_ok, FutureExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 use super::ecmwfapi_provider::{EcmwfApiProvider, EcmwfApiProviderConfig};
@@ -13,6 +15,7 @@ use super::ldap_augmenter::{LDAPAugmenter, LDAPAugmenterConfig};
 use super::openid_offline_provider::{OpenIDOfflineProvider, OpenIDOfflineProviderConfig};
 use super::plain_provider::{PlainAuthConfig, PlainAuthProvider};
 
+/// Configuration options for each authentication provider.
 #[derive(Deserialize, Serialize, JsonSchema, Debug)]
 #[serde(tag = "type")]
 pub enum ProviderConfig {
@@ -29,6 +32,7 @@ pub enum ProviderConfig {
     PlainAuthConfig(PlainAuthConfig),
 }
 
+/// Configuration options for augmenters (e.g. an LDAP roles augmenter).
 #[derive(Deserialize, Serialize, JsonSchema, Debug)]
 #[serde(tag = "type")]
 pub enum AugmenterConfig {
@@ -36,7 +40,7 @@ pub enum AugmenterConfig {
     LDAPAugmenterConfig(LDAPAugmenterConfig),
 }
 
-/// Trait describing a basic authentication provider.
+/// An authentication provider must be able to return a User or an error.
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync {
     fn get_name(&self) -> &str;
@@ -44,7 +48,7 @@ pub trait Provider: Send + Sync {
     async fn authenticate(&self, credentials: &str) -> Result<User, String>;
 }
 
-/// Trait describing an augmenter (e.g. retrieving LDAP roles).
+/// An augmenter can add extra roles or info to an already-authenticated User.
 #[async_trait::async_trait]
 pub trait Augmenter: Send + Sync {
     fn get_name(&self) -> &str;
@@ -53,7 +57,7 @@ pub trait Augmenter: Send + Sync {
     async fn augment(&self, user: &mut User) -> Result<(), String>;
 }
 
-/// Produces a boxed provider based on the config variant.
+/// Create an authentication provider from a given config.
 pub fn create_auth_provider(config: &ProviderConfig) -> Box<dyn Provider> {
     match config {
         ProviderConfig::EcmwfApiAuthConfig(cfg) => Box::new(EcmwfApiProvider::new(cfg)),
@@ -63,29 +67,32 @@ pub fn create_auth_provider(config: &ProviderConfig) -> Box<dyn Provider> {
     }
 }
 
-/// Produces a boxed augmenter based on the config variant.
+/// Create an augmenter from a given config.
 pub fn create_auth_augmenter(config: &AugmenterConfig) -> Box<dyn Augmenter> {
     match config {
         AugmenterConfig::LDAPAugmenterConfig(cfg) => Box::new(LDAPAugmenter::new(cfg)),
     }
 }
 
-/// The main Auth struct, holding all providers, augmenters, and a reference to the store.
+/// Holds all authentication providers, augmenters, and a reference to the store.
 pub struct Auth {
     pub providers: Vec<Box<dyn Provider>>,
     pub augmenters: Vec<Box<dyn Augmenter>>,
+    config: AuthConfig,
     #[allow(dead_code)]
     token_store: Arc<dyn Store>,
 }
 
 impl Auth {
+    /// Initialize the Auth struct by creating providers and augmenters from the configurations.
     pub fn new(
         provider_config: &[ProviderConfig],
         augmenter_config: &[AugmenterConfig],
         token_store: Arc<dyn Store>,
+        config: AuthConfig,
     ) -> Self {
         info!("Creating auth providers...");
-        // Convert each config to a provider, plus add the store-based token provider
+        // Convert configs into providers, plus add a provider that uses the token_store directly.
         let providers = provider_config
             .iter()
             .map(create_auth_provider)
@@ -101,13 +108,14 @@ impl Auth {
             providers,
             augmenters,
             token_store,
+            config,
         }
     }
 
-    /// Attempts authentication across all matching providers, returning the first successful User,
-    /// then enriches the user using augmenters for that realm, or returns None if no provider succeeds.
+    /// Authenticates a user using the first provider that succeeds. We wrap each provider
+    /// call in a timeout so a slow or non-responsive provider won't block the others.
+    /// If all fail or time out, returns None.
     pub async fn authenticate(&self, auth_header: &str, ip: &str) -> Option<User> {
-        // Basic checking of the header format
         let parts: Vec<&str> = auth_header.split_whitespace().collect();
         if parts.len() != 2 {
             warn!("Authorization header invalid format: '{}'", auth_header);
@@ -122,7 +130,7 @@ impl Auth {
             auth_type, ip
         );
 
-        // Filter providers that match the auth header type
+        // Collect all providers that match the type in the Authorization header.
         let valid_providers: Vec<_> = self
             .providers
             .iter()
@@ -134,38 +142,39 @@ impl Auth {
             return None;
         }
 
-        // Run them in parallel
-        let futures: Vec<_> = valid_providers
+        let timeout_duration = std::time::Duration::from_secs(self.config.timeout_in_ms);
+        // Wrap each provider future in a timeout and box it so we can use select_ok.
+        let futures = valid_providers
             .iter()
-            .map(|provider| provider.authenticate(auth_credentials))
-            .collect();
-        let results = future::join_all(futures).await;
-
-        let mut user_opt: Option<User> = None;
-        for (provider, result) in valid_providers.iter().zip(results) {
-            match result {
-                Ok(u) => {
-                    info!(
-                        "Provider '{}' authenticated user '{}'",
-                        provider.get_name(),
-                        u.username
-                    );
-                    user_opt = Some(u);
-                    break;
+            .map(|provider| {
+                let name = provider.get_name().to_owned();
+                async move {
+                    match timeout(timeout_duration, provider.authenticate(auth_credentials)).await {
+                        Ok(Ok(user)) => Ok((name, user)),
+                        Ok(Err(e)) => Err(format!("Provider '{}' failed: {}", name, e)),
+                        Err(_) => Err(format!("Provider '{}' timed out", name)),
+                    }
                 }
-                Err(e) => warn!("Provider '{}' failed: {}", provider.get_name(), e),
-            }
-        }
+                .boxed()
+            })
+            .collect::<Vec<_>>();
 
-        let mut user = match user_opt {
-            Some(u) => u,
-            None => {
-                warn!("All providers failed; no authentication succeeded.");
+        // select_ok returns on the first successful authentication, dropping unused futures.
+        let mut user = match select_ok(futures).await {
+            Ok(((provider_name, user), _remaining)) => {
+                info!(
+                    "Provider '{}' authenticated user '{}'",
+                    provider_name, user.username
+                );
+                user
+            }
+            Err(e) => {
+                warn!("All providers failed; last error: {}", e);
                 return None;
             }
         };
 
-        // Augment the user if any augmenters match the user's realm
+        // Augment the user if there's an augmenter whose realm matches the authenticated user's realm.
         let realm = user.realm.clone();
         let matching_augmenters = self
             .augmenters
@@ -175,11 +184,11 @@ impl Auth {
         for aug in matching_augmenters {
             match aug.augment(&mut user).await {
                 Ok(_) => info!(
-                    "Augmenter '{}' succeeded for '{}'!",
+                    "Augmenter '{}' succeeded for '{}'",
                     aug.get_name(),
                     user.username
                 ),
-                Err(e) => warn!("Augmenter '{}' failed: {}", aug.get_name(), e),
+                Err(err) => warn!("Augmenter '{}' failed: {}", aug.get_name(), err),
             }
         }
 

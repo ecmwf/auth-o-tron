@@ -132,12 +132,11 @@ impl Augmenter for LDAPAugmenter {
     /// Adds additional roles to the user from LDAP, if the realms match.
     async fn augment(&self, user: &mut User) -> Result<(), String> {
         if user.realm != self.get_realm() {
-            // Using panic is a bit harsh in production code, but we'll leave as-is for clarity.
-            panic!(
+            return Err(format!(
                 "Attempted to augment user in the wrong realm. Expected '{}', got '{}'",
                 self.get_realm(),
                 user.realm
-            );
+            ));
         }
 
         debug!("Retrieving LDAP roles for user '{}'", user.username);
