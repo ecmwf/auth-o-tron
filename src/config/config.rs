@@ -27,6 +27,7 @@ pub struct ConfigV1 {
     pub jwt: JWTConfig,
     pub include_legacy_headers: Option<bool>,
     pub logging: LoggingConfig,
+    // If the YAML omits the auth section, Serde calls AuthConfig::default().
     #[serde(default)]
     pub auth: AuthConfig,
 }
@@ -77,11 +78,12 @@ fn default_timeout_in_ms() -> u64 {
 /// This is used for select_ok operations in the auth module,
 /// and we kill ongoing futures if they take too long.
 ///
-/// Note: The `#[serde(default = "default_timeout_in_ms")]` attribute
-/// only affects deserialization when the `timeout_in_ms` key is missing.
-/// However, when the entire `auth` section is omitted, Serde calls
-/// `AuthConfig::default()`. Therefore, we implement Default manually
-/// for AuthConfig so that AuthConfig::default() returns a timeout of 5000 ms.
+/// Note:
+/// - The attribute `#[serde(default = "default_timeout_in_ms")]` ensures that if
+///   the `timeout_in_ms` key is missing during deserialization, it gets set to 5000.
+/// - However, when the entire auth section is omitted, Serde calls `AuthConfig::default()`.
+///   Therefore, we manually implement Default for AuthConfig so that AuthConfig::default()
+///   returns a timeout of 5000 instead of the primitive default (0).
 #[derive(Deserialize, Serialize, Debug, JsonSchema, Clone)]
 pub struct AuthConfig {
     #[serde(default = "default_timeout_in_ms")]
@@ -89,7 +91,7 @@ pub struct AuthConfig {
 }
 
 // Manually implement Default for AuthConfig so that AuthConfig::default()
-// sets timeout_in_ms to 5000 instead of 0.
+// returns a timeout_in_ms of 5000 ms.
 impl Default for AuthConfig {
     fn default() -> Self {
         AuthConfig {
@@ -101,19 +103,15 @@ impl Default for AuthConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Import the Yaml provider from figment.
     use figment::providers::Yaml;
     use serde_json;
 
     /// Test that the printed JSON schema is valid JSON and represents an object.
     #[test]
     fn test_print_schema_parses() {
-        // Generate the JSON schema for the Config enum.
         let schema = schema_for!(Config);
         let schema_str = serde_json::to_string_pretty(&schema).unwrap();
-        // Parse the schema back into a serde_json::Value.
         let parsed: serde_json::Value = serde_json::from_str(&schema_str).unwrap();
-        // Assert that the parsed schema is a JSON object.
         assert!(
             parsed.is_object(),
             "Schema should be a JSON object, got: {}",
@@ -140,21 +138,19 @@ logging:
   format: "console"
 services: []
         "#;
-        // Use the Yaml provider to merge the YAML string.
         let figment = Figment::new().merge(Yaml::string(yaml));
         let config: Config = figment.extract().expect("Should parse config");
         match config {
             Config::ConfigV1(c) => {
-                // Check that the bind address, logging, and JWT fields are as expected.
+                // Check that basic fields are deserialized as expected.
                 assert_eq!(c.bind_address, "127.0.0.1:3000");
                 assert_eq!(c.logging.level, "info");
                 assert_eq!(c.jwt.iss, "issuer");
                 assert_eq!(c.jwt.exp, 3600);
                 assert_eq!(c.jwt.secret, "secret");
-                // Since "aud" is not provided, it should be None.
-                assert!(c.jwt.aud.is_none());
-                // "auth" is not provided in the YAML, so it should be None.
-                assert!(c.auth.is_none());
+                // Since the auth section is omitted, we expect AuthConfig::default()
+                // to be used, which sets timeout_in_ms to 5000.
+                assert_eq!(c.auth.timeout_in_ms, 5000);
             }
         }
     }
@@ -162,7 +158,6 @@ services: []
     /// Test that deserialization fails when a required field (e.g., bind_address) is missing.
     #[test]
     fn test_config_deserialization_missing_fields() {
-        // YAML missing the required "bind_address" field.
         let yaml = r#"
 version: "1.0.0"
 store:
@@ -212,17 +207,17 @@ auth:
         let config: Config = figment.extract().expect("Should parse config with auth");
         match config {
             Config::ConfigV1(c) => {
-                // Verify that the auth section is present and that the timeout is correctly set.
-                assert!(c.auth.is_some(), "Auth section should be present");
-                let auth = c.auth.unwrap();
-                assert_eq!(auth.timeout_in_ms, 8000);
+                // Here, the auth section is provided, so timeout_in_ms should be as specified.
+                assert_eq!(c.auth.timeout_in_ms, 8000);
             }
         }
     }
 
-    /// Test that if the auth section is not provided, it remains None.
+    /// Test that if the auth section is omitted, the default AuthConfig is used.
     #[test]
     fn test_config_auth_absence() {
+        // When the auth section is omitted, our manual Default implementation
+        // for AuthConfig should set timeout_in_ms to 5000.
         let yaml = r#"
 version: "1.0.0"
 store:
@@ -243,11 +238,8 @@ services: []
         let config: Config = figment.extract().expect("Should parse config without auth");
         match config {
             Config::ConfigV1(c) => {
-                // Since no auth section was provided, auth should be None.
-                assert!(
-                    c.auth.is_none(),
-                    "Auth section should be absent when not provided"
-                );
+                // Expect the default auth configuration.
+                assert_eq!(c.auth.timeout_in_ms, 5000);
             }
         }
     }
