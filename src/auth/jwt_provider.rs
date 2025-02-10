@@ -1,11 +1,11 @@
-use std::collections::HashMap;
-
+#[allow(unused_imports)]
 use cached::proc_macro::cached;
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use tracing::{debug, info};
 
 use crate::models::User;
@@ -142,7 +142,7 @@ impl super::Provider for JWTProvider {
 }
 
 /// Retrieves the certificates (JWKS) from a remote URI. Cached for 600s to avoid repeated fetches.
-#[cached(time = 600, sync_writes = true)]
+#[cfg_attr(not(test), cached(time = 600, sync_writes = true))]
 pub async fn get_certs(cert_uri: String) -> Result<String, String> {
     let res = reqwest::get(&cert_uri)
         .await
