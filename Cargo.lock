@@ -119,6 +119,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "authotron"
+version = "0.2.1"
+dependencies = [
+ "aide",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "cached",
+ "chrono",
+ "figment",
+ "futures",
+ "http",
+ "hyper",
+ "inline_colorization",
+ "jsonwebtoken",
+ "ldap3",
+ "mockito",
+ "mongodb",
+ "r2d2",
+ "reqwest",
+ "schemars",
+ "semver 1.0.25",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower 0.4.13",
+ "tracing",
+ "tracing-log 0.1.4",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1799,39 +1832,6 @@ dependencies = [
  "spin",
  "untrusted",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "rust-authotron"
-version = "0.2.0"
-dependencies = [
- "aide",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "cached",
- "chrono",
- "figment",
- "futures",
- "http",
- "hyper",
- "inline_colorization",
- "jsonwebtoken",
- "ldap3",
- "mockito",
- "mongodb",
- "r2d2",
- "reqwest",
- "schemars",
- "semver 1.0.25",
- "serde",
- "serde_json",
- "tokio",
- "tower 0.4.13",
- "tracing",
- "tracing-log 0.1.4",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
