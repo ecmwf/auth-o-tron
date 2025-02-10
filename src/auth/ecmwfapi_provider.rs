@@ -4,6 +4,7 @@ use serde_json::Value;
 use tracing::{debug, info};
 
 use crate::models::User;
+#[allow(unused_imports)]
 use cached::proc_macro::cached;
 use reqwest;
 
