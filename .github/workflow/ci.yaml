@@ -1,0 +1,41 @@
+name: Auth-o-tron-CI
+
+on:
+  # Run on any push to any branch:
+  push: {}
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      # 1) Check out the repo code
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      # 2) Install Rust stable (for cargo commands)
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      # 3) Install rustfmt
+      - name: Install rustfmt
+        run: rustup component add rustfmt
+
+      # 4) Run cargo fmt --check
+      - name: Check code formatting
+        run: cargo fmt -- --check
+
+      # 5) Run cargo test
+      - name: Run tests
+        run: cargo test
+
+      # 6) If not on main, skip release steps
+      #    This step creates an output "should_release"
+      #    If the branch is main, we set "true", else "false"
+      - name: Determine if we are on main
+        id: branch_check
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          fi
