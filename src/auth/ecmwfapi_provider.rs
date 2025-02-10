@@ -53,7 +53,7 @@ impl super::Provider for EcmwfApiProvider {
 }
 
 /// Queries the ECMWF who-am-i endpoint with the provided token, returning a User on success.
-#[cached(time = 60, sync_writes = true)]
+#[cfg_attr(not(test), cached(time = 60, sync_writes = true))]
 async fn query(uri: String, token: String, realm: String) -> Result<User, String> {
     let client = reqwest::Client::new();
     let url = format!("{}/who-am-i?token={}", uri, token);
