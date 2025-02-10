@@ -1,5 +1,14 @@
 ![auth-o-tron logo](docs/logo.png)
 
+<div align="center">
+  <a href="https://github.com/ecmwf/codex/raw/refs/heads/main/ESEE">
+    <img src="https://github.com/ecmwf/codex/raw/refs/heads/main/ESEE/foundation_badge.svg" alt="Static Badge">
+  </a>
+  <a href="https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity">
+    <img src="https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity/emerging_badge.svg" alt="Static Badge">
+  </a>
+</div>
+
 
 > [!WARNING]
 > This project is under development and not yet feature complete or tested. The following readme is a wishlist, not a feature list. DO NOT use this software in any project/software that is operational.
