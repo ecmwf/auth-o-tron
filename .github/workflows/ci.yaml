@@ -80,7 +80,7 @@ jobs:
           sudo mv skaffold /usr/local/bin/
 
       # 5) Build and push Docker images using Skaffold
-      #    Pass along CARGO_VERSION (extracted from Cargo.toml) in case you wish to use it in your image tag.
+      #    Pass along CARGO_VERSION (extracted from Cargo.toml) to use it in the image tag.
       - name: Build and push Docker images with Skaffold
         env:
           SKAFFOLD_DEFAULT_REPO: eccr.ecmwf.int/auth-o-tron
