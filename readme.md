@@ -10,9 +10,6 @@
 </div>
 
 
-> [!WARNING]
-> This project is under development and not yet feature complete or tested. The following readme is a wishlist, not a feature list. DO NOT use this software in any project/software that is operational.
-
 Effortless authentication and authorization for web APIs.
 
 * Easily configure HTTP APIs to use a variety of authentication providers.
