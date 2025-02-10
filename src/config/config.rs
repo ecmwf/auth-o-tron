@@ -27,7 +27,8 @@ pub struct ConfigV1 {
     pub jwt: JWTConfig,
     pub include_legacy_headers: Option<bool>,
     pub logging: LoggingConfig,
-    pub auth: Option<AuthConfig>,
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 /// Load config from a YAML file named "config.yaml" in the current directory.
@@ -67,17 +68,34 @@ pub struct ServiceConfig {
     pub scopes: Vec<String>,
 }
 
+/// Returns the default timeout value (5000 ms).
 fn default_timeout_in_ms() -> u64 {
-    5000 // default to 5000 ms
+    5000
 }
 
 /// Configuration for the authentication timeout.
-/// This is used for select_ok operation in the auth module.
-/// We kill ongoing futures if they take too long.
-#[derive(Deserialize, Serialize, Debug, JsonSchema, Clone, Default)]
+/// This is used for select_ok operations in the auth module,
+/// and we kill ongoing futures if they take too long.
+///
+/// Note: The `#[serde(default = "default_timeout_in_ms")]` attribute
+/// only affects deserialization when the `timeout_in_ms` key is missing.
+/// However, when the entire `auth` section is omitted, Serde calls
+/// `AuthConfig::default()`. Therefore, we implement Default manually
+/// for AuthConfig so that AuthConfig::default() returns a timeout of 5000 ms.
+#[derive(Deserialize, Serialize, Debug, JsonSchema, Clone)]
 pub struct AuthConfig {
     #[serde(default = "default_timeout_in_ms")]
     pub timeout_in_ms: u64,
+}
+
+// Manually implement Default for AuthConfig so that AuthConfig::default()
+// sets timeout_in_ms to 5000 instead of 0.
+impl Default for AuthConfig {
+    fn default() -> Self {
+        AuthConfig {
+            timeout_in_ms: default_timeout_in_ms(),
+        }
+    }
 }
 
 #[cfg(test)]
