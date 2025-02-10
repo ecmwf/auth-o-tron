@@ -9,14 +9,14 @@ build:
 
   tagPolicy:
     customTemplate:
-      template: "{{.PREFIX}}{{.GIT_TAG}}"
+      # Use only the CARGO_VERSION as tag
+      # Extracted from Cargo.toml in the CI workflow
+      # For local builds, you can set CARGO_VERSION manually
+      template: "{{.CARGO_VERSION}}"
       components:
-      - name: PREFIX
-        envTemplate:
-          template: '{{default "" .PREFIX}}'
-      - name: GIT_TAG
-        gitCommit:
-          ignoreChanges: true
+        - name: CARGO_VERSION
+          envTemplate:
+            template: '{{.CARGO_VERSION}}'
 
   artifacts:
     - image: "auth-o-tron"
