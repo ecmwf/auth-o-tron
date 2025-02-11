@@ -71,4 +71,4 @@ jobs:
           name: "${{ steps.get_version.outputs.package_name }} v${{ steps.get_version.outputs.package_version }}"
           generate_release_notes: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.ECMWF_REPO_ACCESS }}
