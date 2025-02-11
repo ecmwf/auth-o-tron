@@ -43,7 +43,7 @@ jobs:
         if: steps.verify_tag.outputs.should_release == 'true'
         run: |
           echo "${{ secrets.ECMWF_DOCKER_REGISTRY_ACCESS_TOKEN }}" | \
-          docker login eccr.ecmwf.int --username "${{ secrets.ECMWF_DOCKER_REGISTRY_USERNAME }}" --password-stdin
+          docker login eccr.ecmwf.int --username '${{ secrets.ECMWF_DOCKER_REGISTRY_USERNAME }}' --password-stdin
 
       # 5. Install Skaffold (only if version matches)
       - name: Install Skaffold
