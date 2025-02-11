@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*'   # Trigger on every tag push but issue a release only if the tag matches the Cargo.toml version
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Check out the repository
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      # 2. Extract the package version and name from Cargo.toml
+      - name: Extract package version and name
+        id: get_version
+        run: |
+          PACKAGE_NAME=$(grep '^name\s*=' Cargo.toml | head -n 1 | cut -d'"' -f2)
+          PACKAGE_VERSION=$(grep '^version\s*=' Cargo.toml | head -n 1 | cut -d'"' -f2)
+          echo "package_name=${PACKAGE_NAME}" >> $GITHUB_OUTPUT
+          echo "package_version=${PACKAGE_VERSION}" >> $GITHUB_OUTPUT
+          # Set an environment variable for later steps (if needed)
+          echo "CARGO_VERSION=${PACKAGE_VERSION}" >> $GITHUB_ENV
+          echo "Extracted package: ${PACKAGE_NAME} version -> ${PACKAGE_VERSION}"
+
+      # 3. Verify that the pushed tag matches the Cargo.toml version
+      - name: Verify Tag Equals Cargo Version
+        id: verify_tag
+        run: |
+          echo "Pushed Tag: ${{ github.ref_name }}"
+          echo "Cargo Version: ${{ steps.get_version.outputs.package_version }}"
+          if [ "${{ github.ref_name }}" = "${{ steps.get_version.outputs.package_version }}" ]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_release=false" >> $GITHUB_OUTPUT
+            echo "Tag does not match Cargo version. Skipping release steps."
+          fi
+      
+      # 4. Docker login (only if version matches)
+      - name: Docker login
+        if: steps.verify_tag.outputs.should_release == 'true'
+        run: |
+          echo "${{ secrets.ECMWF_DOCKER_REGISTRY_ACCESS_TOKEN }}" | \
+          docker login eccr.ecmwf.int --username "${{ secrets.ECMWF_DOCKER_REGISTRY_USERNAME }}" --password-stdin
+
+      # 5. Install Skaffold (only if version matches)
+      - name: Install Skaffold
+        if: steps.verify_tag.outputs.should_release == 'true'
+        run: |
+          curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64
+          chmod +x skaffold
+          sudo mv skaffold /usr/local/bin/
+
+      # 6. Build and push Docker images using Skaffold (only if version matches)
+      - name: Build and push Docker images with Skaffold
+        if: steps.verify_tag.outputs.should_release == 'true'
+        env:
+          SKAFFOLD_DEFAULT_REPO: eccr.ecmwf.int/auth-o-tron
+          CARGO_VERSION: ${{ env.CARGO_VERSION }}
+        run: skaffold build
+
+      # 7. Create a GitHub Release (only if version matches)
+      - name: Create GitHub Release
+        if: steps.verify_tag.outputs.should_release == 'true'
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "${{ steps.get_version.outputs.package_name }} v${{ steps.get_version.outputs.package_version }}"
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
