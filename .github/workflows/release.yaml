@@ -5,6 +5,10 @@ on:
     tags:
       - '*'   # Trigger on every tag push but issue a release only if the tag matches the Cargo.toml version
 
+permissions:
+  contents: write
+  releases: write
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -71,4 +75,4 @@ jobs:
           name: "${{ steps.get_version.outputs.package_name }} v${{ steps.get_version.outputs.package_version }}"
           generate_release_notes: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_REPO_READ_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
