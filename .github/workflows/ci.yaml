@@ -69,8 +69,8 @@ jobs:
       # 3) Log in to ECMWF Docker registry
       - name: Docker login
         run: |
-          echo "${{ secrets.ECMWF_DOCKER_REGISTRY_ACCESS_TOKEN }}" | \
-            docker login eccr.ecmwf.int --username ${{ secrets.ECMWF_DOCKER_REGISTRY_USERNAME }} --password-stdin
+          echo "${{ secrets.HARBOR_PASSWORD }}" | \
+          docker login eccr.ecmwf.int --username ${{ secrets.HARBOR_USERNAME }} --password-stdin
 
       # 4) Install Skaffold
       - name: Install Skaffold
