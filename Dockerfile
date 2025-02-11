@@ -47,12 +47,12 @@ ARG VERSION
 LABEL version=$VERSION
 WORKDIR /app
 # Update the binary name to match what Cargo produced.
-COPY --from=builder /app/target/release/rust-authotron /app/auth-o-tron
+COPY --from=builder /app/target/release/authotron /app/authotron
 # Optionally, copy configuration files if needed. (could be useful when testing locally)
 # Do not comment out the line below, we will mount the config file using a configmap
 # COPY ./src/config.yaml /app/src/config.yaml
 USER nonroot:nonroot
-ENTRYPOINT ["/app/auth-o-tron"]
+ENTRYPOINT ["/app/authotron"]
 
 
 ###############################
@@ -64,9 +64,9 @@ LABEL version=$VERSION
 RUN apt-get update && apt-get install -y ca-certificates bash && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 # Update the binary name to match what Cargo produced.
-COPY --from=builder /app/target/release/rust-authotron /app/auth-o-tron
+COPY --from=builder /app/target/release/authotron /app/authotron
 # Optionally, copy configuration files if needed. (could be useful when testing locally)
 # Do not comment out the line below, we will mount the config file using a configmap
 # COPY ./src/config.yaml /app/src/config.yaml
-ENTRYPOINT ["/app/auth-o-tron"]
+ENTRYPOINT ["/app/authotron"]
 
