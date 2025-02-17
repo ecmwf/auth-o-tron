@@ -9,14 +9,16 @@ build:
 
   tagPolicy:
     customTemplate:
-      # Use only the CARGO_VERSION as tag
-      # Extracted from Cargo.toml in the CI workflow
-      # For local builds, you can set CARGO_VERSION manually
-      template: "{{.CARGO_VERSION}}"
+      # Use the CARGO_VERSION and TARGETARCH environment variables to tag the image
+      # We will build multi-arch images, so we need to tag them with the target architecture
+      template: "{{.CARGO_VERSION}}-{{.TARGETARCH}}"
       components:
         - name: CARGO_VERSION
           envTemplate:
             template: '{{.CARGO_VERSION}}'
+        - name: TARGETARCH
+          envTemplate:
+            template: '{{.TARGETARCH}}'
 
   artifacts:
     - image: "auth-o-tron"
