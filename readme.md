@@ -10,6 +10,10 @@
 </div>
 
 
+
+> [!WARNING]  
+> This software is Emerging and subject to ECMWF's guidelines on [Software Maturity](https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity). Do not use it in operations without due consideration.
+
 Effortless authentication and authorization for web APIs.
 
 * Easily configure HTTP APIs to use a variety of authentication providers.
