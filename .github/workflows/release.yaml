@@ -4,35 +4,46 @@ on:
   push:
     tags:
       - '*'   # Trigger on every tag push but issue a release only if the tag matches the Cargo.toml version
+  workflow_dispatch:  # Allows manual triggering for testing
 
 permissions:
-  contents: write
-  releases: write
+  contents: write # Required for GitHub Actions to push a release
 
 jobs:
-  release:
+  #################################################################
+  # Job: release-setup
+  # This job checks out the code, extracts the package name and version
+  # from Cargo.toml, and verifies that the pushed tag matches the version.
+  #################################################################
+  release-setup:
     runs-on: ubuntu-latest
+    outputs:
+      package_name: ${{ steps.get_version.outputs.package_name }}
+      package_version: ${{ steps.get_version.outputs.package_version }}
+      should_release: ${{ steps.verify_tag.outputs.should_release }}
     steps:
-      # 1. Check out the repository
       - name: Check out code
         uses: actions/checkout@v3
+        # This step fetches the repository code.
 
-      # 2. Extract the package version and name from Cargo.toml
       - name: Extract package version and name
         id: get_version
         run: |
+          # Extract the package name from Cargo.toml (first occurrence)
           PACKAGE_NAME=$(grep '^name\s*=' Cargo.toml | head -n 1 | cut -d'"' -f2)
+          # Extract the package version from Cargo.toml (first occurrence)
           PACKAGE_VERSION=$(grep '^version\s*=' Cargo.toml | head -n 1 | cut -d'"' -f2)
+          # Set the outputs for later steps
           echo "package_name=${PACKAGE_NAME}" >> $GITHUB_OUTPUT
           echo "package_version=${PACKAGE_VERSION}" >> $GITHUB_OUTPUT
-          # Set an environment variable for later steps (if needed)
+          # Set CARGO_VERSION for the Skaffold build
           echo "CARGO_VERSION=${PACKAGE_VERSION}" >> $GITHUB_ENV
           echo "Extracted package: ${PACKAGE_NAME} version -> ${PACKAGE_VERSION}"
 
-      # 3. Verify that the pushed tag matches the Cargo.toml version
       - name: Verify Tag Equals Cargo Version
         id: verify_tag
         run: |
+          # Compare the pushed tag (github.ref_name) with the version from Cargo.toml
           echo "Pushed Tag: ${{ github.ref_name }}"
           echo "Cargo Version: ${{ steps.get_version.outputs.package_version }}"
           if [ "${{ github.ref_name }}" = "${{ steps.get_version.outputs.package_version }}" ]; then
@@ -41,38 +52,93 @@ jobs:
             echo "should_release=false" >> $GITHUB_OUTPUT
             echo "Tag does not match Cargo version. Skipping release steps."
           fi
-      
-      # 4. Docker login (only if version matches)
-      - name: Docker login
-        if: steps.verify_tag.outputs.should_release == 'true'
-        run: |
-          echo "${{ secrets.ECMWF_DOCKER_REGISTRY_ACCESS_TOKEN }}" | \
-          docker login eccr.ecmwf.int --username '${{ secrets.ECMWF_DOCKER_REGISTRY_USERNAME }}' --password-stdin
 
-      # 5. Install Skaffold (only if version matches)
-      - name: Install Skaffold
-        if: steps.verify_tag.outputs.should_release == 'true'
+  #################################################################
+  # Job: build-multiarch
+  # This job builds and pushes Docker images for both amd64 and arm64
+  # using a matrix strategy. Each image is tagged uniquely with the
+  # architecture (e.g., v1.2.3-amd64 and v1.2.3-arm64) via Skaffold.
+  #################################################################
+  build-multiarch:
+    needs: release-setup
+    if: needs.release-setup.outputs.should_release == 'true'
+    strategy:
+      matrix:
+        arch: [amd64, arm64]  # Build for both architectures.
+    # Self-hosted runner based on the architecture:
+    # ECMWF has self-hosted runners for both amd64 and arm64.
+    # We will use Ubuntu for amd64, macOS for arm64.
+    runs-on: ${{ matrix.arch == 'amd64' && 'platform-builder-Ubuntu-22.04' || 'platform-builder-MacOSX-13.4.1-arm64' }}
+    env:
+      # Repository to push images.
+      SKAFFOLD_DEFAULT_REPO: eccr.ecmwf.int/auth-o-tron
+      # Set the CARGO_VERSION based on Cargo.toml
+      CARGO_VERSION: ${{ needs.release-setup.outputs.package_version }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+        # Ensures the latest code is available for the build.
+
+      - name: Docker login
         run: |
+          # Log in to the Docker registry using stored secrets.
+          echo "${{ secrets.ECMWF_DOCKER_REGISTRY_ACCESS_TOKEN }}" | \
+            docker login eccr.ecmwf.int --username "${{ secrets.ECMWF_DOCKER_REGISTRY_USERNAME }}" --password-stdin
+
+      - name: Install Skaffold
+        run: |
+          # Download and install Skaffold.
+          # Adjust the download URL if your runner's OS is different.
           curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64
           chmod +x skaffold
           sudo mv skaffold /usr/local/bin/
 
-      # 6. Build and push Docker images using Skaffold (only if version matches)
-      - name: Build and push Docker images with Skaffold
-        if: steps.verify_tag.outputs.should_release == 'true'
+      - name: Build and push Docker image for ${{ matrix.arch }}
         env:
-          SKAFFOLD_DEFAULT_REPO: eccr.ecmwf.int/auth-o-tron
-          CARGO_VERSION: ${{ env.CARGO_VERSION }}
-        run: skaffold build
+          # Set TARGETARCH to ensure the tag becomes "<CARGO_VERSION>-<TARGETARCH>"
+          TARGETARCH: ${{ matrix.arch }}
+        run: |
+          # Run the Skaffold build, which uses TARGETARCH to generate an architecture-specific tag.
+          skaffold build
 
-      # 7. Create a GitHub Release (only if version matches)
+  #################################################################
+  # Job: create-manifest-and-release
+  # This job creates a multi-arch manifest that maps the architecture-specific
+  # images (e.g., 1.2.3-amd64 and 1.2.3-arm64) to a common tag (v1.2.3),
+  # pushes the manifest to the registry, and then creates a GitHub release.
+  #################################################################
+  create-manifest-and-release:
+    needs: build-multiarch
+    if: needs.release-setup.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Docker login
+        run: |
+          # Log in to Docker registry again before pushing the manifest.
+          echo "${{ secrets.ECMWF_DOCKER_REGISTRY_ACCESS_TOKEN }}" | \
+            docker login eccr.ecmwf.int --username "${{ secrets.ECMWF_DOCKER_REGISTRY_USERNAME }}" --password-stdin
+
+      - name: Create and push multiarch manifest
+        env:
+          # Use the package version as the common tag.
+          PACKAGE_VERSION: ${{ needs.release-setup.outputs.package_version }}
+          # Repository where the images are stored.
+          REPO: eccr.ecmwf.int/auth-o-tron
+        run: |
+          # Create a multi-arch manifest that ties together the arch-specific images.
+          docker manifest create $REPO:$PACKAGE_VERSION \
+            $REPO:$PACKAGE_VERSION-amd64 \
+            $REPO:$PACKAGE_VERSION-arm64
+          # Push the multi-arch manifest to the registry.
+          docker manifest push $REPO:$PACKAGE_VERSION
+
       - name: Create GitHub Release
-        if: steps.verify_tag.outputs.should_release == 'true'
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: "${{ steps.get_version.outputs.package_name }} v${{ steps.get_version.outputs.package_version }}"
+          name: "${{ needs.release-setup.outputs.package_name }} v${{ needs.release-setup.outputs.package_version }}"
           generate_release_notes: true
         env:
+          # GitHub token for creating the release.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
