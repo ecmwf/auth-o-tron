@@ -83,7 +83,7 @@ jobs:
         run: |
           # Log in to the Docker registry using stored secrets.
           echo "${{ secrets.ECMWF_DOCKER_REGISTRY_ACCESS_TOKEN }}" | \
-            docker login eccr.ecmwf.int --username "${{ secrets.ECMWF_DOCKER_REGISTRY_USERNAME }}" --password-stdin
+            docker login eccr.ecmwf.int --username '${{ secrets.ECMWF_DOCKER_REGISTRY_USERNAME }}' --password-stdin
 
       - name: Install Skaffold
         run: |
@@ -116,7 +116,7 @@ jobs:
         run: |
           # Log in to Docker registry again before pushing the manifest.
           echo "${{ secrets.ECMWF_DOCKER_REGISTRY_ACCESS_TOKEN }}" | \
-            docker login eccr.ecmwf.int --username "${{ secrets.ECMWF_DOCKER_REGISTRY_USERNAME }}" --password-stdin
+            docker login eccr.ecmwf.int --username '${{ secrets.ECMWF_DOCKER_REGISTRY_USERNAME }}' --password-stdin
 
       - name: Create and push multiarch manifest
         env:
