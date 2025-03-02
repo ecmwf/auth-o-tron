@@ -1,8 +1,11 @@
-use axum::{extract::{ConnectInfo, State}, Json};
+use crate::AppState;
+use axum::{
+    extract::{ConnectInfo, State},
+    Json,
+};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use tracing::{debug, info};
-use crate::AppState;
 
 /// GET /providers endpoint: returns only the provider "name" and "type" fields
 /// by converting each provider config into JSON and extracting the fields.
@@ -19,8 +22,8 @@ pub async fn list_providers(
         .iter()
         .map(|provider| {
             // Convert the provider config to a serde_json::Value.
-            let provider_json = serde_json::to_value(provider)
-                .expect("Failed to serialize provider config");
+            let provider_json =
+                serde_json::to_value(provider).expect("Failed to serialize provider config");
             if let Value::Object(mut map) = provider_json {
                 // Remove all keys except for "name" and "type".
                 let name = map.remove("name").unwrap_or_default();
