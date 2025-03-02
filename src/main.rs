@@ -1,9 +1,9 @@
 mod auth;
 mod config;
 mod models;
+mod providers;
 mod store;
 mod utils;
-mod providers;
 
 use std::collections::HashMap;
 use std::env;
