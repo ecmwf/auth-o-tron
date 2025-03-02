@@ -3,6 +3,7 @@ mod config;
 mod models;
 mod store;
 mod utils;
+mod providers;
 
 use std::collections::HashMap;
 use std::env;
@@ -204,6 +205,7 @@ async fn main() {
         .route("/token", get(create_token))
         .route("/tokens", get(get_tokens))
         .route("/token/:token", delete(delete_token))
+        .route("/providers", get(providers::list_providers))
         .route("/health", get(health_check))
         .with_state(state);
 
