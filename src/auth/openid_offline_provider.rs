@@ -18,7 +18,7 @@ pub struct OpenIDOfflineProviderConfig {
     pub private_client_id: String,
     pub private_client_secret: String,
     pub iam_url: String,
-    pub iam_realm: String,
+    pub realm: String,
 }
 
 /// A provider that validates offline_access tokens and then fetches
@@ -33,15 +33,15 @@ impl OpenIDOfflineProvider {
     pub fn new(config: &OpenIDOfflineProviderConfig) -> Self {
         info!(
             "Creating OpenIDOfflineProvider for realm '{}', name='{}'",
-            config.iam_realm, config.name
+            config.realm, config.name
         );
 
         // The nested JWT auth will handle the final token validation
         let jwt_auth = JWTProvider::new(&JWTAuthConfig {
             cert_uri: config.cert_uri.clone(),
-            realm: config.iam_realm.clone(),
+            realm: config.realm.clone(),
             name: config.name.clone(),
-            iam_realm: config.iam_realm.clone(),
+            iam_realm: config.realm.clone(),
         });
 
         Self {
@@ -57,14 +57,11 @@ async fn check_offline_access_token(
     config: OpenIDOfflineProviderConfig,
     token: String,
 ) -> Result<bool, String> {
-    debug!(
-        "Checking offline access token at realm='{}'",
-        config.iam_realm
-    );
+    debug!("Checking offline access token at realm='{}'", config.realm);
 
     let introspection_url = format!(
         "{}/realms/{}/protocol/openid-connect/token/introspect",
-        config.iam_url, config.iam_realm
+        config.iam_url, config.realm
     );
     let client = reqwest::Client::new();
 
@@ -94,7 +91,7 @@ async fn get_access_token(
 ) -> Result<String, String> {
     debug!(
         "Exchanging offline token for an online access token at realm='{}'",
-        config.iam_realm
+        config.realm
     );
 
     let refresh_data = [
@@ -104,7 +101,7 @@ async fn get_access_token(
     ];
     let token_endpoint = format!(
         "{}/realms/{}/protocol/openid-connect/token",
-        config.iam_url, config.iam_realm
+        config.iam_url, config.realm
     );
 
     let client = reqwest::Client::new();
@@ -186,7 +183,7 @@ mod tests {
             private_client_id: "private".to_string(),
             private_client_secret: "secret".to_string(),
             iam_url: server.url(),
-            iam_realm: realm.to_string(),
+            realm: realm.to_string(),
         };
 
         let result = check_offline_access_token(config, "dummy_token".to_string()).await;
@@ -218,7 +215,7 @@ mod tests {
             private_client_id: "private".to_string(),
             private_client_secret: "secret".to_string(),
             iam_url: server.url(),
-            iam_realm: realm.to_string(),
+            realm: realm.to_string(),
         };
 
         let result = check_offline_access_token(config, "dummy_token".to_string()).await;
@@ -250,7 +247,7 @@ mod tests {
             private_client_id: "private".to_string(),
             private_client_secret: "secret".to_string(),
             iam_url: server.url(),
-            iam_realm: realm.to_string(),
+            realm: realm.to_string(),
         };
 
         let result = get_access_token(config, "dummy_refresh_token".to_string()).await;
