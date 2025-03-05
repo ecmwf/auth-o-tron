@@ -133,6 +133,10 @@ impl Provider for OpenIDOfflineProvider {
         "Bearer"
     }
 
+    fn get_realm(&self) -> Option<&str> {
+        Some(&self.config.realm)
+    }
+
     fn get_name(&self) -> &str {
         &self.config.name
     }

@@ -39,6 +39,10 @@ impl super::Provider for EcmwfApiProvider {
         "Bearer"
     }
 
+    fn get_realm(&self) -> Option<&str> {
+        Some(&self.config.realm)
+    }
+
     async fn authenticate(&self, token: &str) -> Result<User, String> {
         query(
             self.config.uri.clone(),
