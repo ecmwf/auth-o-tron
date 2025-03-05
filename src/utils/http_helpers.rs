@@ -4,8 +4,6 @@ use axum::async_trait;
 use axum::extract::{ConnectInfo, FromRequestParts};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use http::request::Parts;
-use tracing::warn;
 
 use crate::models::User;
 use crate::AppState;
@@ -43,38 +41,43 @@ impl IntoResponse for HTTPError {
 #[async_trait]
 impl FromRequestParts<AppState> for User {
     type Rejection = HTTPError;
-
     async fn from_request_parts<'a, 'b>(
-        parts: &'a mut Parts,
+        parts: &'a mut http::request::Parts,
         state: &'b AppState,
     ) -> Result<User, HTTPError> {
-        // Retrieve the authorization header
+        // Retrieve the Authorization header
         let auth_header = parts
             .headers
             .get("authorization")
             .and_then(|value| value.to_str().ok())
-            .unwrap_or("");
+            .unwrap_or("")
+            .to_string();
 
-        // Try to read the client IP from the connection info
+        // Retrieve the optional X-Auth-Realm header
+        let realm_filter = parts
+            .headers
+            .get("x-auth-realm")
+            .and_then(|value| value.to_str().ok());
+
+        // Get the client IP for logging purposes
         let client_ip = parts
             .extensions
             .get::<ConnectInfo<SocketAddr>>()
             .map(|ConnectInfo(addr)| addr.ip())
             .unwrap_or_else(|| {
-                // Log a warning if we cannot get the IP address
-                warn!("Unable to determine client IP address.");
+                tracing::warn!("Unable to determine client IP address.");
                 "unknown".parse().unwrap()
             });
 
-        // Ask our Auth object to handle the authentication
+        // Call the new authenticate function with the optional realm filter
         match state
             .auth
-            .authenticate(auth_header, &client_ip.to_string())
+            .authenticate(&auth_header, &client_ip.to_string(), realm_filter)
             .await
         {
             Some(user) => Ok(user),
             None => Err(HTTPError::new(
-                StatusCode::UNAUTHORIZED,
+                http::StatusCode::UNAUTHORIZED,
                 "Unauthorized access",
             )),
         }
