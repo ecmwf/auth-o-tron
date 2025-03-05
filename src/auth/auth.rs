@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc
+use std::sync::Arc;
 
 use crate::config::AuthConfig;
 use crate::models::User;
