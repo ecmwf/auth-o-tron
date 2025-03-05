@@ -53,6 +53,11 @@ impl Provider for PlainAuthProvider {
         "Basic"
     }
 
+    /// Return the realm associated with this provider.
+    fn get_realm(&self) -> Option<&str> {
+        Some(&self.config.realm)
+    }
+
     /// Decode the credentials (base64-encoded "username:password") and check
     /// against the config’s user list. Return a `User` on success.
     async fn authenticate(&self, credentials: &str) -> Result<User, String> {
