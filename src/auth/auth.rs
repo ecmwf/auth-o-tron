@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::Arc
 
 use crate::config::AuthConfig;
 use crate::models::User;
@@ -7,7 +8,7 @@ use futures::future::{select_ok, FutureExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::ecmwfapi_provider::{EcmwfApiProvider, EcmwfApiProviderConfig};
 use super::jwt_provider::{JWTAuthConfig, JWTProvider};
@@ -45,6 +46,10 @@ pub enum AugmenterConfig {
 pub trait Provider: Send + Sync {
     fn get_name(&self) -> &str;
     fn get_type(&self) -> &str;
+    /// Providers that support realm-based filtering should override this.
+    fn get_realm(&self) -> Option<&str> {
+        None
+    }
     async fn authenticate(&self, credentials: &str) -> Result<User, String>;
 }
 
@@ -83,6 +88,18 @@ pub struct Auth {
     token_store: Arc<dyn Store>,
 }
 
+/// Helper function to map header scheme values to the expected provider type.
+/// For example, a header "Plain" is mapped to "Basic" so that only providers
+/// with get_type() returning "Basic" are used.
+fn header_to_provider_type(scheme: &str) -> String {
+    match scheme.to_lowercase().as_str() {
+        "bearer" => "Bearer".to_string(),
+        "plain" => "Basic".to_string(),
+        "basic" => "Basic".to_string(),
+        other => other.to_string(),
+    }
+}
+
 impl Auth {
     /// Initialize the Auth struct by creating providers and augmenters from the configurations.
     pub fn new(
@@ -112,87 +129,113 @@ impl Auth {
         }
     }
 
-    /// Authenticates a user using the first provider that succeeds. We wrap each provider
-    /// call in a timeout so a slow or non-responsive provider won't block the others.
-    /// If all fail or time out, returns None.
-    pub async fn authenticate(&self, auth_header: &str, ip: &str) -> Option<User> {
-        let parts: Vec<&str> = auth_header.split_whitespace().collect();
-        if parts.len() != 2 {
-            warn!("Authorization header invalid format: '{}'", auth_header);
+    /// Authenticates a user using the first provider that succeeds.
+    /// Each provider call is wrapped in a timeout so that a slow or non-responsive provider
+    /// won't block the others. If all providers fail or time out, returns None.
+    ///
+    /// - `auth_header`: the value from the Authorization header (may contain comma-separated values)
+    /// - `ip`: client IP (for logging; currently unused)
+    /// - `realm_filter`: an optional realm string taken from the X-Auth-Realm header
+    pub async fn authenticate(
+        &self,
+        auth_header: &str,
+        _ip: &str, // IP is currently unused; rename to _ip to suppress warnings.
+        realm_filter: Option<&str>,
+    ) -> Option<User> {
+        if auth_header.trim().is_empty() {
+            warn!("No Authorization header provided.");
             return None;
         }
 
-        let auth_type = parts[0];
-        let auth_credentials = parts[1];
+        // Use an explicit HashMap with owned Strings for credentials.
+        let mut creds_map: HashMap<String, String> = HashMap::new();
 
-        debug!(
-            "Authenticating with auth_type='{}' from IP='{}'",
-            auth_type, ip
-        );
-
-        // Collect all providers that match the type in the Authorization header.
-        let valid_providers: Vec<_> = self
-            .providers
-            .iter()
-            .filter(|p| p.get_type().eq_ignore_ascii_case(auth_type))
-            .collect();
-
-        if valid_providers.is_empty() {
-            warn!("No providers found for auth type: '{}'", auth_type);
-            return None;
-        }
-
-        let timeout_duration = std::time::Duration::from_secs(self.config.timeout_in_ms);
-        // Wrap each provider future in a timeout and box it so we can use select_ok.
-        let futures = valid_providers
-            .iter()
-            .map(|provider| {
-                let name = provider.get_name().to_owned();
-                async move {
-                    match timeout(timeout_duration, provider.authenticate(auth_credentials)).await {
-                        Ok(Ok(user)) => Ok((name, user)),
-                        Ok(Err(e)) => Err(format!("Provider '{}' failed: {}", name, e)),
-                        Err(_) => Err(format!("Provider '{}' timed out", name)),
-                    }
-                }
-                .boxed()
-            })
-            .collect::<Vec<_>>();
-
-        // select_ok returns on the first successful authentication, dropping unused futures.
-        let mut user = match select_ok(futures).await {
-            Ok(((provider_name, user), _remaining)) => {
-                info!(
-                    "Provider '{}' authenticated user '{}'",
-                    provider_name, user.username
-                );
-                user
-            }
-            Err(e) => {
-                warn!("All providers failed; last error: {}", e);
+        // Split the header on commas to allow multiple auth credentials.
+        for part in auth_header.split(',') {
+            let trimmed = part.trim();
+            // Each part should be in the format: <scheme> <credentials>
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() != 2 {
+                warn!("Invalid auth part format: '{}'", trimmed);
                 return None;
             }
-        };
-
-        // Augment the user if there's an augmenter whose realm matches the authenticated user's realm.
-        let realm = user.realm.clone();
-        let matching_augmenters = self
-            .augmenters
-            .iter()
-            .filter(|aug| aug.get_realm() == realm);
-
-        for aug in matching_augmenters {
-            match aug.augment(&mut user).await {
-                Ok(_) => info!(
-                    "Augmenter '{}' succeeded for '{}'",
-                    aug.get_name(),
-                    user.username
-                ),
-                Err(err) => warn!("Augmenter '{}' failed: {}", aug.get_name(), err),
+            let raw_scheme = parts[0];
+            let credential = parts[1];
+            let normalized_scheme = header_to_provider_type(raw_scheme);
+            // Error out if the same scheme appears more than once.
+            if creds_map.contains_key(&normalized_scheme) {
+                warn!(
+                    "Multiple credentials provided for scheme '{}'. Only one per scheme is allowed.",
+                    normalized_scheme
+                );
+                return None;
             }
+            creds_map.insert(normalized_scheme, credential.to_string());
         }
 
-        debug!("Final user after augmenters: {:?}", user);
-        Some(user)
+        // Try each provided credential until one provider successfully authenticates.
+        for (scheme, credential) in creds_map.into_iter() {
+            // Set the timeout duration based on the configuration.
+            let timeout_duration = std::time::Duration::from_secs(self.config.timeout_in_ms);
+            // Instead of storing into a temporary vector, iterate directly over self.providers,
+            // filtering by type and the optional realm.
+            let futures = self
+                .providers
+                .iter()
+                .filter(|p| {
+                    p.get_type().eq_ignore_ascii_case(&scheme)
+                        && match realm_filter {
+                            Some(r) => {
+                                // Only consider providers that define a realm and that match the filter.
+                                p.get_realm()
+                                    .map(|pr| pr.eq_ignore_ascii_case(r))
+                                    .unwrap_or(false)
+                            }
+                            None => true,
+                        }
+                })
+                .map(|provider| {
+                    let name = provider.get_name().to_owned();
+                    // Clone the credential for each async block to avoid moving it.
+                    let cred = credential.clone();
+                    async move {
+                        match timeout(timeout_duration, provider.authenticate(&cred)).await {
+                            Ok(Ok(user)) => Ok((name, user)),
+                            Ok(Err(e)) => Err(format!("Provider '{}' failed: {}", name, e)),
+                            Err(_) => Err(format!("Provider '{}' timed out", name)),
+                        }
+                    }
+                    .boxed()
+                })
+                .collect::<Vec<_>>();
+
+            // If no providers matched, log a warning and try the next credential.
+            if futures.is_empty() {
+                warn!(
+                    "No providers found for auth scheme '{}' with realm filter {:?}",
+                    scheme, realm_filter
+                );
+                continue;
+            }
+
+            // Use select_ok to await the first future that completes successfully.
+            match select_ok(futures).await {
+                Ok(((provider_name, user), _)) => {
+                    info!(
+                        "Provider '{}' successfully authenticated user '{}'",
+                        provider_name, user.username
+                    );
+                    return Some(user);
+                }
+                Err(e) => {
+                    warn!(
+                        "All providers failed for scheme '{}'; last error: {}",
+                        scheme, e
+                    );
+                    // Try next credential if available.
+                }
+            }
+        }
+        None
     }
 }
