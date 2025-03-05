@@ -74,7 +74,7 @@ async fn authenticate(
         .status(StatusCode::OK)
         .header("Authorization", format!("Bearer {}", jwt))
         .body(Body::from("Authenticated successfully"))
-        .map_err(|e| HTTPError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| HTTPError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string(), None))?;
 
     if state.config.include_legacy_headers.unwrap_or(false) {
         let headers = response_builder.headers_mut();

@@ -60,6 +60,10 @@ impl super::Provider for JWTProvider {
         "Bearer"
     }
 
+    fn get_realm(&self) -> Option<&str> {
+        Some(&self.config.realm)
+    }
+
     /// Authenticates a token by decoding its header, fetching the right key, and validating.
     async fn authenticate(&self, token: &str) -> Result<User, String> {
         debug!(
