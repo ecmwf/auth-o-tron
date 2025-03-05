@@ -8,7 +8,7 @@ use futures::future::{select_ok, FutureExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::ecmwfapi_provider::{EcmwfApiProvider, EcmwfApiProviderConfig};
 use super::jwt_provider::{JWTAuthConfig, JWTProvider};
@@ -89,8 +89,8 @@ pub struct Auth {
 }
 
 /// Helper function to map header scheme values to the expected provider type.
-/// For example, a header "Plain" is mapped to "Basic" so that only providers
-/// with get_type() returning "Basic" are used.
+/// For example, a header "Plain" is mapped to "Basic" so that providers
+/// that return "Basic" in their `get_type()` match correctly.
 fn header_to_provider_type(scheme: &str) -> String {
     match scheme.to_lowercase().as_str() {
         "bearer" => "Bearer".to_string(),
@@ -129,17 +129,72 @@ impl Auth {
         }
     }
 
+    /// Generate a dynamic challenge header based on the available authentication providers.
+    /// Iterates over `self.providers`, collects each provider's scheme and realm, and returns
+    /// a comma-separated string of challenges (e.g., `Bearer realm="some-bearer-realm", Basic realm="localrealm"`).
+    pub fn generate_challenge_header(&self) -> String {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        let mut challenges = Vec::new();
+        for provider in &self.providers {
+            // Only include providers that advertise a realm.
+            if let Some(realm) = provider.get_realm() {
+                let scheme = provider.get_type();
+                // Deduplicate challenges by scheme and realm.
+                let key = format!("{}:{}", scheme, realm);
+                if seen.insert(key) {
+                    challenges.push(format!(r#"{} realm="{}""#, scheme, realm));
+                }
+            }
+        }
+        // If no provider advertises a realm, return a default challenge.
+        if challenges.is_empty() {
+            "Bearer".to_string()
+        } else {
+            challenges.join(", ")
+        }
+    }
+
+    /// Function below is a bit long, so here's a summary of its steps:
+    ///
+    /// 1. **Header Validation:**  
+    ///    - Checks if the provided Authorization header is empty and returns `None` if so.
+    ///    - Logs a warning if the header is missing or improperly formatted.
+    ///
+    /// 2. **Credential Parsing:**  
+    ///    - Splits the header on commas to allow multiple credentials.
+    ///    - For each segment, splits the segment on whitespace into a scheme (e.g. "Bearer", "Plain", "Basic")
+    ///      and a credential.
+    ///    - Normalizes the scheme using the helper `header_to_provider_type` (which converts "plain" to "Basic").
+    ///    - This normalization ensures that if you supply "Basic" or "plain", both are treated as "Basic", while "Bearer"
+    ///      remains "Bearer".  
+    ///    - Uses a `HashMap` to ensure only one credential per scheme is provided; if multiple credentials for the same
+    ///      scheme are detected, it returns `None`.
+    ///
+    /// 3. **Provider Filtering & Authentication:**  
+    ///    - For each (scheme, credential) pair, the function filters the available providers by comparing the provider's
+    ///      `get_type()` (which returns the expected scheme, such as "Basic" or "Bearer") to the normalized scheme.
+    ///      This ensures that if you supply a "Basic" credential, only providers that return "Basic" are tried, and likewise for "Bearer".
+    ///    - Additionally, if a realm filter is provided (via the `X-Auth-Realm` header), only providers with a matching realm are considered.
+    ///    - For each matching provider, the function initiates an asynchronous authentication call wrapped in a timeout (configured by `timeout_in_ms`).
+    ///    - It then uses `select_ok` to await the first provider that successfully authenticates the user.
+    ///
+    /// 4. **Outcome:**  
+    ///    - If a provider successfully authenticates the credential, the function logs the successful authentication (including the client IP)
+    ///      and returns the authenticated `User`.
+    ///    - If no provider can authenticate any of the provided credentials, the function returns `None`.
+
     /// Authenticates a user using the first provider that succeeds.
     /// Each provider call is wrapped in a timeout so that a slow or non-responsive provider
     /// won't block the others. If all providers fail or time out, returns None.
     ///
-    /// - `auth_header`: the value from the Authorization header (may contain comma-separated values)
-    /// - `ip`: client IP (for logging; currently unused)
-    /// - `realm_filter`: an optional realm string taken from the X-Auth-Realm header
+    /// - `auth_header`: The value from the Authorization header (may contain comma-separated credentials).
+    /// - `ip`: The client IP address (logged for debugging purposes).
+    /// - `realm_filter`: An optional realm string taken from the X-Auth-Realm header.
     pub async fn authenticate(
         &self,
         auth_header: &str,
-        _ip: &str, // IP is currently unused; rename to _ip to suppress warnings.
+        ip: &str,
         realm_filter: Option<&str>,
     ) -> Option<User> {
         if auth_header.trim().is_empty() {
@@ -147,7 +202,10 @@ impl Auth {
             return None;
         }
 
-        // Use an explicit HashMap with owned Strings for credentials.
+        // Log the client's IP address for debugging purposes.
+        debug!("Authenticating request from IP: {}", ip);
+
+        // Use a HashMap with owned Strings for credentials.
         let mut creds_map: HashMap<String, String> = HashMap::new();
 
         // Split the header on commas to allow multiple auth credentials.
@@ -162,7 +220,7 @@ impl Auth {
             let raw_scheme = parts[0];
             let credential = parts[1];
             let normalized_scheme = header_to_provider_type(raw_scheme);
-            // Error out if the same scheme appears more than once.
+            // Return an error if the same scheme appears more than once.
             if creds_map.contains_key(&normalized_scheme) {
                 warn!(
                     "Multiple credentials provided for scheme '{}'. Only one per scheme is allowed.",
@@ -177,8 +235,7 @@ impl Auth {
         for (scheme, credential) in creds_map.into_iter() {
             // Set the timeout duration based on the configuration.
             let timeout_duration = std::time::Duration::from_secs(self.config.timeout_in_ms);
-            // Instead of storing into a temporary vector, iterate directly over self.providers,
-            // filtering by type and the optional realm.
+            // Filter providers by matching type and (if provided) realm.
             let futures = self
                 .providers
                 .iter()
@@ -186,7 +243,7 @@ impl Auth {
                     p.get_type().eq_ignore_ascii_case(&scheme)
                         && match realm_filter {
                             Some(r) => {
-                                // Only consider providers that define a realm and that match the filter.
+                                // Only consider providers with a realm matching the filter.
                                 p.get_realm()
                                     .map(|pr| pr.eq_ignore_ascii_case(r))
                                     .unwrap_or(false)
@@ -232,7 +289,7 @@ impl Auth {
                         "All providers failed for scheme '{}'; last error: {}",
                         scheme, e
                     );
-                    // Try next credential if available.
+                    // Continue with the next credential if available.
                 }
             }
         }
