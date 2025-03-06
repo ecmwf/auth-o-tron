@@ -296,3 +296,170 @@ impl Auth {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::User;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// A dummy Provider implementation for testing.
+    struct DummyProvider {
+        name: String,
+        provider_type: String,
+        realm: Option<String>,
+        expected_credential: String,
+    }
+
+    #[async_trait]
+    impl Provider for DummyProvider {
+        fn get_name(&self) -> &str {
+            &self.name
+        }
+        fn get_type(&self) -> &str {
+            &self.provider_type
+        }
+        fn get_realm(&self) -> Option<&str> {
+            self.realm.as_deref()
+        }
+        async fn authenticate(&self, credentials: &str) -> Result<User, String> {
+            if credentials == self.expected_credential {
+                Ok(User {
+                    version: 1,
+                    realm: self.realm.clone().unwrap_or_default(),
+                    username: "dummy".to_string(),
+                    roles: vec![],
+                    attributes: HashMap::new(),
+                    scopes: None,
+                })
+            } else {
+                Err("Invalid credentials".to_string())
+            }
+        }
+    }
+
+    /// A dummy Store implementation for testing.
+    struct DummyStore;
+
+    #[async_trait]
+    impl crate::store::Store for DummyStore {
+        async fn add_token(
+            &self,
+            _token: &crate::models::Token,
+            _user: &User,
+            _expiry: i64,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn get_tokens(&self, _user: &User) -> Result<Vec<crate::models::Token>, String> {
+            Ok(vec![])
+        }
+        async fn get_user(&self, _token: &str) -> Result<Option<User>, String> {
+            Ok(None)
+        }
+        async fn delete_token(&self, _token: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_header_to_provider_type() {
+        // Test normalization of header schemes.
+        assert_eq!(header_to_provider_type("plain"), "Basic");
+        assert_eq!(header_to_provider_type("Basic"), "Basic");
+        assert_eq!(header_to_provider_type("Bearer"), "Bearer");
+        assert_eq!(header_to_provider_type("unknown"), "unknown");
+    }
+
+    #[tokio::test]
+    async fn test_generate_challenge_header() {
+        // Create a dummy Auth instance with two dummy providers.
+        let provider1 = Box::new(DummyProvider {
+            name: "TestBearer".to_string(),
+            provider_type: "Bearer".to_string(),
+            realm: Some("realm1".to_string()),
+            expected_credential: "token1".to_string(),
+        });
+        let provider2 = Box::new(DummyProvider {
+            name: "TestBasic".to_string(),
+            provider_type: "Basic".to_string(),
+            realm: Some("realm2".to_string()),
+            expected_credential: "credential1".to_string(),
+        });
+        let auth = Auth {
+            providers: vec![provider1, provider2],
+            augmenters: vec![],
+            config: AuthConfig { timeout_in_ms: 5 },
+            token_store: Arc::new(DummyStore),
+        };
+
+        let challenge = auth.generate_challenge_header();
+        // Since the order is not guaranteed, check that both expected challenge strings are present.
+        assert!(challenge.contains(r#"Bearer realm="realm1""#));
+        assert!(challenge.contains(r#"Basic realm="realm2""#));
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_single_valid_credential() {
+        // Create a dummy Auth instance with one provider expecting a specific credential.
+        let provider = Box::new(DummyProvider {
+            name: "TestBasic".to_string(),
+            provider_type: "Basic".to_string(),
+            realm: Some("localrealm".to_string()),
+            // Using "ZHVtbXk6ZHVtbXk=" as dummy Base64 credential (for "dummy:dummy")
+            expected_credential: "ZHVtbXk6ZHVtbXk=".to_string(),
+        });
+        let auth = Auth {
+            providers: vec![provider],
+            augmenters: vec![],
+            config: AuthConfig { timeout_in_ms: 5 },
+            token_store: Arc::new(DummyStore),
+        };
+
+        // Test authentication with a valid Basic credential.
+        let user = auth
+            .authenticate("Basic ZHVtbXk6ZHVtbXk=", "127.0.0.1", Some("localrealm"))
+            .await;
+        assert!(user.is_some());
+        assert_eq!(user.unwrap().username, "dummy");
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_multiple_credentials() {
+        // Create dummy providers for both Basic and Bearer.
+        let basic_provider = Box::new(DummyProvider {
+            name: "TestBasic".to_string(),
+            provider_type: "Basic".to_string(),
+            realm: Some("localrealm".to_string()),
+            // Dummy credential for Basic provider.
+            expected_credential: "ZHVtbXk6ZHVtbXk=".to_string(),
+        });
+        let bearer_provider = Box::new(DummyProvider {
+            name: "TestBearer".to_string(),
+            provider_type: "Bearer".to_string(),
+            realm: Some("localrealm".to_string()),
+            // Dummy credential for Bearer provider.
+            expected_credential: "someBearerToken".to_string(),
+        });
+
+        let auth = Auth {
+            providers: vec![basic_provider, bearer_provider],
+            augmenters: vec![],
+            config: AuthConfig { timeout_in_ms: 5 },
+            token_store: Arc::new(DummyStore),
+        };
+
+        // Test with a comma-separated header that contains both credentials.
+        // The dummy bearer provider is expected to succeed with "someBearerToken".
+        // The dummy basic provider is expected to succeed with "ZHVtbXk6ZHVtbXk=".
+        // We use select_ok select_ok, which returns the first successful future it finds
+        let header = "Bearer someBearerToken, Basic ZHVtbXk6ZHVtbXk=";
+        let user = auth
+            .authenticate(header, "127.0.0.1", Some("localrealm"))
+            .await;
+        assert!(user.is_some());
+        assert_eq!(user.unwrap().username, "dummy");
+    }
+}
