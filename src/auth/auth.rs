@@ -462,4 +462,59 @@ mod tests {
         assert!(user.is_some());
         assert_eq!(user.unwrap().username, "dummy");
     }
+
+    #[tokio::test]
+    async fn test_authenticate_realm_filter() {
+        // Create two dummy providers with identical expected credentials,
+        // but with different realms.
+        let local_provider = Box::new(DummyProvider {
+            name: "LocalBasic".to_string(),
+            provider_type: "Basic".to_string(),
+            realm: Some("localrealm".to_string()),
+            // Using "ZHVtbXk6ZHVtbXk=" as our dummy Base64 credential for "dummy:dummy"
+            expected_credential: "ZHVtbXk6ZHVtbXk=".to_string(),
+        });
+        let other_provider = Box::new(DummyProvider {
+            name: "OtherBasic".to_string(),
+            provider_type: "Basic".to_string(),
+            realm: Some("otherrealm".to_string()),
+            // Using the same dummy credential for testing purposes.
+            expected_credential: "ZHVtbXk6ZHVtbXk=".to_string(),
+        });
+
+        let auth = Auth {
+            providers: vec![local_provider, other_provider],
+            augmenters: vec![],
+            config: AuthConfig { timeout_in_ms: 5 },
+            token_store: Arc::new(DummyStore),
+        };
+
+        // When the realm filter is "localrealm", only the provider with that realm should be used.
+        let header = "Basic ZHVtbXk6ZHVtbXk=";
+        let user_local = auth
+            .authenticate(header, "127.0.0.1", Some("localrealm"))
+            .await;
+        assert!(
+            user_local.is_some(),
+            "Authentication should succeed for realm 'localrealm'"
+        );
+
+        // When the realm filter is "otherrealm", only the other provider should be used.
+        let user_other = auth
+            .authenticate(header, "127.0.0.1", Some("otherrealm"))
+            .await;
+        assert!(
+            user_other.is_some(),
+            "Authentication should succeed for realm 'otherrealm'"
+        );
+
+        // When the realm filter does not match any provider, authentication should fail.
+        let user_none = auth
+            .authenticate(header, "127.0.0.1", Some("nonexistent"))
+            .await;
+        assert!(
+            user_none.is_none(),
+            "Authentication should fail for a non-matching realm"
+        );
+    }
 }
