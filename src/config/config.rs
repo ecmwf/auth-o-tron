@@ -1,8 +1,8 @@
-use figment::providers::{Format, Yaml, Env};
-use std::env;
+use figment::providers::{Env, Format, Yaml};
 use figment::Figment;
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
+use std::env;
 
 use super::logging::LoggingConfig;
 use super::store::StoreConfig;
@@ -262,8 +262,8 @@ services: []
 
     #[test]
     fn test_env_variable_override() {
-        use std::env;
         use figment::providers::{Env, Yaml};
+        use std::env;
 
         // Save any previous value for cleanup
         let original_jwt_iss = env::var("APP_JWT__ISS").ok();
@@ -297,7 +297,9 @@ auth:
             .merge(Env::prefixed("APP_").split("__"));
 
         // Extract the configuration.
-        let config = figment.extract::<super::Config>().expect("Failed to parse config");
+        let config = figment
+            .extract::<super::Config>()
+            .expect("Failed to parse config");
 
         // Verify that the jwt.iss value is overridden by the environment variable.
         match config {
