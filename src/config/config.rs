@@ -38,7 +38,7 @@ pub struct ConfigV1 {
 /// - Merges environment variable overrides (prefixed with "AOT_" and using "__" to denote nested keys).
 pub fn load_config() -> ConfigV1 {
     // Get the config file path from the environment variable `CONFIG_PATH` or default to "./config.yaml"
-    let config_path = env::var("CONFIG_PATH").unwrap_or_else(|_| "./config.yaml".to_owned());
+    let config_path = env::var("AOT_CONFIG_PATH").unwrap_or_else(|_| "./config.yaml".to_owned());
 
     // Create a Figment provider that:
     // 1. Loads configuration from the YAML file at `config_path`.
