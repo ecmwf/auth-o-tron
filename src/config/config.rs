@@ -1,7 +1,8 @@
-use figment::providers::{Format, Yaml};
+use figment::providers::{Env, Format, Yaml};
 use figment::Figment;
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
+use std::env;
 
 use super::logging::LoggingConfig;
 use super::store::StoreConfig;
@@ -32,9 +33,22 @@ pub struct ConfigV1 {
     pub auth: AuthConfig,
 }
 
-/// Load config from a YAML file named "config.yaml" in the current directory.
+/// Load configuration using a flexible approach:
+/// - Reads the YAML file path from the CONFIG_PATH environment variable, defaulting to "./config.yaml".
+/// - Merges environment variable overrides (prefixed with "AOT_" and using "__" to denote nested keys).
 pub fn load_config() -> ConfigV1 {
-    let figment = Figment::new().merge(Yaml::file("./config.yaml"));
+    // Get the config file path from the environment variable `CONFIG_PATH` or default to "./config.yaml"
+    let config_path = env::var("AOT_CONFIG_PATH").unwrap_or_else(|_| "./config.yaml".to_owned());
+
+    // Create a Figment provider that:
+    // 1. Loads configuration from the YAML file at `config_path`.
+    // 2. Merges environment variable overrides with the prefix "AOT_".
+    //    (For nested keys, use "__", e.g., AOT_JWT__ISS to override jwt.iss)
+    let figment = Figment::new()
+        .merge(Yaml::file(config_path))
+        .merge(Env::prefixed("AOT_").split("__"));
+
+    // Extract the configuration. Exit the process with an error if extraction fails.
     let config = match figment.extract::<Config>() {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -42,6 +56,8 @@ pub fn load_config() -> ConfigV1 {
             std::process::exit(1);
         }
     };
+
+    // Match on the versioned configuration and return the appropriate config struct.
     match config {
         Config::ConfigV1(c) => c,
     }
@@ -241,6 +257,62 @@ services: []
                 // Expect the default auth configuration.
                 assert_eq!(c.auth.timeout_in_ms, 5000);
             }
+        }
+    }
+
+    #[test]
+    fn test_env_variable_override() {
+        use figment::providers::{Env, Yaml};
+        use std::env;
+
+        // Save any previous value for cleanup
+        let original_jwt_iss = env::var("APP_JWT__ISS").ok();
+
+        // Set the environment variable to override jwt.iss.
+        env::set_var("APP_JWT__ISS", "overridden-issuer");
+
+        // Use a YAML string that has a default "issuer" value for jwt.iss.
+        let yaml = r#"
+version: "1.0.0"
+store:
+  enabled: false
+providers: []
+augmenters: []
+bind_address: "127.0.0.1:3000"
+jwt:
+  iss: "issuer"
+  exp: 3600
+  secret: "secret"
+logging:
+  level: "info"
+  format: "console"
+services: []
+auth:
+  timeout_in_ms: 8000
+        "#;
+
+        // Create a Figment that merges the YAML and the environment overrides.
+        let figment = figment::Figment::new()
+            .merge(Yaml::string(yaml))
+            .merge(Env::prefixed("APP_").split("__"));
+
+        // Extract the configuration.
+        let config = figment
+            .extract::<super::Config>()
+            .expect("Failed to parse config");
+
+        // Verify that the jwt.iss value is overridden by the environment variable.
+        match config {
+            super::Config::ConfigV1(c) => {
+                assert_eq!(c.jwt.iss, "overridden-issuer");
+            }
+        }
+
+        // Clean up by restoring the original env variable (if any).
+        if let Some(val) = original_jwt_iss {
+            env::set_var("APP_JWT__ISS", val);
+        } else {
+            env::remove_var("APP_JWT__ISS");
         }
     }
 }
