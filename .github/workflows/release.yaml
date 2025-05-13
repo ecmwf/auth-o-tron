@@ -134,7 +134,7 @@ jobs:
           # Use the package version as the common tag.
           PACKAGE_VERSION: ${{ needs.release-setup.outputs.package_version }}
           # Repository where the images are stored.
-          REPO: eccr.ecmwf.int/auth-o-tron
+          REPO: eccr.ecmwf.int/auth-o-tron/auth-o-tron
         run: |
           # Create a multi-arch manifest that ties together the arch-specific images.
           docker manifest create $REPO:$PACKAGE_VERSION \
