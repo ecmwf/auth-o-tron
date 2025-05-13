@@ -87,16 +87,22 @@ jobs:
 
       - name: Install Skaffold
         run: |
-          if [ "${{ matrix.arch }}" = "amd64" ]; then
+          if [[ "$(uname)" == "Linux" && "${{ matrix.arch }}" == "amd64" ]]; then
             curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64
-          elif [ "${{ matrix.arch }}" = "arm64" ]; then
+          elif [[ "$(uname)" == "Linux" && "${{ matrix.arch }}" == "arm64" ]]; then
+            curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-arm64
+          elif [[ "$(uname)" == "Darwin" && "${{ matrix.arch }}" == "amd64" ]]; then
+            curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-darwin-amd64
+          elif [[ "$(uname)" == "Darwin" && "${{ matrix.arch }}" == "arm64" ]]; then
             curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-darwin-arm64
           else
-            echo "Unknown architecture: ${{ matrix.arch }}"
+            echo "Unknown OS or architecture: $(uname) / ${{ matrix.arch }}"
             exit 1
           fi
           chmod +x skaffold
-          sudo mv skaffold /usr/local/bin/
+          mkdir -p $HOME/bin
+          mv skaffold $HOME/bin/
+          echo "$HOME/bin" >> $GITHUB_PATH
 
       - name: Build and push Docker image for ${{ matrix.arch }}
         env:
