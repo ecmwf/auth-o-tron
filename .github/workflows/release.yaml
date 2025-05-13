@@ -119,7 +119,7 @@ jobs:
   # pushes the manifest to the registry, and then creates a GitHub release.
   #################################################################
   create-manifest-and-release:
-    needs: build-multiarch
+    needs: [release-setup, build-multiarch]
     if: needs.release-setup.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -128,7 +128,7 @@ jobs:
           # Log in to Docker registry again before pushing the manifest.
           echo "${{ secrets.ECMWF_DOCKER_REGISTRY_ACCESS_TOKEN }}" | \
             docker login eccr.ecmwf.int --username '${{ secrets.ECMWF_DOCKER_REGISTRY_USERNAME }}' --password-stdin
-
+           
       - name: Create and push multiarch manifest
         env:
           # Use the package version as the common tag.
