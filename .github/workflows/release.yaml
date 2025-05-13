@@ -87,9 +87,14 @@ jobs:
 
       - name: Install Skaffold
         run: |
-          # Download and install Skaffold.
-          # Adjust the download URL if your runner's OS is different.
-          curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64
+          elif [ "${{ matrix.arch }}" = "arm64" ]; then
+            curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-arm64
+          else
+            echo "Unknown architecture: ${{ matrix.arch }}"
+            exit 1
+          fi
           chmod +x skaffold
           sudo mv skaffold /usr/local/bin/
 
