@@ -1,0 +1,38 @@
+version: 1.0.0
+
+logging:
+  level: "debug"
+  format: "console"
+
+auth:
+  timeout_in_ms: 3000 # 3 seconds
+
+providers:
+  - name: "plain-provider"
+    type: "plain"
+    realm: "localrealm"
+    users:
+      - username: "test_user"
+        password: "secret123"
+      - username: "test_user2"
+        password: "p@ssw0rd"
+  - name: "ECMWF API Provider"
+    type: "ecmwf-api"
+    uri: https://api.ecmwf.int/v1
+    realm: "ecmwf"
+
+store:
+  enabled: false
+  # type: mongo
+  # database: tokens
+  # uri: mongodb://mongodb:27017
+
+services: []
+
+jwt:
+  exp: 3600
+  iss: authotron-test
+  secret: some-secret-key
+  aud: authotron-test
+
+bind_address: 0.0.0.0:8080
