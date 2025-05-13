@@ -1,4 +1,4 @@
-## NGINX + Auth-O-Tron Docker Compose Example
+## NGINX + Auth-o-tron Docker Compose Example
 
 A minimal example showing how to deploy Auth-o-tron as a standalone service behind NGINX (with the `auth_request` module) and forward authenticated requests to an API backend. By default it uses [httpbin](https://github.com/postmanlabs/httpbin) to inspect HTTP headers.
 
@@ -65,7 +65,7 @@ upstream api_backend {
 }
 ```
 
-### Redeplot
+### Redeploy
 ```bash
 docker-compose down
 docker-compose up -d
