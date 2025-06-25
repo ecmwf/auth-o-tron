@@ -2,7 +2,6 @@
 
 
 ### Contributor Declaration
-
 By opening this pull request, I affirm the following:
 * All authors agree to the [Contributor License Agreement](https://github.com/ecmwf/codex/blob/main/Legal/contributor_license_agreement.md).
 * The code follows the project's coding standards.
