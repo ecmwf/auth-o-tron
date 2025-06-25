@@ -3,7 +3,6 @@
 
 ### Contributor Declaration
 
-
 By opening this pull request, I affirm the following:
 
 * All authors agree to the [Contributor License Agreement](link-to-CLA).
