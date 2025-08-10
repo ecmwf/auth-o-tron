@@ -14,6 +14,7 @@ use super::ecmwfapi_provider::{EcmwfApiProvider, EcmwfApiProviderConfig};
 use super::jwt_provider::{JWTAuthConfig, JWTProvider};
 use super::ldap_augmenter::{LDAPAugmenter, LDAPAugmenterConfig};
 use super::openid_offline_provider::{OpenIDOfflineProvider, OpenIDOfflineProviderConfig};
+use super::plain_augmenter::{PlainAugConfig, PlainAugProvider};
 use super::plain_provider::{PlainAuthConfig, PlainAuthProvider};
 
 /// Configuration options for each authentication provider.
@@ -39,6 +40,9 @@ pub enum ProviderConfig {
 pub enum AugmenterConfig {
     #[serde(rename = "ldap")]
     LDAPAugmenterConfig(LDAPAugmenterConfig),
+
+    #[serde(rename = "plain")]
+    PlainAugmenterConfig(PlainAugConfig),
 }
 
 /// An authentication provider must be able to return a User or an error.
@@ -76,6 +80,7 @@ pub fn create_auth_provider(config: &ProviderConfig) -> Box<dyn Provider> {
 pub fn create_auth_augmenter(config: &AugmenterConfig) -> Box<dyn Augmenter> {
     match config {
         AugmenterConfig::LDAPAugmenterConfig(cfg) => Box::new(LDAPAugmenter::new(cfg)),
+        AugmenterConfig::PlainAugmenterConfig(cfg) => Box::new(PlainAugProvider::new(cfg)),
     }
 }
 
@@ -253,13 +258,24 @@ impl Auth {
                 })
                 .map(|provider| {
                     let name = provider.get_name().to_owned();
-                    // Clone the credential for each async block to avoid moving it.
                     let cred = credential.clone();
                     async move {
                         match timeout(timeout_duration, provider.authenticate(&cred)).await {
-                            Ok(Ok(user)) => Ok((name, user)),
-                            Ok(Err(e)) => Err(format!("Provider '{}' failed: {}", name, e)),
-                            Err(_) => Err(format!("Provider '{}' timed out", name)),
+                            Ok(Ok(user)) => {
+                                info!(
+                                    "Provider '{}' succeeded in authenticating user '{}'",
+                                    name, user.username
+                                );
+                                Ok((name, user))
+                            }
+                            Ok(Err(e)) => {
+                                debug!("Provider '{}' failed to authenticate: {}", name, e);
+                                Err(format!("Provider '{}' failed: {}", name, e))
+                            }
+                            Err(_) => {
+                                debug!("Provider '{}' timed out during authentication", name);
+                                Err(format!("Provider '{}' timed out", name))
+                            }
                         }
                     }
                     .boxed()
