@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::JWTConfig;
 
 /// The User struct represents an authenticated user in the system.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct User {
     pub version: i32,
     pub realm: String,
@@ -44,7 +44,6 @@ impl User {
         struct Claims<'a> {
             sub: &'a String,
             iss: &'a String,
-            aud: &'a Option<String>,
             exp: i64,
             iat: i64,
 
@@ -61,7 +60,6 @@ impl User {
         let claims = Claims {
             sub: &sub,
             iss: &jwtconfig.iss,
-            aud: &jwtconfig.aud,
             exp: now + jwtconfig.exp,
             iat: now,
             roles: &self.roles,
