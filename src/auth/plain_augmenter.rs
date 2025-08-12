@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -14,13 +16,7 @@ pub struct PlainAugConfig {
     /// The realm associated with this provider.
     pub realm: String,
     /// A list of roles and users.
-    pub roles: Vec<PlainRole>,
-}
-
-#[derive(Deserialize, Serialize, Debug, JsonSchema, Clone)]
-pub struct PlainRole {
-    pub name: String,
-    pub users: Vec<String>,
+    pub roles: HashMap<String, Vec<String>>,
 }
 
 /// A `PlainAugProvider` that adds custom roles to specific users
@@ -42,11 +38,19 @@ impl Augmenter for PlainAugProvider {
     async fn augment(&self, user: &mut User) -> Result<(), String> {
         debug!("Augmenting user {} with roles", user.username);
 
+        if user.realm != self.config.realm {
+            debug!(
+                "User {} is in realm {}, but this provider is for realm {}",
+                user.username, user.realm, self.config.realm
+            );
+            return Ok(()); // No roles to add if realms don't match
+        }
+
         // Find roles for the user in the config
-        for role in &self.config.roles {
-            if role.users.contains(&user.username) {
-                info!("Adding role {} to user {}", role.name, user.username);
-                user.roles.push(role.name.clone());
+        for (role_name, users) in &self.config.roles {
+            if users.contains(&user.username) {
+                info!("Adding role {} to user {}", role_name, user.username);
+                user.roles.push(role_name.clone());
             }
         }
 
@@ -67,5 +71,109 @@ impl Augmenter for PlainAugProvider {
 
     fn get_realm(&self) -> &str {
         &self.config.realm
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use figment::{
+        providers::{Format, Yaml},
+        Figment,
+    };
+
+    use super::*;
+
+    fn make_test_config() -> PlainAugConfig {
+        let config_str = r#"
+name: TestProvider
+realm: test-realm
+roles:
+    admin:
+        - alice
+        - bob
+    user:
+        - bob
+        - carol
+"#;
+        Figment::new()
+            .merge(Yaml::string(config_str))
+            .extract()
+            .expect("Failed to parse test config")
+    }
+
+    #[tokio::test]
+    async fn test_augment_adds_roles() {
+        let config = make_test_config();
+        let provider = PlainAugProvider::new(&config);
+
+        let mut user = User {
+            username: "bob".to_string(),
+            roles: vec![],
+            realm: "test-realm".to_string(),
+            ..Default::default()
+        };
+
+        provider.augment(&mut user).await.unwrap();
+        assert!(user.roles.contains(&"admin".to_string()));
+        assert!(user.roles.contains(&"user".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_augment_no_roles_for_diff_realm() {
+        let config = make_test_config();
+        let provider = PlainAugProvider::new(&config);
+
+        let mut user = User {
+            username: "bob".to_string(),
+            roles: vec![],
+            realm: "other-realm".to_string(),
+            ..Default::default()
+        };
+
+        provider.augment(&mut user).await.unwrap();
+        assert!(user.roles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_augment_user_gets_single_role() {
+        let config = make_test_config();
+        let provider = PlainAugProvider::new(&config);
+
+        let mut user = User {
+            username: "alice".to_string(),
+            roles: vec![],
+            realm: "test-realm".to_string(),
+            ..Default::default()
+        };
+
+        provider.augment(&mut user).await.unwrap();
+        assert_eq!(user.roles.len(), 1);
+        assert!(user.roles.contains(&"admin".to_string()));
+        assert!(!user.roles.contains(&"user".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_augment_no_roles() {
+        let config = make_test_config();
+        let provider = PlainAugProvider::new(&config);
+
+        let mut user = User {
+            username: "dave".to_string(),
+            roles: vec![],
+            ..Default::default()
+        };
+
+        provider.augment(&mut user).await.unwrap();
+        assert!(user.roles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_name_type_realm() {
+        let config = make_test_config();
+        let provider = PlainAugProvider::new(&config);
+
+        assert_eq!(provider.get_name(), "TestProvider");
+        assert_eq!(provider.get_type(), "plain");
+        assert_eq!(provider.get_realm(), "test-realm");
     }
 }

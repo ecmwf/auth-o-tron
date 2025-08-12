@@ -6,7 +6,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-aide = { version = "~0.13.5", features = ["axum", "axum-multipart", "axum-headers"] }
+aide = { version = "~0.13.5", features = [
+    "axum",
+    "axum-multipart",
+    "axum-headers",
+] }
 async-trait = "~0.1.88"
 axum = "~0.7.9"
 cached = { version = "~0.51.4", features = ["async", "tokio"] }
@@ -31,7 +35,7 @@ uuid = { version = "~1.8.0", features = ["v4"] }
 # Core tracing
 tracing = "~0.1"
 # Subscriber implementations & formatting layers
-tracing-subscriber = { version = "~0.3", features = ["env-filter","json"] }
+tracing-subscriber = { version = "~0.3", features = ["env-filter", "json"] }
 # Bridge older `log` calls into `tracing`
 tracing-log = "~0.1"
 base64 = "~0.22.1"

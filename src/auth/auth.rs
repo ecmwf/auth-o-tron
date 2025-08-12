@@ -261,13 +261,7 @@ impl Auth {
                     let cred = credential.clone();
                     async move {
                         match timeout(timeout_duration, provider.authenticate(&cred)).await {
-                            Ok(Ok(user)) => {
-                                info!(
-                                    "Provider '{}' succeeded in authenticating user '{}'",
-                                    name, user.username
-                                );
-                                Ok((name, user))
-                            }
+                            Ok(Ok(user)) => Ok((name, user)),
                             Ok(Err(e)) => {
                                 debug!("Provider '{}' failed to authenticate: {}", name, e);
                                 Err(format!("Provider '{}' failed: {}", name, e))
