@@ -6,7 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use super::Augmenter;
+use crate::augmenters::Augmenter;
 use crate::models::User;
 
 /// PlainAugmenterConfig defines the data for additional roles.
