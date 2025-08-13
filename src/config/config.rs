@@ -6,7 +6,7 @@ use std::env;
 
 use super::logging::LoggingConfig;
 use super::store::StoreConfig;
-use crate::auth::AugmenterConfig;
+use crate::augmenters::AugmenterConfig;
 use crate::providers::ProviderConfig;
 
 /// A top-level enum for versioned configurations.

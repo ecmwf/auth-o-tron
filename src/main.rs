@@ -1,3 +1,4 @@
+mod augmenters;
 mod auth;
 mod config;
 mod models;

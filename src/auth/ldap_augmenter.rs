@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use super::Augmenter;
+use crate::augmenters::Augmenter;
 use crate::models::User;
 
 /// Configuration required to connect to LDAP and fetch user roles.
