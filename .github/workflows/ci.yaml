@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - '**'  # Run on every branch push
-  pull_request:
+  # pull_request: # this is not necessary if we run on each push
 
 jobs:
   build-and-test:
