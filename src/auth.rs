@@ -1,89 +1,15 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::augmenters::{create_auth_augmenter, Augmenter, AugmenterConfig};
 use crate::config::AuthConfig;
-use crate::models::User;
+use crate::models::user::User;
+use crate::providers::{create_auth_provider, Provider, ProviderConfig};
 use crate::store::Store;
 use futures::future::{join_all, select_ok, FutureExt};
 use futures::lock::Mutex;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
-
-use super::ecmwfapi_provider::{EcmwfApiProvider, EcmwfApiProviderConfig};
-use super::jwt_provider::{JWTAuthConfig, JWTProvider};
-use super::ldap_augmenter::{LDAPAugmenter, LDAPAugmenterConfig};
-use super::openid_offline_provider::{OpenIDOfflineProvider, OpenIDOfflineProviderConfig};
-use super::plain_augmenter::{PlainAugmenter, PlainAugmenterConfig};
-use super::plain_provider::{PlainAuthConfig, PlainAuthProvider};
-
-/// Configuration options for each authentication provider.
-#[derive(Deserialize, Serialize, JsonSchema, Debug)]
-#[serde(tag = "type")]
-pub enum ProviderConfig {
-    #[serde(rename = "ecmwf-api")]
-    EcmwfApiAuthConfig(EcmwfApiProviderConfig),
-
-    #[serde(rename = "jwt")]
-    JWTAuthConfig(JWTAuthConfig),
-
-    #[serde(rename = "openid-offline")]
-    OpenIDOfflineAuthConfig(OpenIDOfflineProviderConfig),
-
-    #[serde(rename = "plain")]
-    PlainAuthConfig(PlainAuthConfig),
-}
-
-/// Configuration options for augmenters (e.g. an LDAP roles augmenter).
-#[derive(Deserialize, Serialize, JsonSchema, Debug)]
-#[serde(tag = "type")]
-pub enum AugmenterConfig {
-    #[serde(rename = "ldap")]
-    LDAPAugmenterConfig(LDAPAugmenterConfig),
-
-    #[serde(rename = "plain")]
-    PlainAugmenterConfig(PlainAugmenterConfig),
-}
-
-/// An authentication provider must be able to return a User or an error.
-#[async_trait::async_trait]
-pub trait Provider: Send + Sync {
-    fn get_name(&self) -> &str;
-    fn get_type(&self) -> &str;
-    /// Providers that support realm-based filtering should override this.
-    fn get_realm(&self) -> Option<&str> {
-        None
-    }
-    async fn authenticate(&self, credentials: &str) -> Result<User, String>;
-}
-
-/// An augmenter can add extra roles or info to an already-authenticated User.
-#[async_trait::async_trait]
-pub trait Augmenter: Send + Sync {
-    fn get_name(&self) -> &str;
-    fn get_type(&self) -> &str;
-    fn get_realm(&self) -> &str;
-    async fn augment(&self, user: Arc<Mutex<User>>) -> Result<(), String>;
-}
-
-/// Create an authentication provider from a given config.
-pub fn create_auth_provider(config: &ProviderConfig) -> Box<dyn Provider> {
-    match config {
-        ProviderConfig::EcmwfApiAuthConfig(cfg) => Box::new(EcmwfApiProvider::new(cfg)),
-        ProviderConfig::JWTAuthConfig(cfg) => Box::new(JWTProvider::new(cfg)),
-        ProviderConfig::OpenIDOfflineAuthConfig(cfg) => Box::new(OpenIDOfflineProvider::new(cfg)),
-        ProviderConfig::PlainAuthConfig(cfg) => Box::new(PlainAuthProvider::new(cfg)),
-    }
-}
-
-/// Create an augmenter from a given config.
-pub fn create_auth_augmenter(config: &AugmenterConfig) -> Box<dyn Augmenter> {
-    match config {
-        AugmenterConfig::LDAPAugmenterConfig(cfg) => Box::new(LDAPAugmenter::new(cfg)),
-        AugmenterConfig::PlainAugmenterConfig(cfg) => Box::new(PlainAugmenter::new(cfg)),
-    }
-}
 
 /// Holds all authentication providers, augmenters, and a reference to the store.
 pub struct Auth {
@@ -336,7 +262,7 @@ impl Auth {
 
 #[cfg(test)]
 mod tests {
-    use crate::auth::plain_augmenter::{PlainAugmenter, PlainAugmenterConfig};
+    use crate::augmenters::plain_augmenter::{PlainAugmenter, PlainAugmenterConfig};
 
     fn make_plain_augmenter_config(
         name: &str,
@@ -440,7 +366,7 @@ mod tests {
         assert!(user.roles.is_empty());
     }
     use super::*;
-    use crate::models::User;
+    use crate::models::user::User;
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -487,13 +413,16 @@ mod tests {
     impl crate::store::Store for DummyStore {
         async fn add_token(
             &self,
-            _token: &crate::models::Token,
+            _token: &crate::models::token::Token,
             _user: &User,
             _expiry: i64,
         ) -> Result<(), String> {
             Ok(())
         }
-        async fn get_tokens(&self, _user: &User) -> Result<Vec<crate::models::Token>, String> {
+        async fn get_tokens(
+            &self,
+            _user: &User,
+        ) -> Result<Vec<crate::models::token::Token>, String> {
             Ok(vec![])
         }
         async fn get_user(&self, _token: &str) -> Result<Option<User>, String> {

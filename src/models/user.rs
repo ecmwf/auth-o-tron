@@ -1,10 +1,17 @@
 use std::collections::HashMap;
 
+use crate::config::JWTConfig;
+use crate::utils::http_helpers::HTTPError;
+use crate::AppState;
+use axum::async_trait;
+use axum::extract::{ConnectInfo, FromRequestParts};
+use axum::http::StatusCode;
 use chrono::Utc;
+use http::request::Parts;
 use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
-
-use crate::config::JWTConfig;
+use std::net::SocketAddr;
+use tracing::warn;
 
 /// The User struct represents an authenticated user in the system.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -74,27 +81,56 @@ impl User {
     }
 }
 
-/// A token stored in a database for lookup/revocation.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub struct Token {
-    pub version: i32,
-    pub token_string: String,
-    /// A map from service -> scopes
-    pub scopes: HashMap<String, Vec<String>>,
-}
+/// Implementation of the request extractor for User.
+/// When authentication fails, we return an HTTPError that includes a
+/// dynamic WWW-Authenticate challenge generated from the available providers.
+#[async_trait]
+impl FromRequestParts<AppState> for User {
+    type Rejection = HTTPError;
+    async fn from_request_parts<'a, 'b>(
+        parts: &'a mut Parts,
+        state: &'b AppState,
+    ) -> Result<User, HTTPError> {
+        // Extract the Authorization header.
+        let auth_header = parts
+            .headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
 
-impl Token {
-    /// Create a new Token with optional version.
-    /// We automatically generate a new token_string (UUID).
-    pub fn new(
-        _suggested_token_str: String,
-        scopes: HashMap<String, Vec<String>>,
-        version: Option<i32>,
-    ) -> Self {
-        Token {
-            version: version.unwrap_or(1),
-            token_string: uuid::Uuid::new_v4().to_string(),
-            scopes,
+        // Extract the optional X-Auth-Realm header.
+        let realm_filter = parts
+            .headers
+            .get("x-auth-realm")
+            .and_then(|value| value.to_str().ok());
+
+        // Retrieve the client IP (for logging purposes).
+        let client_ip = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(addr)| addr.ip())
+            .unwrap_or_else(|| {
+                warn!("Unable to determine client IP address.");
+                "unknown".parse().unwrap()
+            });
+
+        // Attempt to authenticate using our Auth implementation.
+        match state
+            .auth
+            .authenticate(&auth_header, &client_ip.to_string(), realm_filter)
+            .await
+        {
+            Some(user) => Ok(user),
+            None => {
+                // Generate a dynamic challenge header from the available providers.
+                let challenge = state.auth.generate_challenge_header();
+                Err(HTTPError::new(
+                    StatusCode::UNAUTHORIZED,
+                    "Unauthorized access",
+                    Some(challenge),
+                ))
+            }
         }
     }
 }

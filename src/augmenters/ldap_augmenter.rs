@@ -8,8 +8,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use super::Augmenter;
-use crate::models::User;
+use crate::augmenters::Augmenter;
+use crate::models::user::User;
 
 /// Configuration required to connect to LDAP and fetch user roles.
 #[derive(Deserialize, Serialize, JsonSchema, Debug, Hash, PartialEq, Eq, Clone)]
