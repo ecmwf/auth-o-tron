@@ -9,9 +9,9 @@ use tracing::{info, warn};
 use super::Augmenter;
 use crate::models::User;
 
-/// PlainAugConfig defines the data for additional r.
+/// PlainAugmenterConfig defines the data for additional r.
 #[derive(Deserialize, Serialize, Debug, JsonSchema, Clone)]
-pub struct PlainAugConfig {
+pub struct PlainAugmenterConfig {
     /// A friendly name for logs.
     pub name: String,
     /// The realm associated with this provider.
@@ -20,16 +20,16 @@ pub struct PlainAugConfig {
     pub roles: HashMap<String, Vec<String>>,
 }
 
-/// A `PlainAugProvider` that adds custom roles to specific users
-pub struct PlainAugProvider {
-    pub config: PlainAugConfig,
+/// A `PlainAugmenter` that adds custom roles to specific users
+pub struct PlainAugmenter {
+    pub config: PlainAugmenterConfig,
 }
 
-impl PlainAugProvider {
-    /// Create a new `PlainAugProvider` from the config struct.
-    pub fn new(config: &PlainAugConfig) -> Self {
+impl PlainAugmenter {
+    /// Create a new `PlainAugmenter` from the config struct.
+    pub fn new(config: &PlainAugmenterConfig) -> Self {
         info!(
-            "Creating PlainAugProvider for realm='{}', name='{}'",
+            "Creating PlainAugmenter for realm='{}', name='{}'",
             config.realm, config.name
         );
         Self {
@@ -38,7 +38,7 @@ impl PlainAugProvider {
     }
 }
 #[async_trait]
-impl Augmenter for PlainAugProvider {
+impl Augmenter for PlainAugmenter {
     /// Augment the user with additional roles based on the configuration.
     async fn augment(&self, user: Arc<Mutex<User>>) -> Result<(), String> {
         let user_guard = user.lock().await;
@@ -96,7 +96,7 @@ mod tests {
 
     use super::*;
 
-    fn make_test_config() -> PlainAugConfig {
+    fn make_test_config() -> PlainAugmenterConfig {
         let config_str = r#"
 name: TestProvider
 realm: test-realm
@@ -117,7 +117,7 @@ roles:
     #[tokio::test]
     async fn test_augment_adds_roles() {
         let config = make_test_config();
-        let provider = PlainAugProvider::new(&config);
+        let provider = PlainAugmenter::new(&config);
 
         let user = Arc::new(Mutex::new(User {
             username: "bob".to_string(),
@@ -135,7 +135,7 @@ roles:
     #[tokio::test]
     async fn test_augment_no_roles_for_diff_realm() {
         let config = make_test_config();
-        let provider = PlainAugProvider::new(&config);
+        let provider = PlainAugmenter::new(&config);
         let user = Arc::new(Mutex::new(User {
             username: "bob".to_string(),
             roles: vec![],
@@ -151,7 +151,7 @@ roles:
     #[tokio::test]
     async fn test_augment_user_gets_single_role() {
         let config = make_test_config();
-        let provider = PlainAugProvider::new(&config);
+        let provider = PlainAugmenter::new(&config);
         let user = Arc::new(Mutex::new(User {
             username: "alice".to_string(),
             roles: vec![],
@@ -174,7 +174,7 @@ roles:
             roles: vec![],
             ..Default::default()
         }));
-        let provider = PlainAugProvider::new(&config);
+        let provider = PlainAugmenter::new(&config);
 
         provider.augment(user.clone()).await.unwrap();
         let user_guard = user.lock().await;
@@ -184,7 +184,7 @@ roles:
     #[tokio::test]
     async fn test_get_name_type_realm() {
         let config = make_test_config();
-        let provider = PlainAugProvider::new(&config);
+        let provider = PlainAugmenter::new(&config);
 
         assert_eq!(provider.get_name(), "TestProvider");
         assert_eq!(provider.get_type(), "plain");
