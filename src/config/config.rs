@@ -6,7 +6,8 @@ use std::env;
 
 use super::logging::LoggingConfig;
 use super::store::StoreConfig;
-use crate::auth::{AugmenterConfig, ProviderConfig};
+use crate::auth::AugmenterConfig;
+use crate::providers::ProviderConfig;
 
 /// A top-level enum for versioned configurations.
 #[derive(Deserialize, Serialize, JsonSchema)]
