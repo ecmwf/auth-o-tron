@@ -9,7 +9,7 @@ use tracing::{info, warn};
 use super::Augmenter;
 use crate::models::User;
 
-/// PlainAugmenterConfig defines the data for additional r.
+/// PlainAugmenterConfig defines the data for additional roles.
 #[derive(Deserialize, Serialize, Debug, JsonSchema, Clone)]
 pub struct PlainAugmenterConfig {
     /// A friendly name for logs.
