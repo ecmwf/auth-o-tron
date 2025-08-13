@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::JWTConfig;
 
 /// The User struct represents an authenticated user in the system.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct User {
     pub version: i32,
     pub realm: String,
@@ -44,7 +44,6 @@ impl User {
         struct Claims<'a> {
             sub: &'a String,
             iss: &'a String,
-            aud: &'a Option<String>,
             exp: i64,
             iat: i64,
 
@@ -61,7 +60,6 @@ impl User {
         let claims = Claims {
             sub: &sub,
             iss: &jwtconfig.iss,
-            aud: &jwtconfig.aud,
             exp: now + jwtconfig.exp,
             iat: now,
             roles: &self.roles,
@@ -126,7 +124,7 @@ mod tests {
         // Create a JWT configuration with an audience.
         let jwt_config = JWTConfig {
             iss: "test_issuer".to_string(),
-            aud: Some("test_audience".to_string()),
+            aud: None,
             exp: 3600,
             secret: "secretkey".to_string(),
         };
@@ -150,7 +148,5 @@ mod tests {
         assert_eq!(claims["iss"], jwt_config.iss);
         // Assert that the username claim matches.
         assert_eq!(claims["username"], user.username);
-        // (Optionally) Assert that the audience claim is present and equals what we set.
-        assert_eq!(claims["aud"], jwt_config.aud.unwrap());
     }
 }

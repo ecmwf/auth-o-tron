@@ -4,7 +4,8 @@ use std::sync::Arc;
 use crate::config::AuthConfig;
 use crate::models::User;
 use crate::store::Store;
-use futures::future::{select_ok, FutureExt};
+use futures::future::{join_all, select_ok, FutureExt};
+use futures::lock::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
@@ -14,6 +15,7 @@ use super::ecmwfapi_provider::{EcmwfApiProvider, EcmwfApiProviderConfig};
 use super::jwt_provider::{JWTAuthConfig, JWTProvider};
 use super::ldap_augmenter::{LDAPAugmenter, LDAPAugmenterConfig};
 use super::openid_offline_provider::{OpenIDOfflineProvider, OpenIDOfflineProviderConfig};
+use super::plain_augmenter::{PlainAugmenter, PlainAugmenterConfig};
 use super::plain_provider::{PlainAuthConfig, PlainAuthProvider};
 
 /// Configuration options for each authentication provider.
@@ -39,6 +41,9 @@ pub enum ProviderConfig {
 pub enum AugmenterConfig {
     #[serde(rename = "ldap")]
     LDAPAugmenterConfig(LDAPAugmenterConfig),
+
+    #[serde(rename = "plain")]
+    PlainAugmenterConfig(PlainAugmenterConfig),
 }
 
 /// An authentication provider must be able to return a User or an error.
@@ -59,7 +64,7 @@ pub trait Augmenter: Send + Sync {
     fn get_name(&self) -> &str;
     fn get_type(&self) -> &str;
     fn get_realm(&self) -> &str;
-    async fn augment(&self, user: &mut User) -> Result<(), String>;
+    async fn augment(&self, user: Arc<Mutex<User>>) -> Result<(), String>;
 }
 
 /// Create an authentication provider from a given config.
@@ -76,6 +81,7 @@ pub fn create_auth_provider(config: &ProviderConfig) -> Box<dyn Provider> {
 pub fn create_auth_augmenter(config: &AugmenterConfig) -> Box<dyn Augmenter> {
     match config {
         AugmenterConfig::LDAPAugmenterConfig(cfg) => Box::new(LDAPAugmenter::new(cfg)),
+        AugmenterConfig::PlainAugmenterConfig(cfg) => Box::new(PlainAugmenter::new(cfg)),
     }
 }
 
@@ -231,6 +237,17 @@ impl Auth {
             creds_map.insert(normalized_scheme, credential.to_string());
         }
 
+        let user = self.check_providers(creds_map, realm_filter).await?;
+        let user = self.check_augmenters(user).await?;
+
+        return Some(user);
+    }
+
+    async fn check_providers(
+        &self,
+        creds_map: HashMap<String, String>,
+        realm_filter: Option<&str>,
+    ) -> Option<User> {
         // Try each provided credential until one provider successfully authenticates.
         for (scheme, credential) in creds_map.into_iter() {
             // Set the timeout duration based on the configuration.
@@ -253,13 +270,18 @@ impl Auth {
                 })
                 .map(|provider| {
                     let name = provider.get_name().to_owned();
-                    // Clone the credential for each async block to avoid moving it.
                     let cred = credential.clone();
                     async move {
                         match timeout(timeout_duration, provider.authenticate(&cred)).await {
                             Ok(Ok(user)) => Ok((name, user)),
-                            Ok(Err(e)) => Err(format!("Provider '{}' failed: {}", name, e)),
-                            Err(_) => Err(format!("Provider '{}' timed out", name)),
+                            Ok(Err(e)) => {
+                                debug!("Provider '{}' failed to authenticate: {}", name, e);
+                                Err(format!("Provider '{}' failed: {}", name, e))
+                            }
+                            Err(_) => {
+                                debug!("Provider '{}' timed out during authentication", name);
+                                Err(format!("Provider '{}' timed out", name))
+                            }
                         }
                     }
                     .boxed()
@@ -295,10 +317,128 @@ impl Auth {
         }
         None
     }
+
+    async fn check_augmenters(&self, user: User) -> Option<User> {
+        info!("Applying augmentations for user '{}'", user.username);
+        let realm = user.realm.clone();
+        let user = Arc::new(Mutex::new(user));
+        let futures = self
+            .augmenters
+            .iter()
+            .filter(|a| a.get_realm() == realm)
+            .map(|augmenter| augmenter.augment(user.clone()));
+        let _ = join_all(futures).await;
+
+        // Return the authenticated user.
+        return Some(user.lock().await.clone());
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::auth::plain_augmenter::{PlainAugmenter, PlainAugmenterConfig};
+
+    fn make_plain_augmenter_config(
+        name: &str,
+        realm: &str,
+        roles: &[(&str, &[&str])],
+    ) -> PlainAugmenterConfig {
+        let mut roles_map = HashMap::new();
+        for (role, users) in roles {
+            roles_map.insert(
+                (*role).to_string(),
+                users.iter().map(|u| (*u).to_string()).collect(),
+            );
+        }
+        PlainAugmenterConfig {
+            name: name.to_string(),
+            realm: realm.to_string(),
+            roles: roles_map,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_check_augmenters_applies_roles_for_matching_realm() {
+        let aug1 = PlainAugmenter::new(&make_plain_augmenter_config(
+            "aug1",
+            "r1",
+            &[("admin", &["alice", "bob"])],
+        ));
+        let aug2 = PlainAugmenter::new(&make_plain_augmenter_config(
+            "aug2",
+            "r1",
+            &[("user", &["bob", "carol"])],
+        ));
+        let aug3 = PlainAugmenter::new(&make_plain_augmenter_config(
+            "aug3",
+            "r2",
+            &[("other", &["bob"])],
+        ));
+
+        let mut auth = Auth {
+            providers: vec![],
+            augmenters: vec![Box::new(aug1), Box::new(aug2), Box::new(aug3)],
+            config: AuthConfig { timeout_in_ms: 5 },
+            token_store: Arc::new(DummyStore),
+        };
+
+        let user = User {
+            username: "bob".to_string(),
+            roles: vec![],
+            realm: "r1".to_string(),
+            ..Default::default()
+        };
+        let user = auth.check_augmenters(user).await.unwrap();
+        assert!(user.roles.contains(&"admin".to_string()));
+        assert!(user.roles.contains(&"user".to_string()));
+        assert!(!user.roles.contains(&"other".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_check_augmenters_ignores_nonmatching_realm() {
+        let aug = PlainAugmenter::new(&make_plain_augmenter_config(
+            "aug",
+            "r1",
+            &[("admin", &["bob"])],
+        ));
+        let mut auth = Auth {
+            providers: vec![],
+            augmenters: vec![Box::new(aug)],
+            config: AuthConfig { timeout_in_ms: 5 },
+            token_store: Arc::new(DummyStore),
+        };
+        let user = User {
+            username: "bob".to_string(),
+            roles: vec![],
+            realm: "r2".to_string(),
+            ..Default::default()
+        };
+        let user = auth.check_augmenters(user).await.unwrap();
+        assert!(user.roles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_check_augmenters_no_roles_for_user() {
+        let aug = PlainAugmenter::new(&make_plain_augmenter_config(
+            "aug",
+            "r1",
+            &[("admin", &["alice"])],
+        ));
+        let mut auth = Auth {
+            providers: vec![],
+            augmenters: vec![Box::new(aug)],
+            config: AuthConfig { timeout_in_ms: 5 },
+            token_store: Arc::new(DummyStore),
+        };
+        let user = User {
+            username: "bob".to_string(),
+            roles: vec![],
+            realm: "r1".to_string(),
+            ..Default::default()
+        };
+        let user = auth.check_augmenters(user).await.unwrap();
+        assert!(user.roles.is_empty());
+    }
     use super::*;
     use crate::models::User;
     use async_trait::async_trait;
