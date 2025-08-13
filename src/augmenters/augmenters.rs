@@ -4,13 +4,11 @@ use futures::lock::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    auth::{
-        ldap_augmenter::{LDAPAugmenter, LDAPAugmenterConfig},
-        plain_augmenter::{PlainAugmenter, PlainAugmenterConfig},
-    },
-    models::User,
+use super::{
+    ldap_augmenter::{LDAPAugmenter, LDAPAugmenterConfig},
+    plain_augmenter::{PlainAugmenter, PlainAugmenterConfig},
 };
+use crate::models::User;
 
 /// Configuration options for augmenters (e.g. an LDAP roles augmenter).
 #[derive(Deserialize, Serialize, JsonSchema, Debug)]

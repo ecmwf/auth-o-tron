@@ -262,7 +262,7 @@ impl Auth {
 
 #[cfg(test)]
 mod tests {
-    use crate::auth::plain_augmenter::{PlainAugmenter, PlainAugmenterConfig};
+    use crate::augmenters::plain_augmenter::{PlainAugmenter, PlainAugmenterConfig};
 
     fn make_plain_augmenter_config(
         name: &str,

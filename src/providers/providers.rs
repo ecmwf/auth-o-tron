@@ -1,13 +1,10 @@
-use crate::{
-    auth::{
-        ecmwfapi_provider::{EcmwfApiProvider, EcmwfApiProviderConfig},
-        jwt_provider::{JWTAuthConfig, JWTProvider},
-        openid_offline_provider::{OpenIDOfflineProvider, OpenIDOfflineProviderConfig},
-        plain_provider::{PlainAuthConfig, PlainAuthProvider},
-    },
-    models::User,
-    AppState,
+use super::{
+    ecmwfapi_provider::{EcmwfApiProvider, EcmwfApiProviderConfig},
+    jwt_provider::{JWTAuthConfig, JWTProvider},
+    openid_offline_provider::{OpenIDOfflineProvider, OpenIDOfflineProviderConfig},
+    plain_provider::{PlainAuthConfig, PlainAuthProvider},
 };
+use crate::{models::User, AppState};
 use axum::{
     extract::{ConnectInfo, State},
     Json,
