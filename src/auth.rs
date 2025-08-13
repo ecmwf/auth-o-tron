@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::augmenters::{create_auth_augmenter, Augmenter, AugmenterConfig};
 use crate::config::AuthConfig;
-use crate::models::User;
+use crate::models::user::User;
 use crate::providers::{create_auth_provider, Provider, ProviderConfig};
 use crate::store::Store;
 use futures::future::{join_all, select_ok, FutureExt};
@@ -366,7 +366,7 @@ mod tests {
         assert!(user.roles.is_empty());
     }
     use super::*;
-    use crate::models::User;
+    use crate::models::user::User;
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -413,13 +413,16 @@ mod tests {
     impl crate::store::Store for DummyStore {
         async fn add_token(
             &self,
-            _token: &crate::models::Token,
+            _token: &crate::models::token::Token,
             _user: &User,
             _expiry: i64,
         ) -> Result<(), String> {
             Ok(())
         }
-        async fn get_tokens(&self, _user: &User) -> Result<Vec<crate::models::Token>, String> {
+        async fn get_tokens(
+            &self,
+            _user: &User,
+        ) -> Result<Vec<crate::models::token::Token>, String> {
             Ok(vec![])
         }
         async fn get_user(&self, _token: &str) -> Result<Option<User>, String> {

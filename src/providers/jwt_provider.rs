@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tracing::{debug, info};
 
-use crate::models::User;
+use crate::models::user::User;
 use crate::providers::Provider;
 
 /// JWT config structure for external usage

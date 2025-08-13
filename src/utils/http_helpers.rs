@@ -1,4 +1,4 @@
-use crate::models::User;
+use crate::models::user::User;
 use crate::AppState;
 use axum::async_trait;
 use axum::extract::{ConnectInfo, FromRequestParts};

@@ -1,5 +1,5 @@
 use super::Store;
-use crate::models::{Token, User};
+use crate::models::{token::Token, user::User};
 use async_trait::async_trait;
 
 /// A no-op store that always returns an error if called,
@@ -34,7 +34,7 @@ impl Store for NoStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Token, User};
+    use crate::models::{token::Token, user::User};
 
     /// Test that adding a token with NoStore returns an error.
     #[tokio::test]
