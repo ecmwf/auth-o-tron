@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, info};
 
-use crate::models::User;
+use crate::{models::User, providers::Provider};
 #[allow(unused_imports)]
 use cached::proc_macro::cached;
 use reqwest;
@@ -34,7 +34,7 @@ impl EcmwfApiProvider {
 }
 
 #[async_trait::async_trait]
-impl super::Provider for EcmwfApiProvider {
+impl Provider for EcmwfApiProvider {
     fn get_type(&self) -> &str {
         "Bearer"
     }

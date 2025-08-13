@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::config::AuthConfig;
 use crate::models::User;
+use crate::providers::{create_auth_provider, Provider, ProviderConfig};
 use crate::store::Store;
 use futures::future::{join_all, select_ok, FutureExt};
 use futures::lock::Mutex;
@@ -11,29 +12,9 @@ use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-use super::ecmwfapi_provider::{EcmwfApiProvider, EcmwfApiProviderConfig};
-use super::jwt_provider::{JWTAuthConfig, JWTProvider};
 use super::ldap_augmenter::{LDAPAugmenter, LDAPAugmenterConfig};
-use super::openid_offline_provider::{OpenIDOfflineProvider, OpenIDOfflineProviderConfig};
+
 use super::plain_augmenter::{PlainAugmenter, PlainAugmenterConfig};
-use super::plain_provider::{PlainAuthConfig, PlainAuthProvider};
-
-/// Configuration options for each authentication provider.
-#[derive(Deserialize, Serialize, JsonSchema, Debug)]
-#[serde(tag = "type")]
-pub enum ProviderConfig {
-    #[serde(rename = "ecmwf-api")]
-    EcmwfApiAuthConfig(EcmwfApiProviderConfig),
-
-    #[serde(rename = "jwt")]
-    JWTAuthConfig(JWTAuthConfig),
-
-    #[serde(rename = "openid-offline")]
-    OpenIDOfflineAuthConfig(OpenIDOfflineProviderConfig),
-
-    #[serde(rename = "plain")]
-    PlainAuthConfig(PlainAuthConfig),
-}
 
 /// Configuration options for augmenters (e.g. an LDAP roles augmenter).
 #[derive(Deserialize, Serialize, JsonSchema, Debug)]
@@ -46,18 +27,6 @@ pub enum AugmenterConfig {
     PlainAugmenterConfig(PlainAugmenterConfig),
 }
 
-/// An authentication provider must be able to return a User or an error.
-#[async_trait::async_trait]
-pub trait Provider: Send + Sync {
-    fn get_name(&self) -> &str;
-    fn get_type(&self) -> &str;
-    /// Providers that support realm-based filtering should override this.
-    fn get_realm(&self) -> Option<&str> {
-        None
-    }
-    async fn authenticate(&self, credentials: &str) -> Result<User, String>;
-}
-
 /// An augmenter can add extra roles or info to an already-authenticated User.
 #[async_trait::async_trait]
 pub trait Augmenter: Send + Sync {
@@ -65,16 +34,6 @@ pub trait Augmenter: Send + Sync {
     fn get_type(&self) -> &str;
     fn get_realm(&self) -> &str;
     async fn augment(&self, user: Arc<Mutex<User>>) -> Result<(), String>;
-}
-
-/// Create an authentication provider from a given config.
-pub fn create_auth_provider(config: &ProviderConfig) -> Box<dyn Provider> {
-    match config {
-        ProviderConfig::EcmwfApiAuthConfig(cfg) => Box::new(EcmwfApiProvider::new(cfg)),
-        ProviderConfig::JWTAuthConfig(cfg) => Box::new(JWTProvider::new(cfg)),
-        ProviderConfig::OpenIDOfflineAuthConfig(cfg) => Box::new(OpenIDOfflineProvider::new(cfg)),
-        ProviderConfig::PlainAuthConfig(cfg) => Box::new(PlainAuthProvider::new(cfg)),
-    }
 }
 
 /// Create an augmenter from a given config.

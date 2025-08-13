@@ -7,4 +7,4 @@ pub mod plain_augmenter;
 pub mod plain_provider;
 
 // Re-export from auth.rs so we can do "use crate::auth::*;"
-pub use auth::{Augmenter, AugmenterConfig, Auth, Provider, ProviderConfig};
+pub use auth::{Augmenter, AugmenterConfig, Auth};

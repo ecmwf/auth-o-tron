@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use tracing::{debug, error, info};
 
 use super::{mongodb_store::MongoDBStore, no_store::NoStore};
-use crate::auth::Provider;
 use crate::config::{StoreBackend, StoreConfig};
 use crate::models::{Token, User};
+use crate::providers::Provider;
 
 /// The Store trait abstracts token storage (add, retrieve, delete).
 #[async_trait]

@@ -6,8 +6,8 @@ use serde_json::Value;
 use tracing::{debug, info};
 
 use super::jwt_provider::{JWTAuthConfig, JWTProvider};
-use super::Provider;
 use crate::models::User;
+use crate::providers::Provider;
 
 /// Config for an OpenID provider that also supports offline tokens.
 #[derive(Deserialize, Debug, Serialize, JsonSchema, Hash, Clone, PartialEq, Eq)]

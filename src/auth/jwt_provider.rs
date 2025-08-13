@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use tracing::{debug, info};
 
 use crate::models::User;
+use crate::providers::Provider;
 
 /// JWT config structure for external usage
 #[derive(Deserialize, Serialize, JsonSchema, Debug, Clone)]
@@ -54,7 +55,7 @@ impl JWTProvider {
 }
 
 #[async_trait::async_trait]
-impl super::Provider for JWTProvider {
+impl Provider for JWTProvider {
     /// For consistency, we treat these tokens as "Bearer" type.
     fn get_type(&self) -> &str {
         "Bearer"
@@ -166,7 +167,6 @@ pub async fn get_certs(cert_uri: String) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::auth::Provider;
     use mockito::Server;
     use tokio;
 
