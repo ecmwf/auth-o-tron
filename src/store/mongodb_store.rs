@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
-use crate::models::{Token, User};
+use crate::models::{token::Token, user::User};
 use crate::store::Store;
 
 /// The config struct for MongoDB connections.
@@ -252,7 +252,7 @@ impl Store for MongoDBStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Token, User};
+    use crate::models::{token::Token, user::User};
     use std::collections::HashMap;
 
     /// Test that converting a User to a MongoDB document and back preserves the original user data.

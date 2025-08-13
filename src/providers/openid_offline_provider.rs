@@ -6,7 +6,7 @@ use serde_json::Value;
 use tracing::{debug, info};
 
 use super::jwt_provider::{JWTAuthConfig, JWTProvider};
-use crate::models::User;
+use crate::models::user::User;
 use crate::providers::Provider;
 
 /// Config for an OpenID provider that also supports offline tokens.

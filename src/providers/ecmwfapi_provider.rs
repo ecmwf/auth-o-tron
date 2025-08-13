@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, info};
 
-use crate::{models::User, providers::Provider};
+use crate::{models::user::User, providers::Provider};
 #[allow(unused_imports)]
 use cached::proc_macro::cached;
 use reqwest;

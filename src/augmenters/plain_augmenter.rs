@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::augmenters::Augmenter;
-use crate::models::User;
+use crate::models::user::User;
 
 /// PlainAugmenterConfig defines the data for additional roles.
 #[derive(Deserialize, Serialize, Debug, JsonSchema, Clone)]

@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::models::User;
+use crate::models::user::User;
 use crate::providers::Provider;
 
 /// PlainAuthConfig defines the data for Basic authentication.

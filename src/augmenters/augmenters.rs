@@ -8,7 +8,7 @@ use super::{
     ldap_augmenter::{LDAPAugmenter, LDAPAugmenterConfig},
     plain_augmenter::{PlainAugmenter, PlainAugmenterConfig},
 };
-use crate::models::User;
+use crate::models::user::User;
 
 /// Configuration options for augmenters (e.g. an LDAP roles augmenter).
 #[derive(Deserialize, Serialize, JsonSchema, Debug)]
