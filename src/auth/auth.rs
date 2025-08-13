@@ -4,7 +4,8 @@ use std::sync::Arc;
 use crate::config::AuthConfig;
 use crate::models::User;
 use crate::store::Store;
-use futures::future::{select_ok, FutureExt};
+use futures::future::{join_all, select_ok, FutureExt};
+use futures::lock::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
@@ -63,7 +64,7 @@ pub trait Augmenter: Send + Sync {
     fn get_name(&self) -> &str;
     fn get_type(&self) -> &str;
     fn get_realm(&self) -> &str;
-    async fn augment(&self, user: &mut User) -> Result<(), String>;
+    async fn augment(&self, user: Arc<Mutex<User>>) -> Result<(), String>;
 }
 
 /// Create an authentication provider from a given config.
@@ -236,6 +237,17 @@ impl Auth {
             creds_map.insert(normalized_scheme, credential.to_string());
         }
 
+        let user = self.check_providers(creds_map, realm_filter).await?;
+        let user = self.check_augmenters(user).await?;
+
+        return Some(user);
+    }
+
+    async fn check_providers(
+        &self,
+        creds_map: HashMap<String, String>,
+        realm_filter: Option<&str>,
+    ) -> Option<User> {
         // Try each provided credential until one provider successfully authenticates.
         for (scheme, credential) in creds_map.into_iter() {
             // Set the timeout duration based on the configuration.
@@ -304,6 +316,21 @@ impl Auth {
             }
         }
         None
+    }
+
+    async fn check_augmenters(&self, user: User) -> Option<User> {
+        info!("Applying augmentations for user '{}'", user.username);
+        let realm = user.realm.clone();
+        let user = Arc::new(Mutex::new(user));
+        let futures = self
+            .augmenters
+            .iter()
+            .filter(|a| a.get_realm() == realm)
+            .map(|augmenter| augmenter.augment(user.clone()));
+        let _ = join_all(futures).await;
+
+        // Return the authenticated user.
+        return Some(user.lock().await.clone());
     }
 }
 

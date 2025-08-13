@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use cached::proc_macro::cached;
+use futures::lock::Mutex;
 use ldap3::{LdapConnAsync, Scope, SearchEntry};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -130,24 +133,28 @@ impl Augmenter for LDAPAugmenter {
     }
 
     /// Adds additional roles to the user from LDAP, if the realms match.
-    async fn augment(&self, user: &mut User) -> Result<(), String> {
-        if user.realm != self.get_realm() {
+    async fn augment(&self, user: Arc<Mutex<User>>) -> Result<(), String> {
+        let user_guard = user.lock().await;
+        let realm = &user_guard.realm.clone();
+        let username = &user_guard.username.clone();
+        drop(user_guard);
+        if realm != self.get_realm() {
             return Err(format!(
                 "Attempted to augment user in the wrong realm. Expected '{}', got '{}'",
                 self.get_realm(),
-                user.realm
+                realm
             ));
         }
 
-        debug!("Retrieving LDAP roles for user '{}'", user.username);
-        match retrieve_ldap_user_roles(self.config.clone(), user.username.clone()).await {
+        info!("Retrieving LDAP roles for user '{}'", username);
+        match retrieve_ldap_user_roles(self.config.clone(), username.clone()).await {
             Ok(roles) => {
-                debug!(
+                info!(
                     "Fetched {} roles from LDAP for user '{}'",
                     roles.len(),
-                    user.username
+                    username
                 );
-                user.roles.extend(roles);
+                user.lock().await.roles.extend(roles);
                 Ok(())
             }
             Err(err) => {
