@@ -139,10 +139,25 @@ impl Auth {
 
         // Use a HashMap with owned Strings for credentials.
         let mut creds_map: HashMap<String, String> = HashMap::new();
+        let mut seen_trimmed = std::collections::HashSet::new();
+        let mut unique_count = 0;
 
         // Split the header on commas to allow multiple auth credentials.
         for part in auth_header.split(',') {
             let trimmed = part.trim();
+            // Discard duplicate trimmed parts
+            if !seen_trimmed.insert(trimmed.to_string()) {
+                warn!(
+                    "Duplicate auth header part detected and discarded: '{}'",
+                    trimmed
+                );
+                continue;
+            }
+            unique_count += 1;
+            if unique_count > 3 {
+                warn!("Too many unique Authorization header credentials (>{})", 3);
+                return None;
+            }
             // Each part should be in the format: <scheme> <credentials>
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
             if parts.len() != 2 {
@@ -152,14 +167,6 @@ impl Auth {
             let raw_scheme = parts[0];
             let credential = parts[1];
             let normalized_scheme = header_to_provider_type(raw_scheme);
-            // Return an error if the same scheme appears more than once.
-            if creds_map.contains_key(&normalized_scheme) {
-                warn!(
-                    "Multiple credentials provided for scheme '{}'. Only one per scheme is allowed.",
-                    normalized_scheme
-                );
-                return None;
-            }
             creds_map.insert(normalized_scheme, credential.to_string());
         }
 
@@ -368,6 +375,7 @@ mod tests {
     use super::*;
     use crate::models::user::User;
     use async_trait::async_trait;
+    use http::header;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -584,6 +592,72 @@ mod tests {
         assert!(
             user_none.is_none(),
             "Authentication should fail for a non-matching realm"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_headers_checked_once() {
+        let provider = Box::new(DummyProvider {
+            name: "TestBasic".to_string(),
+            provider_type: "Basic".to_string(),
+            realm: Some("localrealm".to_string()),
+            expected_credential: "ZHVtbXk6ZHVtbXk=".to_string(),
+        });
+        let auth = Auth {
+            providers: vec![provider],
+            augmenters: vec![],
+            config: AuthConfig { timeout_in_ms: 5 },
+            token_store: Arc::new(DummyStore),
+        };
+        // Duplicate header part (should only check once, and succeed)
+        let header = "Basic ZHVtbXk6ZHVtbXk=, Basic ZHVtbXk6ZHVtbXk=";
+        let user = auth
+            .authenticate(header, "127.0.0.1", Some("localrealm"))
+            .await;
+        assert!(
+            user.is_some(),
+            "Duplicate headers should be checked just once and succeed"
+        );
+
+        // duplicate wrong header gets rejected
+        let wrong_header = "Basic wrong, Basic wrong";
+        let user = auth
+            .authenticate(wrong_header, "127.0.0.1", Some("localrealm"))
+            .await;
+        assert!(user.is_none(), "Duplicate wrong headers should be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_too_many_unique_headers_rejected() {
+        let provider = Box::new(DummyProvider {
+            name: "TestBasic".to_string(),
+            provider_type: "Basic".to_string(),
+            realm: Some("localrealm".to_string()),
+            expected_credential: "ZHVtbXk6ZHVtbXk=".to_string(),
+        });
+        let auth = Auth {
+            providers: vec![provider],
+            augmenters: vec![],
+            config: AuthConfig { timeout_in_ms: 5 },
+            token_store: Arc::new(DummyStore),
+        };
+        // 4 unique header parts (should be rejected)
+        let header = "Basic a, Basic b, Basic ZHVtbXk6ZHVtbXk=, Basic c";
+        let user = auth
+            .authenticate(header, "127.0.0.1", Some("localrealm"))
+            .await;
+        assert!(
+            user.is_none(),
+            "More than 3 unique headers should be rejected"
+        );
+        // check that if correct header is third user is authenticated
+        let header = "Basic a, Basic b, Basic ZHVtbXk6ZHVtbXk=";
+        let user = auth
+            .authenticate(header, "127.0.0.1", Some("localrealm"))
+            .await;
+        assert!(
+            user.is_some(),
+            "User should be authenticated with the correct header"
         );
     }
 }
