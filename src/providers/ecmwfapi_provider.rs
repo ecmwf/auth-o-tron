@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -78,7 +80,20 @@ async fn query(uri: String, token: String, realm: String) -> Result<User, String
             serde_json::from_str(&body).map_err(|e| format!("Error parsing JSON: {}", e))?;
 
         let username = user_info["uid"].as_str().unwrap_or_default().to_string();
-        Ok(User::new(realm, username, None, None, None, None))
+        let email = user_info["email"].as_str().map(|s| s.to_string());
+        let mut attributes = HashMap::new();
+        if let Some(email) = email {
+            attributes.insert("ecmwf-email".to_string(), email);
+        }
+        attributes.insert("ecmwf-apikey".to_string(), token.clone());
+        Ok(User::new(
+            realm,
+            username,
+            None,
+            Some(attributes),
+            None,
+            None,
+        ))
     } else if response.status() == 403 {
         Err("Invalid API token".to_string())
     } else {
