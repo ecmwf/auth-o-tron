@@ -135,7 +135,12 @@ impl Auth {
         }
 
         // Log the client's IP address for debugging purposes.
-        debug!("Authenticating request from IP: {}", ip);
+        debug!(
+            "Authenticating request with auth header {} from IP {} Realm filter {}",
+            auth_header,
+            ip,
+            realm_filter.unwrap_or("None")
+        );
 
         // Use a HashMap with owned Strings for credentials.
         let mut creds_map: HashMap<String, String> = HashMap::new();
@@ -271,6 +276,12 @@ impl Auth {
 mod tests {
     use crate::augmenters::plain_augmenter::{PlainAugmenter, PlainAugmenterConfig};
 
+    use super::*;
+    use crate::models::user::User;
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
     fn make_plain_augmenter_config(
         name: &str,
         realm: &str,
@@ -308,7 +319,7 @@ mod tests {
             &[("other", &["bob"])],
         ));
 
-        let mut auth = Auth {
+        let auth = Auth {
             providers: vec![],
             augmenters: vec![Box::new(aug1), Box::new(aug2), Box::new(aug3)],
             config: AuthConfig { timeout_in_ms: 5 },
@@ -334,7 +345,7 @@ mod tests {
             "r1",
             &[("admin", &["bob"])],
         ));
-        let mut auth = Auth {
+        let auth = Auth {
             providers: vec![],
             augmenters: vec![Box::new(aug)],
             config: AuthConfig { timeout_in_ms: 5 },
@@ -357,7 +368,7 @@ mod tests {
             "r1",
             &[("admin", &["alice"])],
         ));
-        let mut auth = Auth {
+        let auth = Auth {
             providers: vec![],
             augmenters: vec![Box::new(aug)],
             config: AuthConfig { timeout_in_ms: 5 },
@@ -372,13 +383,6 @@ mod tests {
         let user = auth.check_augmenters(user).await.unwrap();
         assert!(user.roles.is_empty());
     }
-    use super::*;
-    use crate::models::user::User;
-    use async_trait::async_trait;
-    use http::header;
-    use std::collections::HashMap;
-    use std::sync::Arc;
-
     /// A dummy Provider implementation for testing.
     struct DummyProvider {
         name: String,
