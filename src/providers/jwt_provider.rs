@@ -90,6 +90,7 @@ impl Provider for JWTProvider {
             .map_err(|e| format!("Failed to parse certificates: {}", e))?;
 
         let kid = header.kid.ok_or("Missing 'kid' in JWT header")?;
+        debug!("Using kid: {}", kid);
         let jwk = jwks.find(&kid).ok_or(format!(
             "Failed to find certificate with matching kid {}",
             kid
@@ -149,6 +150,7 @@ impl Provider for JWTProvider {
 /// Retrieves the certificates (JWKS) from a remote URI. Cached for 600s to avoid repeated fetches.
 #[cfg_attr(not(test), cached(time = 600, sync_writes = true))]
 pub async fn get_certs(cert_uri: String) -> Result<String, String> {
+    debug!("Fetching certificates from {}", cert_uri);
     let res = reqwest::get(&cert_uri)
         .await
         .map_err(|e| format!("Failed to download certificates: {}", e))?;
