@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+#[cfg(not(test))]
 use std::time::Duration;
 use tracing::{debug, info};
 
@@ -27,7 +28,7 @@ pub struct JWTProvider {
 }
 
 /// Helper struct to read claims from the JWT.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct Claims {
     sub: String,
     resource_access: Option<HashMap<String, RolesContainer>>,
@@ -37,7 +38,7 @@ struct Claims {
 }
 
 /// Used to unify roles from different sections of the claim.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct RolesContainer {
     roles: Vec<String>,
 }
