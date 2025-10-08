@@ -205,7 +205,7 @@ async fn main() {
         .route("/authenticate", get(authenticate))
         .route("/token", get(create_token))
         .route("/tokens", get(get_tokens))
-        .route("/token/:token", delete(delete_token))
+        .route("/token/{token}", delete(delete_token))
         .route("/providers", get(providers::list_providers))
         .route("/health", get(health_check))
         .with_state(state);
