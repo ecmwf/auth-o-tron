@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use crate::config::JWTConfig;
 use crate::utils::http_helpers::HTTPError;
 use crate::AppState;
-use axum::async_trait;
 use axum::extract::{ConnectInfo, FromRequestParts};
 use axum::http::StatusCode;
 use chrono::Utc;
@@ -84,12 +83,11 @@ impl User {
 /// Implementation of the request extractor for User.
 /// When authentication fails, we return an HTTPError that includes a
 /// dynamic WWW-Authenticate challenge generated from the available providers.
-#[async_trait]
 impl FromRequestParts<AppState> for User {
     type Rejection = HTTPError;
-    async fn from_request_parts<'a, 'b>(
-        parts: &'a mut Parts,
-        state: &'b AppState,
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
     ) -> Result<User, HTTPError> {
         // Extract the Authorization header.
         let auth_header = parts
