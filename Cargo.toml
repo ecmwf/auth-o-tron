@@ -1,18 +1,17 @@
 [package]
 name = "authotron"
 version = "0.2.8"
-edition = "2021"
+edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-aide = { version = "~0.13.5", features = [
+aide = { version = "~0.15.1", features = [
     "axum",
     "axum-multipart",
-    "axum-headers",
 ] }
 async-trait = "~0.1.88"
-axum = "~0.7.9"
+axum = "~0.8.6"
 cached = { version = "~0.51.4", features = ["async", "tokio"] }
 chrono = "~0.4.40"
 figment = { version = "~0.10.19", features = ["yaml", "env"] }
@@ -29,7 +28,7 @@ schemars = "~0.8.22"
 semver = { version = "~1.0.26", features = ["serde"] }
 serde = { version = "~1.0.219", features = ["derive"] }
 serde_json = "~1.0.140"
-tokio = { version = "~1.36.0", features = ["full"] }
+tokio = { version = "~1.47.1", features = ["full"] }
 tower = "~0.4.13"
 uuid = { version = "~1.8.0", features = ["v4"] }
 # Core tracing
