@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::augmenters::{create_auth_augmenter, Augmenter, AugmenterConfig};
+use crate::augmenters::{Augmenter, AugmenterConfig, create_auth_augmenter};
 use crate::config::AuthConfig;
 use crate::models::user::User;
-use crate::providers::{create_auth_provider, Provider, ProviderConfig};
+use crate::providers::{Provider, ProviderConfig, create_auth_provider};
 use crate::store::Store;
-use futures::future::{join_all, select_ok, FutureExt};
+use futures::future::{FutureExt, join_all, select_ok};
 use futures::lock::Mutex;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};

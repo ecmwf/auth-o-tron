@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::Duration;
 use tracing::{debug, info};
 
 use crate::{models::user::User, providers::Provider};
@@ -60,7 +61,7 @@ impl Provider for EcmwfApiProvider {
 }
 
 /// Queries the ECMWF who-am-i endpoint with the provided token, returning a User on success.
-#[cfg_attr(not(test), cached(time = 60, sync_writes = true))]
+#[cfg_attr(not(test), cached(time = 60, sync_writes = "default"))]
 async fn query(uri: String, token: String, realm: String) -> Result<User, String> {
     let client = reqwest::Client::new();
     let url = format!("{}/who-am-i?token={}", uri, token);

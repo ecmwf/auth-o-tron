@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::time::Duration;
 use tracing::{debug, info};
 
 use crate::models::user::User;
@@ -148,7 +149,7 @@ impl Provider for JWTProvider {
 }
 
 /// Retrieves the certificates (JWKS) from a remote URI. Cached for 600s to avoid repeated fetches.
-#[cfg_attr(not(test), cached(time = 600, sync_writes = true))]
+#[cfg_attr(not(test), cached(time = 600, sync_writes = "default"))]
 pub async fn get_certs(cert_uri: String) -> Result<String, String> {
     debug!("Fetching certificates from {}", cert_uri);
     let res = reqwest::get(&cert_uri)
