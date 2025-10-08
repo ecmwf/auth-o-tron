@@ -42,10 +42,8 @@ impl Auth {
     ) -> Self {
         info!("Creating auth providers...");
         // Convert configs into providers
-        let mut providers: Vec<Box<dyn Provider>> = provider_config
-            .iter()
-            .map(create_auth_provider)
-            .collect();
+        let mut providers: Vec<Box<dyn Provider>> =
+            provider_config.iter().map(create_auth_provider).collect();
 
         // Only add token store as provider if it's enabled
         if token_store.is_enabled() {
