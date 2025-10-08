@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::augmenters::{Augmenter, AugmenterConfig, create_auth_augmenter};
+use crate::augmenters::{create_auth_augmenter, Augmenter, AugmenterConfig};
 use crate::config::AuthConfig;
 use crate::models::user::User;
-use crate::providers::{Provider, ProviderConfig, create_auth_provider};
+use crate::providers::{create_auth_provider, Provider, ProviderConfig};
 use crate::store::Store;
-use futures::future::{FutureExt, join_all, select_ok};
+use futures::future::{join_all, select_ok, FutureExt};
 use futures::lock::Mutex;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
@@ -189,7 +189,7 @@ impl Auth {
         // Try each provided credential until one provider successfully authenticates.
         for (scheme, credential) in creds_map.into_iter() {
             // Set the timeout duration based on the configuration.
-            let timeout_duration = std::time::Duration::from_secs(self.config.timeout_in_ms);
+            let timeout_duration = std::time::Duration::from_millis(self.config.timeout_in_ms);
             // Filter providers by matching type and (if provided) realm.
             let futures = self
                 .providers
