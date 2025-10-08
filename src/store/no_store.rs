@@ -29,6 +29,10 @@ impl Store for NoStore {
     async fn delete_token(&self, _token: &str) -> Result<(), String> {
         Err("Token store is disabled".into())
     }
+
+    fn is_enabled(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

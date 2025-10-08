@@ -41,14 +41,19 @@ impl Auth {
         config: AuthConfig,
     ) -> Self {
         info!("Creating auth providers...");
-        // Convert configs into providers, plus add a provider that uses the token_store directly.
-        let providers = provider_config
+        // Convert configs into providers
+        let mut providers: Vec<Box<dyn Provider>> = provider_config
             .iter()
             .map(create_auth_provider)
-            .chain(std::iter::once(
-                Box::new(token_store.clone()) as Box<dyn Provider>
-            ))
             .collect();
+
+        // Only add token store as provider if it's enabled
+        if token_store.is_enabled() {
+            info!("Token store is enabled, adding as Bearer provider");
+            providers.push(Box::new(token_store.clone()) as Box<dyn Provider>);
+        } else {
+            info!("Token store is disabled, skipping as provider");
+        }
 
         info!("Creating auth augmenters...");
         let augmenters = augmenter_config.iter().map(create_auth_augmenter).collect();
