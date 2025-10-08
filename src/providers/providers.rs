@@ -4,14 +4,14 @@ use super::{
     openid_offline_provider::{OpenIDOfflineProvider, OpenIDOfflineProviderConfig},
     plain_provider::{PlainAuthConfig, PlainAuthProvider},
 };
-use crate::{models::user::User, AppState};
+use crate::{AppState, models::user::User};
 use axum::{
-    extract::{ConnectInfo, State},
     Json,
+    extract::{ConnectInfo, State},
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::net::SocketAddr;
 use tracing::{debug, info};
 

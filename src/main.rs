@@ -25,7 +25,7 @@ use uuid::Uuid;
 use crate::auth::Auth;
 use crate::config::ConfigV1;
 use crate::models::{token::Token, user::User};
-use crate::store::{create_store, Store};
+use crate::store::{Store, create_store};
 use crate::utils::http_helpers::HTTPError;
 use crate::utils::logger::init_logging;
 

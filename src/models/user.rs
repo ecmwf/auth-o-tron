@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
+use crate::AppState;
 use crate::config::JWTConfig;
 use crate::utils::http_helpers::HTTPError;
-use crate::AppState;
 use axum::extract::{ConnectInfo, FromRequestParts};
 use axum::http::StatusCode;
 use chrono::Utc;
 use http::request::Parts;
-use jsonwebtoken::{encode, EncodingKey, Header};
+use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tracing::warn;
@@ -85,10 +85,7 @@ impl User {
 /// dynamic WWW-Authenticate challenge generated from the available providers.
 impl FromRequestParts<AppState> for User {
     type Rejection = HTTPError;
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<User, HTTPError> {
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<User, HTTPError> {
         // Extract the Authorization header.
         let auth_header = parts
             .headers
@@ -137,7 +134,7 @@ impl FromRequestParts<AppState> for User {
 mod tests {
     use super::*;
     use crate::config::JWTConfig;
-    use jsonwebtoken::{decode, DecodingKey, Validation};
+    use jsonwebtoken::{DecodingKey, Validation, decode};
 
     /// Test that converting a User to a JWT and then decoding it yields the expected claims.
     ///

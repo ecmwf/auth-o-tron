@@ -1,7 +1,7 @@
 #[allow(unused_imports)]
 use cached::proc_macro::cached;
 use jsonwebtoken::jwk::JwkSet;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -90,8 +90,8 @@ impl Augmenter for PlainAugmenter {
 #[cfg(test)]
 mod tests {
     use figment::{
-        providers::{Format, Yaml},
         Figment,
+        providers::{Format, Yaml},
     };
 
     use super::*;
