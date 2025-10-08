@@ -3,6 +3,7 @@ use cached::proc_macro::cached;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(not(test))]
 use std::time::Duration;
 use tracing::{debug, info};
 
