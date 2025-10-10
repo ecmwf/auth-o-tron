@@ -20,16 +20,13 @@ use tracing::{debug, info};
 #[serde(tag = "type")]
 pub enum ProviderConfig {
     #[serde(rename = "ecmwf-api")]
-    EcmwfApiAuthConfig(EcmwfApiProviderConfig),
-
+    EcmwfApi(EcmwfApiProviderConfig),
     #[serde(rename = "jwt")]
-    JWTAuthConfig(JWTAuthConfig),
-
+    JWT(JWTAuthConfig),
     #[serde(rename = "openid-offline")]
-    OpenIDOfflineAuthConfig(OpenIDOfflineProviderConfig),
-
+    OpenIDOffline(OpenIDOfflineProviderConfig),
     #[serde(rename = "plain")]
-    PlainAuthConfig(PlainAuthConfig),
+    Plain(PlainAuthConfig),
 }
 
 /// An authentication provider must be able to return a User or an error.
@@ -47,10 +44,10 @@ pub trait Provider: Send + Sync {
 /// Create an authentication provider from a given config.
 pub fn create_auth_provider(config: &ProviderConfig) -> Box<dyn Provider> {
     match config {
-        ProviderConfig::EcmwfApiAuthConfig(cfg) => Box::new(EcmwfApiProvider::new(cfg)),
-        ProviderConfig::JWTAuthConfig(cfg) => Box::new(JWTProvider::new(cfg)),
-        ProviderConfig::OpenIDOfflineAuthConfig(cfg) => Box::new(OpenIDOfflineProvider::new(cfg)),
-        ProviderConfig::PlainAuthConfig(cfg) => Box::new(PlainAuthProvider::new(cfg)),
+        ProviderConfig::EcmwfApi(cfg) => Box::new(EcmwfApiProvider::new(cfg)),
+        ProviderConfig::JWT(cfg) => Box::new(JWTProvider::new(cfg)),
+        ProviderConfig::OpenIDOffline(cfg) => Box::new(OpenIDOfflineProvider::new(cfg)),
+        ProviderConfig::Plain(cfg) => Box::new(PlainAuthProvider::new(cfg)),
     }
 }
 
