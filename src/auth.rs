@@ -118,7 +118,6 @@ impl Auth {
     ///    - If a provider successfully authenticates the credential, the function logs the successful authentication (including the client IP)
     ///      and returns the authenticated `User`.
     ///    - If no provider can authenticate any of the provided credentials, the function returns `None`.
-
     /// Authenticates a user using the first provider that succeeds.
     /// Each provider call is wrapped in a timeout so that a slow or non-responsive provider
     /// won't block the others. If all providers fail or time out, returns None.
