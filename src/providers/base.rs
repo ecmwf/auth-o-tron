@@ -4,7 +4,7 @@ use super::{
     openid_offline_provider::{OpenIDOfflineProvider, OpenIDOfflineProviderConfig},
     plain_provider::{PlainAuthConfig, PlainAuthProvider},
 };
-use crate::{AppState, models::user::User};
+use crate::{models::user::User, state::AppState};
 use axum::{
     Json,
     extract::{ConnectInfo, State},
