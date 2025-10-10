@@ -98,7 +98,7 @@ impl Provider for JWTProvider {
             kid
         ))?;
 
-        let decoding_key = DecodingKey::from_jwk(&jwk)
+        let decoding_key = DecodingKey::from_jwk(jwk)
             .map_err(|_| "Failed to create decoding key from JWK".to_string())?;
 
         let mut validation = Validation::new(alg.parse::<Algorithm>().unwrap());
