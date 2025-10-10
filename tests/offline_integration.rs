@@ -7,7 +7,7 @@ use tokio::{io::AsyncReadExt, process::Command};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct Claims {
     sub: Option<String>,
     username: Option<String>,

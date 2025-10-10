@@ -1,6 +1,6 @@
-use figment::providers::{Env, Format, Yaml};
 use figment::Figment;
-use schemars::{schema_for, JsonSchema};
+use figment::providers::{Env, Format, Yaml};
+use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 use std::env;
 
@@ -270,7 +270,9 @@ services: []
         let original_jwt_iss = env::var("APP_JWT__ISS").ok();
 
         // Set the environment variable to override jwt.iss.
-        env::set_var("APP_JWT__ISS", "overridden-issuer");
+        unsafe {
+            env::set_var("APP_JWT__ISS", "overridden-issuer");
+        }
 
         // Use a YAML string that has a default "issuer" value for jwt.iss.
         let yaml = r#"
@@ -311,9 +313,13 @@ auth:
 
         // Clean up by restoring the original env variable (if any).
         if let Some(val) = original_jwt_iss {
-            env::set_var("APP_JWT__ISS", val);
+            unsafe {
+                env::set_var("APP_JWT__ISS", val);
+            }
         } else {
-            env::remove_var("APP_JWT__ISS");
+            unsafe {
+                env::remove_var("APP_JWT__ISS");
+            }
         }
     }
 }

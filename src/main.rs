@@ -25,7 +25,7 @@ use uuid::Uuid;
 use crate::auth::Auth;
 use crate::config::ConfigV1;
 use crate::models::{token::Token, user::User};
-use crate::store::{create_store, Store};
+use crate::store::{Store, create_store};
 use crate::utils::http_helpers::HTTPError;
 use crate::utils::logger::init_logging;
 
@@ -205,7 +205,7 @@ async fn main() {
         .route("/authenticate", get(authenticate))
         .route("/token", get(create_token))
         .route("/tokens", get(get_tokens))
-        .route("/token/:token", delete(delete_token))
+        .route("/token/{token}", delete(delete_token))
         .route("/providers", get(providers::list_providers))
         .route("/health", get(health_check))
         .with_state(state);

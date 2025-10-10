@@ -6,6 +6,7 @@ use futures::lock::Mutex;
 use ldap3::{LdapConnAsync, Scope, SearchEntry};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::augmenters::Augmenter;
@@ -54,7 +55,7 @@ fn parse_cn(role: &str) -> Option<String> {
 
 /// This function looks up user roles in LDAP, caching results for 120 seconds.
 /// We bind with a service account, search for the user by `uid`, and parse "memberOf" attributes.
-#[cached(time = 120, sync_writes = true)]
+#[cached(time = 120, sync_writes = "default")]
 async fn retrieve_ldap_user_roles(
     config: LDAPAugmenterConfig,
     uid: String,

@@ -4,4 +4,4 @@ pub mod store;
 
 // Re-export the primary Store items so code outside can do
 // "use crate::store::{Store, create_store};"
-pub use store::{create_store, Store};
+pub use store::{Store, create_store};

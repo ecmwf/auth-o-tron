@@ -3,6 +3,8 @@ use cached::proc_macro::cached;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(not(test))]
+use std::time::Duration;
 use tracing::{debug, info};
 
 use super::jwt_provider::{JWTAuthConfig, JWTProvider};
@@ -52,7 +54,7 @@ impl OpenIDOfflineProvider {
 }
 
 /// Checks if the given token has "offline_access" scope. If valid, returns true.
-#[cfg_attr(not(test), cached(time = 120, sync_writes = true))]
+#[cfg_attr(not(test), cached(time = 120, sync_writes = "default"))]
 async fn check_offline_access_token(
     config: OpenIDOfflineProviderConfig,
     token: String,
@@ -84,7 +86,7 @@ async fn check_offline_access_token(
 }
 
 /// Exchanges the offline token for a regular access token using a refresh call.
-#[cfg_attr(not(test), cached(time = 10, sync_writes = true))]
+#[cfg_attr(not(test), cached(time = 10, sync_writes = "default"))]
 async fn get_access_token(
     config: OpenIDOfflineProviderConfig,
     refresh_token: String,

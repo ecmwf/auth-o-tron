@@ -15,6 +15,11 @@ pub trait Store: Send + Sync {
     async fn get_tokens(&self, user: &User) -> Result<Vec<Token>, String>;
     async fn get_user(&self, token: &str) -> Result<Option<User>, String>;
     async fn delete_token(&self, token: &str) -> Result<(), String>;
+    fn is_enabled(&self) -> bool {
+        // Default implementation should return always True for real stores
+        // No store will return false so we can write better debug messages
+        true
+    }
 }
 
 /// Creates a concrete store implementation based on the StoreConfig.

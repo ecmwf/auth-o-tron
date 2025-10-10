@@ -79,7 +79,7 @@ impl MongoDBStore {
         unique_on_token.options = Some(IndexOptions::builder().unique(true).build());
 
         token_collection
-            .create_index(unique_on_token, None)
+            .create_index(unique_on_token)
             .await
             .map_err(|e| format!("Failed to create unique index on token_string: {}", e))?;
 
@@ -89,7 +89,7 @@ impl MongoDBStore {
         unique_on_user_realm.options = Some(IndexOptions::builder().unique(true).build());
 
         user_collection
-            .create_index(unique_on_user_realm, None)
+            .create_index(unique_on_user_realm)
             .await
             .map_err(|e| format!("Failed to create unique index on (username, realm): {}", e))?;
 
@@ -99,7 +99,7 @@ impl MongoDBStore {
         unique_on_user_id.options = Some(IndexOptions::builder().unique(true).build());
 
         user_collection
-            .create_index(unique_on_user_id, None)
+            .create_index(unique_on_user_id)
             .await
             .map_err(|e| format!("Failed to create unique index on user_id: {}", e))?;
 
@@ -147,10 +147,7 @@ impl Store for MongoDBStore {
         // 1) Attempt to find existing user in the DB
         let user_doc = self
             .user_collection
-            .find_one(
-                doc! { "user.username": &user.username, "user.realm": &user.realm },
-                None,
-            )
+            .find_one(doc! { "user.username": &user.username, "user.realm": &user.realm })
             .await
             .map_err(|e| format!("Failed to query user: {}", e))?;
 
@@ -161,7 +158,7 @@ impl Store for MongoDBStore {
                 debug!("User not found in DB, inserting new user document.");
                 let new_user_doc = Self::user_to_doc(user);
                 self.user_collection
-                    .insert_one(new_user_doc.clone(), None)
+                    .insert_one(new_user_doc.clone())
                     .await
                     .map_err(|e| format!("Failed to insert new user document: {}", e))?;
                 new_user_doc
@@ -171,7 +168,7 @@ impl Store for MongoDBStore {
         // 3) Insert the new token referencing this user
         let token_doc = Self::token_to_doc(token, user_doc.user_id.clone());
         self.token_collection
-            .insert_one(token_doc, None)
+            .insert_one(token_doc)
             .await
             .map_err(|e| format!("Failed to insert token: {}", e))?;
 
@@ -183,10 +180,7 @@ impl Store for MongoDBStore {
         // 1) Look up the corresponding user document
         let user_doc = self
             .user_collection
-            .find_one(
-                doc! { "user.username": &user.username, "user.realm": &user.realm },
-                None,
-            )
+            .find_one(doc! { "user.username": &user.username, "user.realm": &user.realm })
             .await
             .map_err(|e| format!("Failed to query user document: {}", e))?
             .ok_or_else(|| "User not found".to_string())?;
@@ -194,7 +188,7 @@ impl Store for MongoDBStore {
         // 2) Find all token documents that reference this user by user_id
         let mut cursor = self
             .token_collection
-            .find(doc! { "user_id": user_doc.user_id }, None)
+            .find(doc! { "user_id": user_doc.user_id })
             .await
             .map_err(|e| format!("Failed to list tokens for user: {}", e))?;
 
@@ -215,7 +209,7 @@ impl Store for MongoDBStore {
         // 1) Look up the token document by token string
         let token_doc = self
             .token_collection
-            .find_one(doc! { "token.token_string": token }, None)
+            .find_one(doc! { "token.token_string": token })
             .await
             .map_err(|e| format!("Failed to query token document: {}", e))?;
 
@@ -224,7 +218,7 @@ impl Store for MongoDBStore {
             // 3) Look up the user doc that corresponds to this token’s user_id
             let user_doc = self
                 .user_collection
-                .find_one(doc! { "user_id": &td.user_id }, None)
+                .find_one(doc! { "user_id": &td.user_id })
                 .await
                 .map_err(|e| format!("Failed to fetch user by user_id: {}", e))?;
 
@@ -241,7 +235,7 @@ impl Store for MongoDBStore {
     /// Deletes a token document matching the provided token string.
     async fn delete_token(&self, token: &str) -> Result<(), String> {
         self.token_collection
-            .delete_one(doc! { "token.token_string": token }, None)
+            .delete_one(doc! { "token.token_string": token })
             .await
             .map_err(|e| format!("Failed to delete token: {}", e))?;
 

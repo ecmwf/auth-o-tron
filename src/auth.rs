@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::augmenters::{create_auth_augmenter, Augmenter, AugmenterConfig};
+use crate::augmenters::{Augmenter, AugmenterConfig, create_auth_augmenter};
 use crate::config::AuthConfig;
 use crate::models::user::User;
-use crate::providers::{create_auth_provider, Provider, ProviderConfig};
+use crate::providers::{Provider, ProviderConfig, create_auth_provider};
 use crate::store::Store;
-use futures::future::{join_all, select_ok, FutureExt};
+use futures::future::{FutureExt, join_all, select_ok};
 use futures::lock::Mutex;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
@@ -41,14 +41,17 @@ impl Auth {
         config: AuthConfig,
     ) -> Self {
         info!("Creating auth providers...");
-        // Convert configs into providers, plus add a provider that uses the token_store directly.
-        let providers = provider_config
-            .iter()
-            .map(create_auth_provider)
-            .chain(std::iter::once(
-                Box::new(token_store.clone()) as Box<dyn Provider>
-            ))
-            .collect();
+        // Convert configs into providers
+        let mut providers: Vec<Box<dyn Provider>> =
+            provider_config.iter().map(create_auth_provider).collect();
+
+        // Only add token store as provider if it's enabled
+        if token_store.is_enabled() {
+            info!("Token store is enabled, adding as Bearer provider");
+            providers.push(Box::new(token_store.clone()) as Box<dyn Provider>);
+        } else {
+            info!("Token store is disabled, skipping as provider");
+        }
 
         info!("Creating auth augmenters...");
         let augmenters = augmenter_config.iter().map(create_auth_augmenter).collect();
@@ -189,7 +192,7 @@ impl Auth {
         // Try each provided credential until one provider successfully authenticates.
         for (scheme, credential) in creds_map.into_iter() {
             // Set the timeout duration based on the configuration.
-            let timeout_duration = std::time::Duration::from_secs(self.config.timeout_in_ms);
+            let timeout_duration = std::time::Duration::from_millis(self.config.timeout_in_ms);
             // Filter providers by matching type and (if provided) realm.
             let futures = self
                 .providers

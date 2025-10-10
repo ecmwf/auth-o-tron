@@ -1,11 +1,13 @@
 #[allow(unused_imports)]
 use cached::proc_macro::cached;
 use jsonwebtoken::jwk::JwkSet;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+#[cfg(not(test))]
+use std::time::Duration;
 use tracing::{debug, info};
 
 use crate::models::user::User;
@@ -26,7 +28,7 @@ pub struct JWTProvider {
 }
 
 /// Helper struct to read claims from the JWT.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct Claims {
     sub: String,
     resource_access: Option<HashMap<String, RolesContainer>>,
@@ -36,7 +38,7 @@ struct Claims {
 }
 
 /// Used to unify roles from different sections of the claim.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct RolesContainer {
     roles: Vec<String>,
 }
@@ -148,7 +150,7 @@ impl Provider for JWTProvider {
 }
 
 /// Retrieves the certificates (JWKS) from a remote URI. Cached for 600s to avoid repeated fetches.
-#[cfg_attr(not(test), cached(time = 600, sync_writes = true))]
+#[cfg_attr(not(test), cached(time = 600, sync_writes = "default"))]
 pub async fn get_certs(cert_uri: String) -> Result<String, String> {
     debug!("Fetching certificates from {}", cert_uri);
     let res = reqwest::get(&cert_uri)
