@@ -1,5 +1,5 @@
-pub mod augmenters;
+pub mod base;
 pub mod ldap_augmenter;
 pub mod plain_augmenter;
 
-pub use augmenters::*;
+pub use base::*;

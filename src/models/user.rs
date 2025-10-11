@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use crate::AppState;
 use crate::config::JWTConfig;
+use crate::state::AppState;
 use crate::utils::http_helpers::HTTPError;
 use axum::extract::{ConnectInfo, FromRequestParts};
 use axum::http::StatusCode;

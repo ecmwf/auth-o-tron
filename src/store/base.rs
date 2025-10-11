@@ -48,8 +48,7 @@ pub async fn create_store(config: &StoreConfig) -> Arc<dyn Store> {
     }
 }
 
-/// We also implement the auth::Provider trait for Arc<dyn Store>, so token-based auth is possible.
-/// That way, the store can be one of your Auth providers.
+/// We also implement the auth::Provider trait for `Arc<dyn Store>`, so token-based auth is possible.
 #[async_trait]
 impl Provider for Arc<dyn Store> {
     async fn authenticate(&self, token: &str) -> Result<User, String> {

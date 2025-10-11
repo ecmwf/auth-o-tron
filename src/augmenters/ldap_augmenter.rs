@@ -100,14 +100,9 @@ async fn retrieve_ldap_user_roles(
         if let Some(member_of) = search_entry.attrs.get("memberOf") {
             for role_dn in member_of {
                 // If a filter is provided, only capture roles containing that string
-                let passes_filter = config
-                    .filter
-                    .as_deref()
-                    .map_or(true, |f| role_dn.contains(f));
-                if passes_filter {
-                    if let Some(cn) = parse_cn(role_dn) {
-                        roles.push(cn);
-                    }
+                let passes_filter = config.filter.as_deref().is_none_or(|f| role_dn.contains(f));
+                if passes_filter && let Some(cn) = parse_cn(role_dn) {
+                    roles.push(cn);
                 }
             }
         }
