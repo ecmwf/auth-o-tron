@@ -9,6 +9,7 @@ use tracing::info;
 
 use crate::auth::Auth;
 use crate::config::ConfigV1;
+use crate::metrics::Metrics;
 use crate::routes;
 use crate::state::AppState;
 use crate::store::create_store;
@@ -35,10 +36,14 @@ pub async fn run(config: Arc<ConfigV1>) -> Result<(), Box<dyn std::error::Error>
 
     info!("Starting server on {}", config.bind_address);
 
+    let metrics = Metrics::new();
+    info!("Metrics initialized");
+
     let state = AppState {
         config: config.clone(),
         auth,
         store,
+        metrics,
     };
 
     let app = routes::create_router(state);
