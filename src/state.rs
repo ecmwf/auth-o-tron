@@ -5,6 +5,7 @@
 
 use crate::auth::Auth;
 use crate::config::ConfigV1;
+use crate::metrics::Metrics;
 use crate::store::Store;
 use std::sync::Arc;
 
@@ -20,4 +21,6 @@ pub struct AppState {
     pub auth: Arc<Auth>,
     /// Token store for managing persistent authentication tokens.
     pub store: Arc<dyn Store>,
+    /// Prometheus style metrics
+    pub metrics: Metrics,
 }
