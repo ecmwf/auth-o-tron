@@ -113,7 +113,12 @@ impl FromRequestParts<AppState> for User {
         // Attempt to authenticate using our Auth implementation.
         match state
             .auth
-            .authenticate(&auth_header, &client_ip.to_string(), realm_filter)
+            .authenticate(
+                &auth_header,
+                &client_ip.to_string(),
+                realm_filter,
+                &state.metrics,
+            )
             .await
         {
             Some(user) => Ok(user),

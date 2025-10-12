@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::augmenters::{Augmenter, AugmenterConfig, create_auth_augmenter};
 use crate::config::AuthConfig;
+use crate::metrics::{Metrics, MetricsRecorder};
 use crate::models::user::User;
 use crate::providers::{Provider, ProviderConfig, create_auth_provider};
 use crate::store::Store;
@@ -92,21 +94,21 @@ impl Auth {
 
     /// Function below is a bit long, so here's a summary of its steps:
     ///
-    /// 1. **Header Validation:**  
+    /// 1. **Header Validation:**
     ///    - Checks if the provided Authorization header is empty and returns `None` if so.
     ///    - Logs a warning if the header is missing or improperly formatted.
     ///
-    /// 2. **Credential Parsing:**  
+    /// 2. **Credential Parsing:**
     ///    - Splits the header on commas to allow multiple credentials.
     ///    - For each segment, splits the segment on whitespace into a scheme (e.g. "Bearer", "Plain", "Basic")
     ///      and a credential.
     ///    - Normalizes the scheme using the helper `header_to_provider_type` (which converts "plain" to "Basic").
     ///    - This normalization ensures that if you supply "Basic" or "plain", both are treated as "Basic", while "Bearer"
-    ///      remains "Bearer".  
+    ///      remains "Bearer".
     ///    - Uses a `HashMap` to ensure only one credential per scheme is provided; if multiple credentials for the same
     ///      scheme are detected, it returns `None`.
     ///
-    /// 3. **Provider Filtering & Authentication:**  
+    /// 3. **Provider Filtering & Authentication:**
     ///    - For each (scheme, credential) pair, the function filters the available providers by comparing the provider's
     ///      `get_type()` (which returns the expected scheme, such as "Basic" or "Bearer") to the normalized scheme.
     ///      This ensures that if you supply a "Basic" credential, only providers that return "Basic" are tried, and likewise for "Bearer".
@@ -114,7 +116,7 @@ impl Auth {
     ///    - For each matching provider, the function initiates an asynchronous authentication call wrapped in a timeout (configured by `timeout_in_ms`).
     ///    - It then uses `select_ok` to await the first provider that successfully authenticates the user.
     ///
-    /// 4. **Outcome:**  
+    /// 4. **Outcome:**
     ///    - If a provider successfully authenticates the credential, the function logs the successful authentication (including the client IP)
     ///      and returns the authenticated `User`.
     ///    - If no provider can authenticate any of the provided credentials, the function returns `None`.
@@ -126,14 +128,25 @@ impl Auth {
     /// - `auth_header`: The value from the Authorization header (may contain comma-separated credentials).
     /// - `ip`: The client IP address (logged for debugging purposes).
     /// - `realm_filter`: An optional realm string taken from the X-Auth-Realm header.
+    /// - `metrics`: Metrics recorder for tracking authentication attempts and outcomes.
     pub async fn authenticate(
         &self,
         auth_header: &str,
         ip: &str,
         realm_filter: Option<&str>,
+        metrics: &Metrics,
     ) -> Option<User> {
+        let start = Instant::now();
+
         if auth_header.trim().is_empty() {
             warn!("No Authorization header provided.");
+            // For metrics, use "unknown" since we don't know the realm yet
+            metrics.record_auth_attempt("no_auth_header", "unknown");
+            metrics.record_auth_duration(
+                start.elapsed().as_secs_f64(),
+                "no_auth_header",
+                "unknown",
+            );
             return None;
         }
 
@@ -164,12 +177,24 @@ impl Auth {
             unique_count += 1;
             if unique_count > 3 {
                 warn!("Too many unique Authorization header credentials (>{})", 3);
+                metrics.record_auth_attempt("invalid_header", "unknown");
+                metrics.record_auth_duration(
+                    start.elapsed().as_secs_f64(),
+                    "invalid_header",
+                    "unknown",
+                );
                 return None;
             }
             // Each part should be in the format: <scheme> <credentials>
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
             if parts.len() != 2 {
                 warn!("Invalid auth part format: '{}'", trimmed);
+                metrics.record_auth_attempt("invalid_header", "unknown");
+                metrics.record_auth_duration(
+                    start.elapsed().as_secs_f64(),
+                    "invalid_header",
+                    "unknown",
+                );
                 return None;
             }
             let raw_scheme = parts[0];
@@ -178,16 +203,38 @@ impl Auth {
             creds_map.insert(normalized_scheme, credential.to_string());
         }
 
-        let user = self.check_providers(creds_map, realm_filter).await?;
-        let user = self.check_augmenters(user).await?;
+        let result = self.check_providers(creds_map, realm_filter, metrics).await;
+
+        let user = match result {
+            Some(u) => u,
+            None => {
+                // Use "unknown" for failed auth where we don't have a realm
+                metrics.record_auth_attempt("all_failed", "unknown");
+                metrics.record_auth_duration(
+                    start.elapsed().as_secs_f64(),
+                    "all_failed",
+                    "unknown",
+                );
+                return None;
+            }
+        };
+
+        let user = self.check_augmenters(user, metrics).await?;
+
+        // Record successful authentication with the actual realm from the user
+        let user_realm = &user.realm;
+        metrics.record_auth_attempt("success", user_realm);
+        metrics.record_auth_duration(start.elapsed().as_secs_f64(), "success", user_realm);
 
         Some(user)
     }
 
+    /// Returns (User, provider_realm) on success
     async fn check_providers(
         &self,
         creds_map: HashMap<String, String>,
         realm_filter: Option<&str>,
+        metrics: &Metrics,
     ) -> Option<User> {
         // Try each provided credential until one provider successfully authenticates.
         for (scheme, credential) in creds_map.into_iter() {
@@ -211,15 +258,55 @@ impl Auth {
                 })
                 .map(|provider| {
                     let name = provider.get_name().to_owned();
+                    let provider_type = provider.get_type().to_owned();
+                    let provider_realm = provider.get_realm().unwrap_or("unknown").to_owned();
                     let cred = credential.clone();
+                    let metrics = metrics.clone();
+
                     async move {
+                        let start = Instant::now();
+
                         match timeout(timeout_duration, provider.authenticate(&cred)).await {
-                            Ok(Ok(user)) => Ok((name, user)),
+                            Ok(Ok(user)) => {
+                                let duration = start.elapsed().as_secs_f64();
+                                metrics.record_provider_attempt(
+                                    &name,
+                                    &provider_type,
+                                    &provider_realm,
+                                    "success",
+                                );
+                                metrics.record_provider_duration(
+                                    &name,
+                                    &provider_type,
+                                    &provider_realm,
+                                    duration,
+                                );
+                                Ok((name, user, provider_realm))
+                            }
                             Ok(Err(e)) => {
+                                let duration = start.elapsed().as_secs_f64();
+                                metrics.record_provider_attempt(
+                                    &name,
+                                    &provider_type,
+                                    &provider_realm,
+                                    "error",
+                                );
+                                metrics.record_provider_duration(
+                                    &name,
+                                    &provider_type,
+                                    &provider_realm,
+                                    duration,
+                                );
                                 debug!("Provider '{}' failed to authenticate: {}", name, e);
                                 Err(format!("Provider '{}' failed: {}", name, e))
                             }
                             Err(_) => {
+                                metrics.record_provider_attempt(
+                                    &name,
+                                    &provider_type,
+                                    &provider_realm,
+                                    "timeout",
+                                );
                                 debug!("Provider '{}' timed out during authentication", name);
                                 Err(format!("Provider '{}' timed out", name))
                             }
@@ -240,7 +327,7 @@ impl Auth {
 
             // Use select_ok to await the first future that completes successfully.
             match select_ok(futures).await {
-                Ok(((provider_name, user), _)) => {
+                Ok(((provider_name, user, _), _)) => {
                     info!(
                         "Provider '{}' successfully authenticated user '{}'",
                         provider_name, user.username
@@ -259,19 +346,45 @@ impl Auth {
         None
     }
 
-    async fn check_augmenters(&self, user: User) -> Option<User> {
+    async fn check_augmenters(&self, user: User, metrics: &Metrics) -> Option<User> {
         info!("Applying augmentations for user '{}'", user.username);
         let realm = user.realm.clone();
         let user = Arc::new(Mutex::new(user));
+
         let futures = self
             .augmenters
             .iter()
             .filter(|a| a.get_realm() == realm)
-            .map(|augmenter| augmenter.augment(user.clone()));
+            .map(|augmenter| {
+                let metrics = metrics.clone();
+                let realm = realm.clone();
+                let name = augmenter.get_name().to_string();
+                let aug_type = augmenter.get_type().to_string();
+                let user_ref = user.clone();
+
+                async move {
+                    let start = Instant::now();
+                    let result = augmenter.augment(user_ref).await;
+                    let duration = start.elapsed().as_secs_f64();
+
+                    match result {
+                        Ok(_) => {
+                            metrics.record_augmenter_attempt(&name, &aug_type, &realm, "success");
+                            metrics.record_augmenter_duration(&aug_type, &realm, duration);
+                        }
+                        Err(e) => {
+                            warn!("Augmenter '{}' failed: {}", name, e);
+                            metrics.record_augmenter_attempt(&name, &aug_type, &realm, "error");
+                            metrics.record_augmenter_duration(&aug_type, &realm, duration);
+                        }
+                    }
+                }
+            });
+
         let _ = join_all(futures).await;
 
         // Return the authenticated user.
-        return Some(user.lock().await.clone());
+        Some(user.lock().await.clone())
     }
 }
 
@@ -329,13 +442,14 @@ mod tests {
             token_store: Arc::new(DummyStore),
         };
 
+        let metrics = crate::metrics::Metrics::new();
         let user = User {
             username: "bob".to_string(),
             roles: vec![],
             realm: "r1".to_string(),
             ..Default::default()
         };
-        let user = auth.check_augmenters(user).await.unwrap();
+        let user = auth.check_augmenters(user, &metrics).await.unwrap();
         assert!(user.roles.contains(&"admin".to_string()));
         assert!(user.roles.contains(&"user".to_string()));
         assert!(!user.roles.contains(&"other".to_string()));
@@ -354,13 +468,14 @@ mod tests {
             config: AuthConfig { timeout_in_ms: 5 },
             token_store: Arc::new(DummyStore),
         };
+        let metrics = crate::metrics::Metrics::new();
         let user = User {
             username: "bob".to_string(),
             roles: vec![],
             realm: "r2".to_string(),
             ..Default::default()
         };
-        let user = auth.check_augmenters(user).await.unwrap();
+        let user = auth.check_augmenters(user, &metrics).await.unwrap();
         assert!(user.roles.is_empty());
     }
 
@@ -377,13 +492,14 @@ mod tests {
             config: AuthConfig { timeout_in_ms: 5 },
             token_store: Arc::new(DummyStore),
         };
+        let metrics = crate::metrics::Metrics::new();
         let user = User {
             username: "bob".to_string(),
             roles: vec![],
             realm: "r1".to_string(),
             ..Default::default()
         };
-        let user = auth.check_augmenters(user).await.unwrap();
+        let user = auth.check_augmenters(user, &metrics).await.unwrap();
         assert!(user.roles.is_empty());
     }
     /// A dummy Provider implementation for testing.
@@ -502,9 +618,15 @@ mod tests {
             token_store: Arc::new(DummyStore),
         };
 
+        let metrics = crate::metrics::Metrics::new();
         // Test authentication with a valid Basic credential.
         let user = auth
-            .authenticate("Basic ZHVtbXk6ZHVtbXk=", "127.0.0.1", Some("localrealm"))
+            .authenticate(
+                "Basic ZHVtbXk6ZHVtbXk=",
+                "127.0.0.1",
+                Some("localrealm"),
+                &metrics,
+            )
             .await;
         assert!(user.is_some());
         assert_eq!(user.unwrap().username, "dummy");
@@ -535,13 +657,14 @@ mod tests {
             token_store: Arc::new(DummyStore),
         };
 
+        let metrics = crate::metrics::Metrics::new();
         // Test with a comma-separated header that contains both credentials.
         // The dummy bearer provider is expected to succeed with "someBearerToken".
         // The dummy basic provider is expected to succeed with "ZHVtbXk6ZHVtbXk=".
         // We use select_ok select_ok, which returns the first successful future it finds
         let header = "Bearer someBearerToken, Basic ZHVtbXk6ZHVtbXk=";
         let user = auth
-            .authenticate(header, "127.0.0.1", Some("localrealm"))
+            .authenticate(header, "127.0.0.1", Some("localrealm"), &metrics)
             .await;
         assert!(user.is_some());
         assert_eq!(user.unwrap().username, "dummy");
@@ -573,10 +696,11 @@ mod tests {
             token_store: Arc::new(DummyStore),
         };
 
+        let metrics = crate::metrics::Metrics::new();
         // When the realm filter is "localrealm", only the provider with that realm should be used.
         let header = "Basic ZHVtbXk6ZHVtbXk=";
         let user_local = auth
-            .authenticate(header, "127.0.0.1", Some("localrealm"))
+            .authenticate(header, "127.0.0.1", Some("localrealm"), &metrics)
             .await;
         assert!(
             user_local.is_some(),
@@ -585,7 +709,7 @@ mod tests {
 
         // When the realm filter is "otherrealm", only the other provider should be used.
         let user_other = auth
-            .authenticate(header, "127.0.0.1", Some("otherrealm"))
+            .authenticate(header, "127.0.0.1", Some("otherrealm"), &metrics)
             .await;
         assert!(
             user_other.is_some(),
@@ -594,7 +718,7 @@ mod tests {
 
         // When the realm filter does not match any provider, authentication should fail.
         let user_none = auth
-            .authenticate(header, "127.0.0.1", Some("nonexistent"))
+            .authenticate(header, "127.0.0.1", Some("nonexistent"), &metrics)
             .await;
         assert!(
             user_none.is_none(),
@@ -616,10 +740,11 @@ mod tests {
             config: AuthConfig { timeout_in_ms: 5 },
             token_store: Arc::new(DummyStore),
         };
+        let metrics = crate::metrics::Metrics::new();
         // Duplicate header part (should only check once, and succeed)
         let header = "Basic ZHVtbXk6ZHVtbXk=, Basic ZHVtbXk6ZHVtbXk=";
         let user = auth
-            .authenticate(header, "127.0.0.1", Some("localrealm"))
+            .authenticate(header, "127.0.0.1", Some("localrealm"), &metrics)
             .await;
         assert!(
             user.is_some(),
@@ -629,7 +754,7 @@ mod tests {
         // duplicate wrong header gets rejected
         let wrong_header = "Basic wrong, Basic wrong";
         let user = auth
-            .authenticate(wrong_header, "127.0.0.1", Some("localrealm"))
+            .authenticate(wrong_header, "127.0.0.1", Some("localrealm"), &metrics)
             .await;
         assert!(user.is_none(), "Duplicate wrong headers should be rejected");
     }
@@ -648,10 +773,11 @@ mod tests {
             config: AuthConfig { timeout_in_ms: 5 },
             token_store: Arc::new(DummyStore),
         };
+        let metrics = crate::metrics::Metrics::new();
         // 4 unique header parts (should be rejected)
         let header = "Basic a, Basic b, Basic ZHVtbXk6ZHVtbXk=, Basic c";
         let user = auth
-            .authenticate(header, "127.0.0.1", Some("localrealm"))
+            .authenticate(header, "127.0.0.1", Some("localrealm"), &metrics)
             .await;
         assert!(
             user.is_none(),
@@ -660,7 +786,7 @@ mod tests {
         // check that if correct header is third user is authenticated
         let header = "Basic a, Basic b, Basic ZHVtbXk6ZHVtbXk=";
         let user = auth
-            .authenticate(header, "127.0.0.1", Some("localrealm"))
+            .authenticate(header, "127.0.0.1", Some("localrealm"), &metrics)
             .await;
         assert!(
             user.is_some(),
