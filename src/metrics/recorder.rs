@@ -48,7 +48,7 @@ pub trait MetricsRecorder: Clone + Send + Sync + 'static {
 /// Prometheus metrics collector.
 #[derive(Clone)]
 pub struct Metrics {
-    registry: Arc<Registry>,
+    pub(crate) registry: Arc<Registry>,
 
     // Authentication metrics
     auth_requests_total: CounterVec,
