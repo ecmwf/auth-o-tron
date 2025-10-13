@@ -6,6 +6,7 @@
 mod augmenters;
 mod auth;
 mod health;
+mod metrics;
 mod providers;
 mod tokens;
 
@@ -23,5 +24,6 @@ pub fn create_router(state: AppState) -> Router {
         .merge(providers::routes())
         .merge(augmenters::routes())
         .merge(health::routes())
+        .merge(metrics::routes())
         .with_state(state)
 }

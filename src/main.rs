@@ -3,6 +3,7 @@
 mod augmenters;
 mod auth;
 mod config;
+mod metrics;
 mod models;
 mod providers;
 mod routes;
