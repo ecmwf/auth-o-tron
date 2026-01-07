@@ -35,12 +35,20 @@ pub struct ConfigV1 {
 }
 
 /// Load configuration using a flexible approach:
-/// - Reads the YAML file path from the CONFIG_PATH environment variable, defaulting to "./config.yaml".
+/// - If a file path is passed as an argument, it uses that file
+/// - Else it reads the YAML file path from the AOT_CONFIG_PATH environment variable, defaulting to "./config.yaml".
 /// - Merges environment variable overrides (prefixed with "AOT_" and using "__" to denote nested keys).
-pub fn load_config() -> ConfigV1 {
-    // Get the config file path from the environment variable `CONFIG_PATH` or default to "./config.yaml"
-    let config_path = env::var("AOT_CONFIG_PATH").unwrap_or_else(|_| "./config.yaml".to_owned());
+pub fn load_config(config_path: Option<String>) -> ConfigV1 {
+    // Get the config file path from the environment variable `AOT_CONFIG_PATH` or default to "./config.yaml"
+    let config_path = config_path.unwrap_or_else(|| {
+        env::var("AOT_CONFIG_PATH").unwrap_or_else(|_| "./config.yaml".to_owned())
+    });
 
+    // Check that file exists
+    if !std::path::Path::new(&config_path).exists() {
+        eprintln!("Configuration file not found: {}", config_path);
+        std::process::exit(1);
+    }
     // Create a Figment provider that:
     // 1. Loads configuration from the YAML file at `config_path`.
     // 2. Merges environment variable overrides with the prefix "AOT_".
