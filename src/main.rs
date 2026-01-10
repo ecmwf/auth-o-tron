@@ -1,19 +1,8 @@
 //! Auth-o-tron: A flexible authentication and authorization service.
 
-mod augmenters;
-mod auth;
-mod config;
-mod metrics;
-mod models;
-mod providers;
-mod routes;
-mod startup;
-mod state;
-mod store;
-mod utils;
-
-use crate::config::{load_config, print_schema};
-use crate::utils::logger::init_logging;
+use authotron::config::{load_config, print_schema};
+use authotron::startup;
+use authotron::utils::logger::init_logging;
 use std::env;
 use std::sync::Arc;
 

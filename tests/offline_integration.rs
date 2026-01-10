@@ -1,30 +1,42 @@
-use base64::Engine;
-use jsonwebtoken::TokenData;
-use reqwest::Client;
-use std::process::Stdio;
-use tokio::{fs, time};
-use tokio::{io::AsyncReadExt, process::Command};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 
+use authotron::auth::Auth;
+use authotron::config::{AuthConfig, Config, ConfigV1};
+use authotron::metrics::Metrics;
+use authotron::routes::create_router;
+use authotron::state::AppState;
+use authotron::store::create_store;
+use axum::body::Body;
+use axum::extract::ConnectInfo;
+use axum::http::{Method, Request, StatusCode};
+use axum::Router;
+use base64::{Engine as _, engine::general_purpose};
+use figment::{Figment, providers::{Format, Yaml}};
+use jsonwebtoken::{DecodingKey, TokenData, Validation, decode};
 use serde::{Deserialize, Serialize};
+use tower::ServiceExt;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Claims {
     sub: Option<String>,
     username: Option<String>,
-    exp: Option<usize>,
+    exp: Option<i64>,
     iss: Option<String>,
     roles: Vec<String>,
+    realm: Option<String>,
 }
 
-#[tokio::test]
-async fn integration_plain_auth_flow() {
-    // Start the service
-    let config = r#"
+const TEST_CONFIG: &str = r#"
+version: "1.0.0"
+logging:
+  level: "debug"
+  format: "json"
 auth:
   timeout_in_ms: 3000
 providers:
   - name: "ECMWF API Provider"
-    use std::{fs, process::Stdio};
+    type: "ecmwf-api"
     uri: https://api.ecmwf.int/v1
     realm: "ecmwf"
   - name: "Plain provider"
@@ -64,161 +76,148 @@ jwt:
   exp: 3600
   iss: authotron-test
   secret: test-secret
-bind_address: 0.0.0.0:8080
-                "#;
-    if cfg!(windows) {
-        let config_path = "/tmp/authotron-test-config.yaml";
-        std::fs::write(config_path, config).unwrap();
+bind_address: 127.0.0.1:8081
+"#;
 
-        // Wrap the test in a Result to allow ? and ensure cleanup
-        let test_result = async {
-            // Find the binary in target/debug, build if missing
-            let mut bin_path = std::env::current_dir().unwrap();
-            bin_path.push("target");
-            bin_path.push("debug");
-            bin_path.push("authotron");
-            println!("Using auth-o-tron binary at {:?}", bin_path);
-            if cfg!(windows) {
-                bin_path.set_extension("exe");
-            }
-            if !bin_path.exists() {
-                let status = std::process::Command::new("cargo")
-                    .arg("build")
-                    .status()
-                    .expect("Failed to run cargo build");
-                assert!(status.success(), "cargo build failed");
-                assert!(
-                    bin_path.exists(),
-                    "auth-o-tron binary not found after build"
-                );
-            }
-            let child = Command::new(bin_path)
-                .arg("--config")
-                .arg(config_path)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("Failed to start auth-o-tron");
+fn load_test_config() -> ConfigV1 {
+    let config: Config = Figment::new()
+        .merge(Yaml::string(TEST_CONFIG))
+        .extract()
+        .expect("Failed to parse test config YAML");
 
-            // Wait for the service to be up (async)
-            let client = Client::new();
-            let url = "http://localhost:8080/health";
-            for _ in 0..10 {
-                if let Ok(resp) = client.get(url).send().await {
-                    if resp.status().is_success() {
-                        break;
-                    }
-                }
-                time::sleep(time::Duration::from_millis(500)).await;
-            }
-
-            // 1. Test success auth
-            // Base64 encode "adam:admin"
-            let credentials = "adam:admin";
-            let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
-            let header_value = format!("Basic {}", encoded);
-            let resp = client
-                .post("http://localhost:8080/auth/plain")
-                .header("Authorization", header_value)
-                .send()
-                .await
-                .expect("Failed to send request");
-            assert!(resp.status().is_success(), "Expected 200 OK");
-            // decode auth header which is a jwt token and check roles are exactly user and admin
-            let token = resp
-                .headers()
-                .get("Authorization")
-                .unwrap()
-                .to_str()
-                .unwrap();
-            let claims: TokenData<Claims> = jsonwebtoken::decode(
-                token,
-                &jsonwebtoken::DecodingKey::from_secret("test-secret".as_ref()),
-                &jsonwebtoken::Validation::default(),
-            )
-            .unwrap();
-            let roles = &claims.claims.roles;
-            assert_eq!(roles.len(), 2);
-            assert!(roles.iter().any(|r| r == "user"), "Expected user role");
-            assert!(roles.iter().any(|r| r == "admin"), "Expected admin role");
-
-            // 2. Test failure auth
-            let credentials = "adam:wrongpassword";
-            let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
-            let header_value = format!("Basic {}", encoded);
-            let resp = client
-                .post("http://localhost:8080/auth/plain")
-                .header("Authorization", header_value)
-                .send()
-                .await
-                .expect("Failed to send request");
-            assert_eq!(resp.status(), 401);
-
-            // 3. Test realms separation
-            let credentials = "adam:other";
-            let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
-            let header_value = format!("Basic {}", encoded);
-            let resp = client
-                .post("http://localhost:8080/auth/plain")
-                .header("Authorization", header_value)
-                .send()
-                .await
-                .expect("Failed to send request");
-            assert!(
-                resp.status().is_success(),
-                "Expected 200 OK but got {}",
-                resp.status()
-            );
-            let token = resp
-                .headers()
-                .get("Authorization")
-                .unwrap()
-                .to_str()
-                .unwrap();
-            let claims: TokenData<Claims> = jsonwebtoken::decode(
-                token,
-                &jsonwebtoken::DecodingKey::from_secret("test-secret".as_ref()),
-                &jsonwebtoken::Validation::default(),
-            )
-            .unwrap();
-            let roles = &claims.claims.roles;
-            assert_eq!(roles.len(), 1);
-            assert!(roles.iter().any(|r| r == "user"), "Expected only user role");
-
-            Ok::<_, Box<dyn std::error::Error>>(child)
-        }
-        .await;
-
-        // Always run cleanup, even if the test failed
-        match test_result {
-            Ok(mut child) => {
-                let _ = child.kill().await;
-                // Print logs from stdout and stderr
-                if let Some(mut out) = child.stdout.take() {
-                    let mut buf = Vec::new();
-                    let _ = out.read_to_end(&mut buf).await;
-                    if !buf.is_empty() {
-                        println!("[auth-o-tron stdout]\n{}", String::from_utf8_lossy(&buf));
-                    }
-                }
-                if let Some(mut err) = child.stderr.take() {
-                    let mut buf = Vec::new();
-                    let _ = err.read_to_end(&mut buf).await;
-                    if !buf.is_empty() {
-                        eprintln!("[auth-o-tron stderr]\n{}", String::from_utf8_lossy(&buf));
-                    }
-                }
-            }
-            Err(e) => {
-                // If we failed to get the child, try to kill any running process anyway
-                // (best effort, not guaranteed)
-                // Optionally print a message here
-                // Remove the config file
-                let _ = fs::remove_file(config_path);
-                panic!("Test failed: {e}");
-            }
-        }
-        // Remove the config file
-        let _ = fs::remove_file(config_path);
+    match config {
+        Config::ConfigV1(cfg) => cfg,
     }
+}
+
+async fn build_app(config: ConfigV1) -> (Router, Arc<ConfigV1>) {
+    let config = Arc::new(config);
+    let store = create_store(&config.store).await;
+    let auth = Arc::new(Auth::new(
+        &config.providers,
+        &config.augmenters,
+        store.clone(),
+        AuthConfig {
+            timeout_in_ms: config.auth.timeout_in_ms,
+        },
+    ));
+    let metrics = Metrics::new();
+
+    let state = AppState {
+        config: config.clone(),
+        auth,
+        store,
+        metrics,
+    };
+
+    (create_router(state), config)
+}
+
+fn build_request(path: &str, credentials: &str, method: Method) -> Request<Body> {
+    let encoded = general_purpose::STANDARD.encode(credentials);
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("Authorization", format!("Basic {}", encoded))
+        .body(Body::empty())
+        .expect("failed to build request");
+
+    request
+        .extensions_mut()
+        .insert(ConnectInfo(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            0,
+        )));
+
+    request
+}
+
+#[tokio::test]
+async fn integration_plain_auth_flow() {
+    let (app, config) = build_app(load_test_config()).await;
+
+    let response = app
+        .clone()
+        .oneshot(build_request("/authenticate", "adam:admin", Method::GET))
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let auth_header = response
+        .headers()
+        .get("Authorization")
+        .expect("Authorization header missing")
+        .to_str()
+        .expect("Authorization header not valid UTF-8");
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .expect("Authorization header missing Bearer prefix");
+
+    let mut validation = Validation::default();
+    validation.validate_aud = false;
+
+    let claims: TokenData<Claims> = decode(
+        token,
+        &DecodingKey::from_secret(config.jwt.secret.as_ref()),
+        &validation,
+    )
+    .expect("JWT should decode");
+
+    assert_eq!(claims.claims.roles.len(), 2);
+    assert!(claims.claims.roles.iter().any(|r| r == "user"));
+    assert!(claims.claims.roles.iter().any(|r| r == "admin"));
+}
+
+#[tokio::test]
+async fn integration_plain_auth_failure() {
+    let (app, _config) = build_app(load_test_config()).await;
+
+    let response = app
+        .clone()
+        .oneshot(build_request(
+            "/authenticate",
+            "adam:wrongpassword",
+            Method::GET,
+        ))
+        .await
+        .expect("request should complete");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn integration_plain_auth_realm_separation() {
+    let (app, config) = build_app(load_test_config()).await;
+
+    let response = app
+        .clone()
+        .oneshot(build_request("/authenticate", "adam:other", Method::GET))
+        .await
+        .expect("request should complete");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let auth_header = response
+        .headers()
+        .get("Authorization")
+        .expect("Authorization header missing")
+        .to_str()
+        .expect("Authorization header not valid UTF-8");
+    let token = auth_header
+        .strip_prefix("Bearer ")
+        .expect("Authorization header missing Bearer prefix");
+
+    let mut validation = Validation::default();
+    validation.validate_aud = false;
+
+    let claims: TokenData<Claims> = decode(
+        token,
+        &DecodingKey::from_secret(config.jwt.secret.as_ref()),
+        &validation,
+    )
+    .expect("JWT should decode");
+
+    assert_eq!(claims.claims.roles.len(), 1);
+    assert!(claims.claims.roles.iter().all(|r| r == "user"), "adam user should only have 'user' role in 'other' realm, but got roles: {:?}", claims.claims.roles);
 }
