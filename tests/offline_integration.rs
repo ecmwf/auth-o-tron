@@ -7,12 +7,15 @@ use authotron::metrics::Metrics;
 use authotron::routes::create_router;
 use authotron::state::AppState;
 use authotron::store::create_store;
+use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Method, Request, StatusCode};
-use axum::Router;
 use base64::{Engine as _, engine::general_purpose};
-use figment::{Figment, providers::{Format, Yaml}};
+use figment::{
+    Figment,
+    providers::{Format, Yaml},
+};
 use jsonwebtoken::{DecodingKey, TokenData, Validation, decode};
 use serde::{Deserialize, Serialize};
 use tower::ServiceExt;
@@ -122,12 +125,10 @@ fn build_request(path: &str, credentials: &str, method: Method) -> Request<Body>
         .body(Body::empty())
         .expect("failed to build request");
 
-    request
-        .extensions_mut()
-        .insert(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            0,
-        )));
+    request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        0,
+    )));
 
     request
 }
@@ -219,5 +220,9 @@ async fn integration_plain_auth_realm_separation() {
     .expect("JWT should decode");
 
     assert_eq!(claims.claims.roles.len(), 1);
-    assert!(claims.claims.roles.iter().all(|r| r == "user"), "adam user should only have 'user' role in 'other' realm, but got roles: {:?}", claims.claims.roles);
+    assert!(
+        claims.claims.roles.iter().all(|r| r == "user"),
+        "adam should only be 'user' in 'other' realm, but got roles: {:?}",
+        claims.claims.roles
+    );
 }
