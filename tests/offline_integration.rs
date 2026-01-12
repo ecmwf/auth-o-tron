@@ -49,7 +49,7 @@ providers:
         - username: adam
           password: admin
           roles:
-            - user1
+            - user
         - username: eve
           password: admin
           roles:
