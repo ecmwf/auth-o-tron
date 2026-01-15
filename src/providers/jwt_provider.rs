@@ -35,6 +35,10 @@ struct Claims {
     scope: String,
     realm_access: Option<RolesContainer>,
     entitlements: Option<Vec<String>>,
+    /// Any additional claim fields we don't explicitly model.
+    #[serde(flatten)]
+    extra: HashMap<String, Value>,
+    
 }
 
 /// Used to unify roles from different sections of the claim.
@@ -106,32 +110,43 @@ impl Provider for JWTProvider {
 
         let decoded = decode::<Claims>(token, &decoding_key, &validation)
             .map_err(|e| format!("Failed to decode JWT: {}", e))?;
+        info!("Decoded jwt contents: {:?}", decoded);
 
+        let claims = decoded.claims;
         // Collect roles from various places
-        let mut roles = decoded
-            .claims
+        let mut roles = claims
             .realm_access
             .map(|ra| ra.roles)
             .unwrap_or_default();
 
-        roles.extend(decoded.claims.entitlements.unwrap_or_default());
-        if let Some(resource_access) = decoded.claims.resource_access {
+        roles.extend(claims.entitlements.unwrap_or_default());
+        if let Some(resource_access) = claims.resource_access {
             for (_, roles_container) in resource_access {
                 roles.extend(roles_container.roles);
             }
         }
 
+        let additional_attributes: HashMap<String, String> = claims
+            .extra
+            .into_iter()
+            .map(|(key, value)| (key, value_to_string(value)))
+            .collect();
+        let attributes = if additional_attributes.is_empty() {
+            None
+        } else {
+            Some(additional_attributes)
+        };
+
         // Build the final `User` object
         let user = User::new(
             self.config.realm.to_string(),
-            decoded.claims.sub,
+            claims.sub,
             Some(roles),
-            None,
+            attributes,
             // We store the 'scope' claim in user attributes under the provider name
             Some(HashMap::from([(
                 self.config.name.clone(),
-                decoded
-                    .claims
+                claims
                     .scope
                     .split_whitespace()
                     .map(|s| s.to_string())
@@ -146,6 +161,17 @@ impl Provider for JWTProvider {
     /// A display name for logs/debugging.
     fn get_name(&self) -> &str {
         &self.config.name
+    }
+}
+
+/// Convert arbitrary JSON claim values into string form for attributes.
+fn value_to_string(value: Value) -> String {
+    match value {
+        Value::String(s) => s,
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => "null".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -172,6 +198,7 @@ pub async fn get_certs(cert_uri: String) -> Result<String, String> {
 mod tests {
     use super::*;
     use mockito::Server;
+    use serde_json::json;
     use tokio;
 
     /// Test that `get_certs` returns the expected JSON when the endpoint is successful.
@@ -240,5 +267,55 @@ mod tests {
         let result = provider.authenticate("invalid.token").await;
         m.assert_async().await;
         assert!(result.is_err());
+    }
+
+    /// Test that additional, unspecified claims are preserved as user attributes.
+    #[tokio::test]
+    async fn test_jwt_provider_preserves_extra_claims() {
+        let jwks = r#"{"keys": [{"kty": "oct", "k": "c2VjcmV0", "alg": "HS512", "kid": "testkid"}]}"#;
+        let mut server = Server::new_async().await;
+        let m = server
+            .mock("GET", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(jwks)
+            .create_async()
+            .await;
+
+        let url = server.url();
+        let config = JWTAuthConfig {
+            cert_uri: url.to_string(),
+            realm: "test".to_string(),
+            name: "TestJWT".to_string(),
+            iam_realm: "test".to_string(),
+        };
+        let provider = JWTProvider::new(&config);
+
+        let claims = json!({
+            "sub": "user1",
+            "scope": "read write",
+            "exp": 4102444800usize,
+            "custom": "abc",
+            "nested": {"flag": true}
+        });
+
+        let mut header = jsonwebtoken::Header::new(Algorithm::HS512);
+        header.kid = Some("testkid".to_string());
+        let token = jsonwebtoken::encode(
+            &header,
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(b"secret"),
+        )
+        .expect("Failed to create token");
+
+        let user = provider
+            .authenticate(&token)
+            .await
+            .expect("Authentication should succeed");
+        m.assert_async().await;
+
+        assert_eq!(user.username, "user1");
+        assert_eq!(user.attributes.get("custom"), Some(&"abc".to_string()));
+        assert_eq!(user.attributes.get("nested"), Some(&"{\"flag\":true}".to_string()));
     }
 }
