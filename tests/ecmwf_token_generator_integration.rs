@@ -1,33 +1,15 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
-
-use authotron::auth::Auth;
-use authotron::config::{AuthConfig, Config, ConfigV1};
-use authotron::metrics::Metrics;
-use authotron::routes::create_router;
-use authotron::state::AppState;
-use authotron::store::create_store;
-use axum::body::Body;
-use axum::extract::ConnectInfo;
-use axum::http::{Method, Request, StatusCode};
-use axum::Router;
+use authotron::config::{Config, ConfigV1};
+use axum::http::{Method, StatusCode};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use figment::{Figment, providers::{Format, Yaml}};
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation, decode, encode};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use mockito::{Matcher, Server};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct Claims {
-    sub: Option<String>,
-    username: Option<String>,
-    exp: Option<i64>,
-    iss: Option<String>,
-    roles: Vec<String>,
-    realm: Option<String>,
-}
+mod common;
+
+use common::{build_app, decode_claims, request_with_bearer};
 
 const CLIENT_ID: &str = "polytope";
 const CLIENT_SECRET: &str = "polytope-secret";
@@ -73,47 +55,6 @@ bind_address: {TEST_BIND_ADDRESS}
     }
 }
 
-async fn build_app(config: ConfigV1) -> (Router, Arc<ConfigV1>) {
-    let config = Arc::new(config);
-    let store = create_store(&config.store).await;
-    let auth = Arc::new(Auth::new(
-        &config.providers,
-        &config.augmenters,
-        store.clone(),
-        AuthConfig {
-            timeout_in_ms: config.auth.timeout_in_ms,
-        },
-    ));
-    let metrics = Metrics::new();
-
-    let state = AppState {
-        config: config.clone(),
-        auth,
-        store,
-        metrics,
-    };
-
-    (create_router(state), config)
-}
-
-fn bearer_request(path: &str, token: &str, method: Method) -> Request<Body> {
-    let mut request = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("Authorization", format!("Bearer {}", token))
-        .body(Body::empty())
-        .expect("failed to build request");
-
-    request
-        .extensions_mut()
-        .insert(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            0,
-        )));
-
-    request
-}
-
 fn build_jwks(kid: &str, secret: &[u8]) -> String {
     json!({
         "keys": [
@@ -133,18 +74,6 @@ fn encode_hs512_token(claims: Value, kid: &str, secret: &[u8]) -> String {
     header.kid = Some(kid.to_string());
     encode(&header, &claims, &EncodingKey::from_secret(secret))
         .expect("Failed to encode JWT")
-}
-
-fn decode_response_token(token: &str, secret: &str) -> TokenData<Claims> {
-    let mut validation = Validation::default();
-    validation.validate_aud = false;
-
-    decode(
-        token,
-        &DecodingKey::from_secret(secret.as_ref()),
-        &validation,
-    )
-    .expect("JWT should decode")
 }
 
 fn example_claims(scope: &str) -> Value {
@@ -178,7 +107,7 @@ async fn integration_ecmwf_token_generator_exchanges_refresh_token() {
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(jwks_body)
-        .expect(2)
+        .expect(1)
         .create_async()
         .await;
 
@@ -225,7 +154,7 @@ async fn integration_ecmwf_token_generator_exchanges_refresh_token() {
     // Perform authentication request
     let response = app
         .clone()
-        .oneshot(bearer_request("/authenticate", &refresh_token, Method::GET))
+        .oneshot(request_with_bearer("/authenticate", &refresh_token, Method::GET))
         .await
         .expect("request should succeed");
 
@@ -241,7 +170,7 @@ async fn integration_ecmwf_token_generator_exchanges_refresh_token() {
         .strip_prefix("Bearer ")
         .expect("Authorization header missing Bearer prefix");
 
-    let claims = decode_response_token(token, &config.jwt.secret);
+    let claims = decode_claims(token, &config.jwt.secret);
     assert_eq!(claims.claims.realm.as_deref(), Some("ecmwf"));
     assert!(claims.claims.roles.contains(&"user".to_string()));
 
