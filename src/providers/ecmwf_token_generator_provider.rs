@@ -53,7 +53,8 @@ impl EcmwfTokenGeneratorProvider {
 }
 
 /// Validates a token using the ECMWF Token Generator validate-token endpoint.
-#[cfg_attr(not(test), cached(time = 120, sync_writes = "default"))]
+/// Caches results for 240 seconds (tokens valid for 300) to reduce load on the token generator.
+#[cfg_attr(not(test), cached(time = 240, sync_writes = "default"))]
 async fn validate_token_with_generator(
     config: EcmwfTokenGeneratorProviderConfig,
     token: String,
@@ -89,7 +90,8 @@ async fn validate_token_with_generator(
 }
 
 /// Exchanges an offline/refresh token for an access token using the ECMWF Token Generator API.
-#[cfg_attr(not(test), cached(time = 10, sync_writes = "default"))]
+/// Caches results for 240 seconds (tokens valid for 300) to reduce load on the token generator.
+#[cfg_attr(not(test), cached(time = 240, sync_writes = "default"))]
 async fn get_access_token_from_generator(
     config: EcmwfTokenGeneratorProviderConfig,
     refresh_token: String,
