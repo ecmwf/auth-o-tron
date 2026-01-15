@@ -23,7 +23,7 @@ pub struct EcmwfTokenGeneratorProviderConfig {
 }
 
 /// A provider that validates tokens through the ECMWF Token Generator API and then uses a JWTProvider for final validation.
-/// This provider supports both offline refresh tokens and access tokens via the ECMWF Token Generator wrapper.
+/// This provider supports exchanging offline refresh tokens for access tokens via the ECMWF Token Generator Keycloak wrapper.
 pub struct EcmwfTokenGeneratorProvider {
     config: EcmwfTokenGeneratorProviderConfig,
     jwt_auth: JWTProvider,
@@ -153,23 +153,14 @@ impl Provider for EcmwfTokenGeneratorProvider {
             return Err("Token is not valid according to ECMWF Token Generator".into());
         }
 
-        // Try to use the token directly first (in case it's already an access token)
-        match self.jwt_auth.authenticate(credentials).await {
-            Ok(user) => Ok(user),
-            Err(_) => {
-                // If direct authentication fails, try to exchange it for an access token
-                // (assuming it might be a refresh token)
-                debug!("Direct token authentication failed, attempting to exchange for access token");
-                
-                let access_token = get_access_token_from_generator(
-                    self.config.clone(), 
-                    credentials.to_string()
-                ).await?;
-                
-                // Now authenticate with the access token
-                self.jwt_auth.authenticate(&access_token).await
-            }
-        }
+        // Get access token from token generator
+        let access_token = get_access_token_from_generator(
+            self.config.clone(), 
+            credentials.to_string()
+        ).await?;
+        
+        // Now authenticate with the access token
+        self.jwt_auth.authenticate(&access_token).await
     }
 }
 
@@ -298,11 +289,6 @@ mod tests {
         assert!(result.is_err(), "Expected error on HTTP 401");
     }
 
-    // ========== authenticate() integration test ==========
-    // Note: Full testing of authenticate() requires mocking JWTProvider,
-    // which would need dependency injection or mocking JWT cert endpoints.
-    // For now, we test that validation failure properly returns an error.
-
     #[tokio::test]
     async fn test_authenticate_fails_when_validation_fails() {
         let mut server = Server::new_async().await;
@@ -324,7 +310,5 @@ mod tests {
             "Error should indicate validation failure"
         );
     }
-
-    // ========== Full integration tests with JWT ==========
 
 }
