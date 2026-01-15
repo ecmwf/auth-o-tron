@@ -1,5 +1,6 @@
 use super::{
     ecmwfapi_provider::{EcmwfApiProvider, EcmwfApiProviderConfig},
+    ecmwf_token_generator_provider::{EcmwfTokenGeneratorProvider, EcmwfTokenGeneratorProviderConfig},
     jwt_provider::{JWTAuthConfig, JWTProvider},
     openid_offline_provider::{OpenIDOfflineProvider, OpenIDOfflineProviderConfig},
     plain_provider::{PlainAuthConfig, PlainAuthProvider},
@@ -21,6 +22,8 @@ use tracing::{debug, info};
 pub enum ProviderConfig {
     #[serde(rename = "ecmwf-api")]
     EcmwfApi(EcmwfApiProviderConfig),
+    #[serde(rename = "ecmwf-token-generator")]
+    EcmwfTokenGenerator(EcmwfTokenGeneratorProviderConfig),
     #[serde(rename = "jwt")]
     Jwt(JWTAuthConfig),
     #[serde(rename = "openid-offline")]
@@ -45,6 +48,7 @@ pub trait Provider: Send + Sync {
 pub fn create_auth_provider(config: &ProviderConfig) -> Box<dyn Provider> {
     match config {
         ProviderConfig::EcmwfApi(cfg) => Box::new(EcmwfApiProvider::new(cfg)),
+        ProviderConfig::EcmwfTokenGenerator(cfg) => Box::new(EcmwfTokenGeneratorProvider::new(cfg)),
         ProviderConfig::Jwt(cfg) => Box::new(JWTProvider::new(cfg)),
         ProviderConfig::OpenIDOffline(cfg) => Box::new(OpenIDOfflineProvider::new(cfg)),
         ProviderConfig::Plain(cfg) => Box::new(PlainAuthProvider::new(cfg)),
