@@ -126,6 +126,12 @@ impl Provider for JWTProvider {
             }
         }
 
+        let username = claims
+            .extra
+            .get("preferred_username")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&claims.sub)
+            .to_string();
         let additional_attributes: HashMap<String, String> = claims
             .extra
             .into_iter()
@@ -140,7 +146,7 @@ impl Provider for JWTProvider {
         // Build the final `User` object
         let user = User::new(
             self.config.realm.to_string(),
-            claims.sub,
+            username,
             Some(roles),
             attributes,
             // We store the 'scope' claim in user attributes under the provider name
