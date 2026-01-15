@@ -63,10 +63,17 @@ impl User {
         let now = Utc::now().timestamp();
         let sub = format!("{}-{}", self.realm, self.username);
 
+        let mut expiry = now + jwtconfig.exp;
+        if self.attributes.contains_key("exp") {
+            if let Ok(attr_exp) = self.attributes.get("exp").unwrap().parse::<i64>() {
+                // Set expiry to the minimum of the two values
+                expiry = std::cmp::min(expiry, attr_exp);
+            }
+        }
         let claims = Claims {
             sub: &sub,
             iss: &jwtconfig.iss,
-            exp: now + jwtconfig.exp,
+            exp: expiry,
             iat: now,
             roles: &self.roles,
             username: &self.username,
@@ -146,6 +153,29 @@ mod tests {
     /// Note: We disable audience validation in this test (as in production code)
     /// by setting `validation.validate_aud = false`. This prevents the decoder from
     /// failing with an "InvalidAudience" error.
+
+    fn decode_claims(token: &str, jwt_config: &JWTConfig) -> serde_json::Value {
+        let mut validation = Validation::default();
+        validation.validate_aud = false;
+
+        decode::<serde_json::Value>(
+            token,
+            &DecodingKey::from_secret(jwt_config.secret.as_ref()),
+            &validation,
+        )
+        .expect("Failed to decode JWT")
+        .claims
+    }
+
+    fn default_jwt_config() -> JWTConfig {
+        JWTConfig {
+            iss: "test_issuer".to_string(),
+            aud: None,
+            exp: 3600,
+            secret: "secretkey".to_string(),
+        }
+    }
+
     #[test]
     fn test_to_jwt_and_decode() {
         // Create a user with test data.
@@ -158,31 +188,37 @@ mod tests {
             Some(1),
         );
         // Create a JWT configuration with an audience.
-        let jwt_config = JWTConfig {
-            iss: "test_issuer".to_string(),
-            aud: None,
-            exp: 3600,
-            secret: "secretkey".to_string(),
-        };
+        let jwt_config = default_jwt_config();
         // Convert the user into a JWT.
         let token = user.to_jwt(&jwt_config);
 
-        // Create a default validation instance and disable audience validation.
-        let mut validation = Validation::default();
-        validation.validate_aud = false;
-
         // Decode the token using the secret from jwt_config.
-        let token_data = decode::<serde_json::Value>(
-            &token,
-            &DecodingKey::from_secret(jwt_config.secret.as_ref()),
-            &validation,
-        )
-        .expect("Failed to decode JWT");
-
-        let claims = token_data.claims;
+        let claims = decode_claims(&token, &jwt_config);
         // Assert that the issuer claim matches.
         assert_eq!(claims["iss"], jwt_config.iss);
         // Assert that the username claim matches.
         assert_eq!(claims["username"], user.username);
+    }
+
+    // Test that if the exp attribute is set in User attributes, it affects the JWT expiry.
+    #[test]
+    fn test_to_jwt_with_exp_attribute() {
+        let mut attributes = HashMap::new();
+        let custom_exp = Utc::now().timestamp() + 1800; // 30 minutes from now
+        attributes.insert("exp".to_string(), custom_exp.to_string());
+        let user = User::new(
+            "test".to_string(),
+            "user2".to_string(),
+            Some(vec!["role2".to_string()]),
+            Some(attributes),
+            None,
+            Some(1),
+        );
+        let jwt_config = default_jwt_config();
+        let token = user.to_jwt(&jwt_config);
+        let claims = decode_claims(&token, &jwt_config);
+        let exp_claim = claims["exp"].as_i64().expect("exp claim should be an integer");
+        // Assert that the exp claim matches the custom exp attribute.
+        assert_eq!(exp_claim, custom_exp);
     }
 }
