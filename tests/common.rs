@@ -7,10 +7,10 @@ use authotron::metrics::Metrics;
 use authotron::routes::create_router;
 use authotron::state::AppState;
 use authotron::store::create_store;
+use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Method, Request};
-use axum::Router;
 use base64::{Engine as _, engine::general_purpose};
 use jsonwebtoken::{DecodingKey, TokenData, Validation, decode};
 use serde::{Deserialize, Serialize};
@@ -56,12 +56,10 @@ pub fn request_with_bearer(path: &str, token: &str, method: Method) -> Request<B
         .body(Body::empty())
         .expect("failed to build request");
 
-    request
-        .extensions_mut()
-        .insert(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            0,
-        )));
+    request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        0,
+    )));
 
     request
 }
@@ -75,12 +73,10 @@ pub fn request_with_basic(path: &str, credentials: &str, method: Method) -> Requ
         .body(Body::empty())
         .expect("failed to build request");
 
-    request
-        .extensions_mut()
-        .insert(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::LOCALHOST),
-            0,
-        )));
+    request.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        0,
+    )));
 
     request
 }

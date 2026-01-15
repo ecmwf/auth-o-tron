@@ -1,6 +1,8 @@
 use super::{
+    ecmwf_token_generator_provider::{
+        EcmwfTokenGeneratorProvider, EcmwfTokenGeneratorProviderConfig,
+    },
     ecmwfapi_provider::{EcmwfApiProvider, EcmwfApiProviderConfig},
-    ecmwf_token_generator_provider::{EcmwfTokenGeneratorProvider, EcmwfTokenGeneratorProviderConfig},
     jwt_provider::{JWTAuthConfig, JWTProvider},
     openid_offline_provider::{OpenIDOfflineProvider, OpenIDOfflineProviderConfig},
     plain_provider::{PlainAuthConfig, PlainAuthProvider},
