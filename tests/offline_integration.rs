@@ -1,6 +1,9 @@
 use authotron::config::{Config, ConfigV1};
 use axum::http::{Method, StatusCode};
-use figment::{Figment, providers::{Format, Yaml}};
+use figment::{
+    Figment,
+    providers::{Format, Yaml},
+};
 use tower::ServiceExt;
 
 mod common;
@@ -76,7 +79,11 @@ async fn integration_plain_auth_flow() {
 
     let response = app
         .clone()
-        .oneshot(request_with_basic("/authenticate", "adam:admin", Method::GET))
+        .oneshot(request_with_basic(
+            "/authenticate",
+            "adam:admin",
+            Method::GET,
+        ))
         .await
         .expect("request should succeed");
 
@@ -122,7 +129,11 @@ async fn integration_plain_auth_realm_separation() {
 
     let response = app
         .clone()
-        .oneshot(request_with_basic("/authenticate", "adam:other", Method::GET))
+        .oneshot(request_with_basic(
+            "/authenticate",
+            "adam:other",
+            Method::GET,
+        ))
         .await
         .expect("request should complete");
 
@@ -141,5 +152,9 @@ async fn integration_plain_auth_realm_separation() {
     let claims = decode_claims(token, &config.jwt.secret);
 
     assert_eq!(claims.claims.roles.len(), 1);
-    assert!(claims.claims.roles.iter().all(|r| r == "user"), "Expected only 'user' role but got {:?}", claims.claims.roles);
+    assert!(
+        claims.claims.roles.iter().all(|r| r == "user"),
+        "Expected only 'user' role but got {:?}",
+        claims.claims.roles
+    );
 }

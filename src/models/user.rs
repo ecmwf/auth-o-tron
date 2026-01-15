@@ -217,7 +217,9 @@ mod tests {
         let jwt_config = default_jwt_config();
         let token = user.to_jwt(&jwt_config);
         let claims = decode_claims(&token, &jwt_config);
-        let exp_claim = claims["exp"].as_i64().expect("exp claim should be an integer");
+        let exp_claim = claims["exp"]
+            .as_i64()
+            .expect("exp claim should be an integer");
         // Assert that the exp claim matches the custom exp attribute.
         assert_eq!(exp_claim, custom_exp);
     }

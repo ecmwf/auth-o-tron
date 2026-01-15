@@ -156,11 +156,9 @@ impl Provider for EcmwfTokenGeneratorProvider {
         }
 
         // Get access token from token generator
-        let access_token = get_access_token_from_generator(
-            self.config.clone(), 
-            credentials.to_string()
-        ).await?;
-        
+        let access_token =
+            get_access_token_from_generator(self.config.clone(), credentials.to_string()).await?;
+
         // Now authenticate with the access token
         self.jwt_auth.authenticate(&access_token).await
     }
@@ -202,8 +200,9 @@ mod tests {
 
         let result = validate_token_with_generator(
             create_test_config(server.url()),
-            "valid_token".to_string()
-        ).await;
+            "valid_token".to_string(),
+        )
+        .await;
 
         m.assert_async().await;
         assert!(result.is_ok(), "Expected successful validation");
@@ -222,8 +221,9 @@ mod tests {
 
         let result = validate_token_with_generator(
             create_test_config(server.url()),
-            "invalid_token".to_string()
-        ).await;
+            "invalid_token".to_string(),
+        )
+        .await;
 
         assert!(result.is_ok(), "Request should succeed");
         assert!(!result.unwrap(), "Expected token to be inactive");
@@ -238,10 +238,9 @@ mod tests {
             .create_async()
             .await;
 
-        let result = validate_token_with_generator(
-            create_test_config(server.url()),
-            "token".to_string()
-        ).await;
+        let result =
+            validate_token_with_generator(create_test_config(server.url()), "token".to_string())
+                .await;
 
         assert!(result.is_err(), "Expected error on HTTP 500");
     }
@@ -266,8 +265,9 @@ mod tests {
 
         let result = get_access_token_from_generator(
             create_test_config(server.url()),
-            "refresh_token_123".to_string()
-        ).await;
+            "refresh_token_123".to_string(),
+        )
+        .await;
 
         m.assert_async().await;
         assert!(result.is_ok(), "Expected successful token exchange");
@@ -285,8 +285,9 @@ mod tests {
 
         let result = get_access_token_from_generator(
             create_test_config(server.url()),
-            "refresh_token".to_string()
-        ).await;
+            "refresh_token".to_string(),
+        )
+        .await;
 
         assert!(result.is_err(), "Expected error on HTTP 401");
     }
@@ -306,11 +307,15 @@ mod tests {
 
         let result = provider.authenticate("invalid_token").await;
 
-        assert!(result.is_err(), "Expected authentication to fail for invalid token");
         assert!(
-            result.unwrap_err().contains("not valid according to ECMWF Token Generator"),
+            result.is_err(),
+            "Expected authentication to fail for invalid token"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .contains("not valid according to ECMWF Token Generator"),
             "Error should indicate validation failure"
         );
     }
-
 }

@@ -1,7 +1,10 @@
 use authotron::config::{Config, ConfigV1};
 use axum::http::{Method, StatusCode};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use figment::{Figment, providers::{Format, Yaml}};
+use figment::{
+    Figment,
+    providers::{Format, Yaml},
+};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use mockito::{Matcher, Server};
 use serde_json::{Value, json};
@@ -72,8 +75,7 @@ fn build_jwks(kid: &str, secret: &[u8]) -> String {
 fn encode_hs512_token(claims: Value, kid: &str, secret: &[u8]) -> String {
     let mut header = Header::new(Algorithm::HS512);
     header.kid = Some(kid.to_string());
-    encode(&header, &claims, &EncodingKey::from_secret(secret))
-        .expect("Failed to encode JWT")
+    encode(&header, &claims, &EncodingKey::from_secret(secret)).expect("Failed to encode JWT")
 }
 
 fn example_claims(scope: &str) -> Value {
@@ -142,19 +144,30 @@ async fn integration_ecmwf_token_generator_exchanges_refresh_token() {
         })))
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body(json!({
-            "access_token": exchanged_access_token,
-            "expires_in": 300
-        }).to_string())
+        .with_body(
+            json!({
+                "access_token": exchanged_access_token,
+                "expires_in": 300
+            })
+            .to_string(),
+        )
         .create_async()
         .await;
 
-    let (app, config) = build_app(build_config(&server.url(), &format!("{}/jwks", server.url()))).await;
-    
+    let (app, config) = build_app(build_config(
+        &server.url(),
+        &format!("{}/jwks", server.url()),
+    ))
+    .await;
+
     // Perform authentication request
     let response = app
         .clone()
-        .oneshot(request_with_bearer("/authenticate", &refresh_token, Method::GET))
+        .oneshot(request_with_bearer(
+            "/authenticate",
+            &refresh_token,
+            Method::GET,
+        ))
         .await
         .expect("request should succeed");
 

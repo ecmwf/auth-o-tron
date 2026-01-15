@@ -38,7 +38,6 @@ struct Claims {
     /// Any additional claim fields we don't explicitly model.
     #[serde(flatten)]
     extra: HashMap<String, Value>,
-    
 }
 
 /// Used to unify roles from different sections of the claim.
@@ -114,10 +113,7 @@ impl Provider for JWTProvider {
 
         let claims = decoded.claims;
         // Collect roles from various places
-        let mut roles = claims
-            .realm_access
-            .map(|ra| ra.roles)
-            .unwrap_or_default();
+        let mut roles = claims.realm_access.map(|ra| ra.roles).unwrap_or_default();
 
         roles.extend(claims.entitlements.unwrap_or_default());
         if let Some(resource_access) = claims.resource_access {
@@ -284,7 +280,8 @@ mod tests {
     /// Test that additional, unspecified claims are preserved as user attributes.
     #[tokio::test]
     async fn test_jwt_provider_preserves_extra_claims() {
-        let jwks = r#"{"keys": [{"kty": "oct", "k": "c2VjcmV0", "alg": "HS512", "kid": "testkid"}]}"#;
+        let jwks =
+            r#"{"keys": [{"kty": "oct", "k": "c2VjcmV0", "alg": "HS512", "kid": "testkid"}]}"#;
         let mut server = Server::new_async().await;
         let m = server
             .mock("GET", "/")
@@ -328,6 +325,9 @@ mod tests {
 
         assert_eq!(user.username, "user1");
         assert_eq!(user.attributes.get("custom"), Some(&"abc".to_string()));
-        assert_eq!(user.attributes.get("nested"), Some(&"{\"flag\":true}".to_string()));
+        assert_eq!(
+            user.attributes.get("nested"),
+            Some(&"{\"flag\":true}".to_string())
+        );
     }
 }
