@@ -220,9 +220,5 @@ async fn integration_plain_auth_realm_separation() {
     .expect("JWT should decode");
 
     assert_eq!(claims.claims.roles.len(), 1);
-    assert!(
-        claims.claims.roles.iter().all(|r| r == "user"),
-        "adam should only be 'user' in 'other' realm, but got roles: {:?}",
-        claims.claims.roles
-    );
+    assert!(claims.claims.roles.iter().all(|r| r == "user"), "Expected only 'user' role but got {:?}", claims.claims.roles);
 }
