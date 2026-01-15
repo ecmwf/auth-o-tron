@@ -110,7 +110,7 @@ impl Provider for JWTProvider {
 
         let decoded = decode::<Claims>(token, &decoding_key, &validation)
             .map_err(|e| format!("Failed to decode JWT: {}", e))?;
-        info!("Decoded jwt contents: {:?}", decoded);
+        debug!("Decoded jwt contents: {:?}", decoded);
 
         let claims = decoded.claims;
         // Collect roles from various places
@@ -171,14 +171,20 @@ impl Provider for JWTProvider {
 }
 
 /// Convert arbitrary JSON claim values into string form for attributes.
+/// Sanitizes the resulting string to remove control characters.
+fn sanitize_attribute_value(s: String) -> String {
+    s.chars().filter(|c| !c.is_control()).collect()
+}
+
 fn value_to_string(value: Value) -> String {
-    match value {
+    let raw = match value {
         Value::String(s) => s,
         Value::Number(n) => n.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Null => "null".to_string(),
         other => other.to_string(),
-    }
+    };
+    sanitize_attribute_value(raw)
 }
 
 /// Retrieves the certificates (JWKS) from a remote URI. Cached for 600s to avoid repeated fetches.
