@@ -3,6 +3,7 @@ use super::{
         EcmwfTokenGeneratorProvider, EcmwfTokenGeneratorProviderConfig,
     },
     ecmwfapi_provider::{EcmwfApiProvider, EcmwfApiProviderConfig},
+    efasapi_provider::{EFASApiProviderConfig, EfasApiProvider},
     jwt_provider::{JWTAuthConfig, JWTProvider},
     openid_offline_provider::{OpenIDOfflineProvider, OpenIDOfflineProviderConfig},
     plain_provider::{PlainAuthConfig, PlainAuthProvider},
@@ -26,6 +27,8 @@ pub enum ProviderConfig {
     EcmwfApi(EcmwfApiProviderConfig),
     #[serde(rename = "ecmwf-token-generator")]
     EcmwfTokenGenerator(EcmwfTokenGeneratorProviderConfig),
+    #[serde(rename = "efas-api")]
+    EfasApiProvider(EFASApiProviderConfig),
     #[serde(rename = "jwt")]
     Jwt(JWTAuthConfig),
     #[serde(rename = "openid-offline")]
@@ -51,6 +54,7 @@ pub fn create_auth_provider(config: &ProviderConfig) -> Box<dyn Provider> {
     match config {
         ProviderConfig::EcmwfApi(cfg) => Box::new(EcmwfApiProvider::new(cfg)),
         ProviderConfig::EcmwfTokenGenerator(cfg) => Box::new(EcmwfTokenGeneratorProvider::new(cfg)),
+        ProviderConfig::EfasApiProvider(cfg) => Box::new(EfasApiProvider::new(cfg)),
         ProviderConfig::Jwt(cfg) => Box::new(JWTProvider::new(cfg)),
         ProviderConfig::OpenIDOffline(cfg) => Box::new(OpenIDOfflineProvider::new(cfg)),
         ProviderConfig::Plain(cfg) => Box::new(PlainAuthProvider::new(cfg)),
