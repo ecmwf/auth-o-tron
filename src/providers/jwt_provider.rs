@@ -10,8 +10,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tracing::{debug, info};
 
-use crate::models::user::User;
-use crate::providers::Provider;
+use crate::{models::user::User, providers::Provider, utils::value::value_to_string};
 
 /// JWT config structure for external usage
 #[derive(Deserialize, Serialize, JsonSchema, Debug, Clone)]
@@ -164,23 +163,6 @@ impl Provider for JWTProvider {
     fn get_name(&self) -> &str {
         &self.config.name
     }
-}
-
-/// Convert arbitrary JSON claim values into string form for attributes.
-/// Sanitizes the resulting string to remove control characters.
-fn sanitize_attribute_value(s: String) -> String {
-    s.chars().filter(|c| !c.is_control()).collect()
-}
-
-fn value_to_string(value: Value) -> String {
-    let raw = match value {
-        Value::String(s) => s,
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Null => "null".to_string(),
-        other => other.to_string(),
-    };
-    sanitize_attribute_value(raw)
 }
 
 /// Retrieves the certificates (JWKS) from a remote URI. Cached for 600s to avoid repeated fetches.
