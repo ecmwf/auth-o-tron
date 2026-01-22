@@ -35,3 +35,6 @@ base64 = "~0.22"
 mockito = "~1.7"
 # Metric
 prometheus = "0.14"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
