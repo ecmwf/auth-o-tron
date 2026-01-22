@@ -120,6 +120,113 @@
               "type": "string"
             }
           }
+        },
+        {
+          "description": "Attach static roles to specific users.",
+          "type": "object",
+          "required": [
+            "name",
+            "realm",
+            "roles",
+            "type"
+          ],
+          "properties": {
+            "name": {
+              "description": "A friendly name for logs.",
+              "type": "string"
+            },
+            "realm": {
+              "description": "Realm this augmenter applies to.",
+              "type": "string"
+            },
+            "roles": {
+              "description": "Map of role -> list of usernames that should receive it.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "plain"
+              ]
+            }
+          }
+        },
+        {
+          "description": "Conditionally adds roles and attributes based on username or existing roles.",
+          "type": "object",
+          "required": [
+            "augment",
+            "match",
+            "name",
+            "realm",
+            "type"
+          ],
+          "properties": {
+            "augment": {
+              "description": "Roles and attributes to inject when a match occurs.",
+              "type": "object",
+              "properties": {
+                "attributes": {
+                  "description": "Attributes to upsert onto the user.",
+                  "type": "object",
+                  "default": {},
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "roles": {
+                  "description": "Roles to append (deduped).",
+                  "type": "array",
+                  "default": [],
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "match": {
+              "description": "Matching rules that trigger augmentation.",
+              "type": "object",
+              "properties": {
+                "role": {
+                  "description": "Existing roles that should trigger augmentation.",
+                  "type": "array",
+                  "default": [],
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "username": {
+                  "description": "Usernames that should trigger augmentation.",
+                  "type": "array",
+                  "default": [],
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "name": {
+              "description": "A friendly name for logs.",
+              "type": "string"
+            },
+            "realm": {
+              "description": "Realm this augmenter applies to.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "plain_advanced"
+              ]
+            }
+          }
         }
       ]
     },

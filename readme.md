@@ -47,6 +47,31 @@ Auth-O-Tron uses the following terminology:
 
 It is important to understand that **roles** and **attributes** are used by a service to allow or restrict API access to different users. [TODO] **Scopes** are set by the user, on a token, to limit the capabilities of particular access tokens, which can make them more secure.
 
+## Augmenters
+
+Augmenters run after a user is authenticated to add or override roles and attributes. Static augmenters are helpful when upstream providers cannot supply all authorization data.
+
+**plain** maps roles directly to usernames.
+
+**plain_advanced** can match on usernames *or* existing roles, then add new roles (deduped) and upsert attributes. Example:
+
+```yaml
+augmenters:
+  - name: "Polytope plain admin augmenter"
+    type: "plain_advanced"
+    realm: "ecmwf"
+    match:
+      username: ["adam"]
+      role: ["admin"]
+    augment:
+      roles: ["observer", "admin"]
+      attributes:
+        team: polytope
+        location: cloud
+```
+
+Matching is inclusive: a hit on either `match.username` or `match.role` triggers the augmentation. Attributes overwrite existing keys; roles are appended without duplicates.
+
 ## FAQ
 
 ### What authentication methods are supported?

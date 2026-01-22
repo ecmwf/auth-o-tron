@@ -48,6 +48,7 @@ pub async fn build_app(config: ConfigV1) -> (Router, Arc<ConfigV1>) {
     (create_router(state), config)
 }
 
+#[allow(dead_code)]
 pub fn request_with_bearer(path: &str, token: &str, method: Method) -> Request<Body> {
     let mut request = Request::builder()
         .method(method)
@@ -64,6 +65,7 @@ pub fn request_with_bearer(path: &str, token: &str, method: Method) -> Request<B
     request
 }
 
+#[allow(dead_code)]
 pub fn request_with_basic(path: &str, credentials: &str, method: Method) -> Request<Body> {
     let encoded = general_purpose::STANDARD.encode(credentials);
     let mut request = Request::builder()
