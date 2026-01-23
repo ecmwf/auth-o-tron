@@ -28,7 +28,9 @@ pub struct PlainAugmenter {
 impl PlainAugmenter {
     /// Create a new `PlainAugmenter` from the config struct.
     pub fn new(config: &PlainAugmenterConfig) -> Self {
-        warn!("Plain augmenters are being deprecated in favour of advanced plain augmenters - please migrate your configuration");
+        warn!(
+            "Plain augmenters are being deprecated in favour of advanced plain augmenters - please migrate your configuration"
+        );
         info!(
             "Creating PlainAugmenter for realm='{}', name='{}'",
             config.realm, config.name

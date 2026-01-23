@@ -1,4 +1,7 @@
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use futures::lock::Mutex;
@@ -129,7 +132,10 @@ impl Augmenter for PlainAdvancedAugmenter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use figment::{Figment, providers::{Format, Yaml}};
+    use figment::{
+        Figment,
+        providers::{Format, Yaml},
+    };
 
     fn make_test_config(yaml: &str) -> PlainAdvancedAugmenterConfig {
         Figment::new()
@@ -166,11 +172,22 @@ augment:
         augmenter.augment(adam.clone()).await.unwrap();
 
         let user_guard = adam.lock().await;
-        assert_eq!(user_guard.roles.len(), 2, "Expected 2 roles, found {}", user_guard.roles.len());
+        assert_eq!(
+            user_guard.roles.len(),
+            2,
+            "Expected 2 roles, found {}",
+            user_guard.roles.len()
+        );
         assert!(user_guard.roles.contains(&"observer".to_string()));
         assert!(user_guard.roles.contains(&"admin".to_string()));
-        assert_eq!(user_guard.attributes.get("team"), Some(&"polytope".to_string()));
-        assert_eq!(user_guard.attributes.get("location"), Some(&"cloud".to_string()));
+        assert_eq!(
+            user_guard.attributes.get("team"),
+            Some(&"polytope".to_string())
+        );
+        assert_eq!(
+            user_guard.attributes.get("location"),
+            Some(&"cloud".to_string())
+        );
     }
 
     #[tokio::test]
@@ -190,8 +207,14 @@ augment:
         let user_guard = eve.lock().await;
         assert!(user_guard.roles.contains(&"observer".to_string()));
         assert!(user_guard.roles.contains(&"admin".to_string()));
-        assert_eq!(user_guard.attributes.get("team"), Some(&"polytope".to_string()));
-        assert_eq!(user_guard.attributes.get("location"), Some(&"cloud".to_string()));
+        assert_eq!(
+            user_guard.attributes.get("team"),
+            Some(&"polytope".to_string())
+        );
+        assert_eq!(
+            user_guard.attributes.get("location"),
+            Some(&"cloud".to_string())
+        );
     }
 
     #[tokio::test]
@@ -243,7 +266,10 @@ augment:
 
         augmenter.augment(user.clone()).await.unwrap();
         let user_guard = user.lock().await;
-        assert_eq!(user_guard.attributes.get("team"), Some(&"polytope".to_string()));
+        assert_eq!(
+            user_guard.attributes.get("team"),
+            Some(&"polytope".to_string())
+        );
     }
 
     #[tokio::test]
