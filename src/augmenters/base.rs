@@ -14,6 +14,7 @@ use tracing::info;
 
 use super::{
     ldap_augmenter::{LDAPAugmenter, LDAPAugmenterConfig},
+    plain_advanced_augmenter::{PlainAdvancedAugmenter, PlainAdvancedAugmenterConfig},
     plain_augmenter::{PlainAugmenter, PlainAugmenterConfig},
 };
 use crate::models::user::User;
@@ -27,6 +28,9 @@ pub enum AugmenterConfig {
 
     #[serde(rename = "plain")]
     PlainAugmenterConfig(PlainAugmenterConfig),
+
+    #[serde(rename = "plain_advanced")]
+    PlainAdvancedAugmenterConfig(PlainAdvancedAugmenterConfig),
 }
 
 /// An augmenter can add extra roles or info to an already-authenticated User.
@@ -45,6 +49,9 @@ pub fn create_auth_augmenter(config: &AugmenterConfig) -> Box<dyn Augmenter> {
     match config {
         AugmenterConfig::LDAPAugmenterConfig(cfg) => Box::new(LDAPAugmenter::new(cfg)),
         AugmenterConfig::PlainAugmenterConfig(cfg) => Box::new(PlainAugmenter::new(cfg)),
+        AugmenterConfig::PlainAdvancedAugmenterConfig(cfg) => {
+            Box::new(PlainAdvancedAugmenter::new(cfg))
+        }
     }
 }
 
