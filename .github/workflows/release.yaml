@@ -74,6 +74,8 @@ jobs:
       SKAFFOLD_DEFAULT_REPO: eccr.ecmwf.int/auth-o-tron
       # Set the CARGO_VERSION based on Cargo.toml
       CARGO_VERSION: ${{ needs.release-setup.outputs.package_version }}
+      # Disable default attestations to allow cross-platform manifests.
+      BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
     steps:
       - name: Check out code
         uses: actions/checkout@v3
