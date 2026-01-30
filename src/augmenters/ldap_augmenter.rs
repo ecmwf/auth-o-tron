@@ -73,10 +73,16 @@ fn parse_dn_components(input: &str) -> Vec<(String, String)> {
 
 /// Try to match a filter (DN fragment) against the role's DN components. If matched,
 /// return the path of attribute values from the matched ancestor down to the CN.
-fn match_filter_path(role_attrs: &[(String, String)], filter: &str) -> Result<Option<String>, String> {
+fn match_filter_path(
+    role_attrs: &[(String, String)],
+    filter: &str,
+) -> Result<Option<String>, String> {
     let filter_attrs = parse_dn_components(filter);
     if filter_attrs.is_empty() {
-        return Err(format!("Invalid LDAP filter '{}': expected key=value segments", filter));
+        return Err(format!(
+            "Invalid LDAP filter '{}': expected key=value segments",
+            filter
+        ));
     }
 
     // Support filters written root->leaf (common for humans) or leaf->root (DN order)
@@ -94,10 +100,9 @@ fn match_filter_path(role_attrs: &[(String, String)], filter: &str) -> Result<Op
 
         for start in 0..=role_attrs.len() - len {
             let window = &role_attrs[start..start + len];
-            let matches = window
-                .iter()
-                .zip(attrs.iter())
-                .all(|((rk, rv), (fk, fv))| rk.eq_ignore_ascii_case(fk) && rv.eq_ignore_ascii_case(fv));
+            let matches = window.iter().zip(attrs.iter()).all(|((rk, rv), (fk, fv))| {
+                rk.eq_ignore_ascii_case(fk) && rv.eq_ignore_ascii_case(fv)
+            });
 
             if matches {
                 let end = start + len - 1; // ancestor index within the matched window
@@ -145,7 +150,10 @@ fn validate_filters(filters: &Option<Vec<String>>) -> Result<(), String> {
     if let Some(filter_list) = filters {
         for filter in filter_list {
             if parse_dn_components(filter).is_empty() {
-                return Err(format!("Invalid LDAP filter '{}': expected key=value segments", filter));
+                return Err(format!(
+                    "Invalid LDAP filter '{}': expected key=value segments",
+                    filter
+                ));
             }
         }
     }
