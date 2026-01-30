@@ -105,10 +105,18 @@
                 "type": "string"
               }
             },
+            "bind_dn": {
+              "description": "Optional explicit bind DN; defaults to CN=<ldap_user>,OU=Connectors,OU=Service Accounts,DC=ecmwf,DC=int",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "ldap_password": {
               "type": "string"
             },
             "ldap_user": {
+              "description": "Service account name used to derive the default bind DN when bind_dn is not set",
               "type": "string"
             },
             "name": {
