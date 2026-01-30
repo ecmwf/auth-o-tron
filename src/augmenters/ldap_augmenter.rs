@@ -20,6 +20,7 @@ pub struct LDAPAugmenterConfig {
     pub uri: String,
     pub search_base: String,
     pub filter: Option<String>,
+    pub filters: Option<Vec<String>>, // When provided, prefix roles with "filter/CN"
     pub ldap_user: String,
     pub ldap_password: String,
 }
@@ -53,13 +54,115 @@ fn parse_cn(role: &str) -> Option<String> {
     })
 }
 
+/// Split a DN (or DN fragment) into ordered key/value components.
+fn parse_dn_components(input: &str) -> Vec<(String, String)> {
+    input
+        .split(',')
+        .filter_map(|part| {
+            let mut split = part.splitn(2, '=');
+            match (split.next().map(str::trim), split.next().map(str::trim)) {
+                (Some(k), Some(v)) if !k.is_empty() && !v.is_empty() => {
+                    Some((k.to_string(), v.to_string()))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Try to match a filter (DN fragment) against the role's DN components. If matched,
+/// return the path of attribute values from the matched ancestor down to the CN.
+fn match_filter_path(role_attrs: &[(String, String)], filter: &str) -> Result<Option<String>, String> {
+    let filter_attrs = parse_dn_components(filter);
+    if filter_attrs.is_empty() {
+        return Err(format!("Invalid LDAP filter '{}': expected key=value segments", filter));
+    }
+
+    // Support filters written root->leaf (common for humans) or leaf->root (DN order)
+    // by attempting both orientations.
+    let mut orientations = vec![filter_attrs.clone()];
+    let mut reversed = filter_attrs;
+    reversed.reverse();
+    orientations.push(reversed);
+
+    for attrs in orientations {
+        let len = attrs.len();
+        if len == 0 || len > role_attrs.len() {
+            continue;
+        }
+
+        for start in 0..=role_attrs.len() - len {
+            let window = &role_attrs[start..start + len];
+            let matches = window
+                .iter()
+                .zip(attrs.iter())
+                .all(|((rk, rv), (fk, fv))| rk.eq_ignore_ascii_case(fk) && rv.eq_ignore_ascii_case(fv));
+
+            if matches {
+                let end = start + len - 1; // ancestor index within the matched window
+                let path: Vec<String> = role_attrs[..=end]
+                    .iter()
+                    .rev()
+                    .map(|(_, v)| v.clone())
+                    .collect();
+                return Ok(Some(path.join("/")));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn collect_roles_from_dn(
+    role_dn: &str,
+    single_filter: &Option<String>,
+    filters: &Option<Vec<String>>,
+) -> Vec<String> {
+    let role_attrs = parse_dn_components(role_dn);
+    let Some(cn) = parse_cn(role_dn) else {
+        return Vec::new();
+    };
+
+    if let Some(filter_list) = filters {
+        let mut roles = Vec::new();
+        for filter in filter_list {
+            if let Ok(Some(path)) = match_filter_path(&role_attrs, filter) {
+                roles.push(path);
+            }
+        }
+        return roles;
+    }
+
+    if single_filter.as_deref().is_none_or(|f| role_dn.contains(f)) {
+        return vec![cn];
+    }
+
+    Vec::new()
+}
+
+fn validate_filters(filters: &Option<Vec<String>>) -> Result<(), String> {
+    if let Some(filter_list) = filters {
+        for filter in filter_list {
+            if parse_dn_components(filter).is_empty() {
+                return Err(format!("Invalid LDAP filter '{}': expected key=value segments", filter));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// This function looks up user roles in LDAP, caching results for 120 seconds.
 /// We bind with a service account, search for the user by `uid`, and parse "memberOf" attributes.
+/// With `filters` configured, we parse each filter as a DN fragment; when it matches part of the
+/// user's DN we emit the path of attribute values from that match down to the CN. Legacy single
+/// `filter` keeps returning just the CN when matched.
 #[cached(time = 120, sync_writes = "default")]
 async fn retrieve_ldap_user_roles(
     config: LDAPAugmenterConfig,
     uid: String,
 ) -> Result<Vec<String>, String> {
+    validate_filters(&config.filters)?;
+
     debug!(
         "Connecting to LDAP at {}, searching for user CN={}",
         config.uri, uid
@@ -99,11 +202,8 @@ async fn retrieve_ldap_user_roles(
         let search_entry = SearchEntry::construct(entry);
         if let Some(member_of) = search_entry.attrs.get("memberOf") {
             for role_dn in member_of {
-                // If a filter is provided, only capture roles containing that string
-                let passes_filter = config.filter.as_deref().is_none_or(|f| role_dn.contains(f));
-                if passes_filter && let Some(cn) = parse_cn(role_dn) {
-                    roles.push(cn);
-                }
+                let mut extracted = collect_roles_from_dn(role_dn, &config.filter, &config.filters);
+                roles.append(&mut extracted);
             }
         }
     }
@@ -184,5 +284,99 @@ mod tests {
     fn test_parse_cn_multiple_entries() {
         let dn = "OU=SomeOU,CN=RoleA,CN=RoleB,DC=example,DC=com";
         assert_eq!(parse_cn(dn), Some("RoleA".to_string()));
+    }
+
+    #[test]
+    fn test_parse_dn_components_basic() {
+        let parts = parse_dn_components("OU=TeamA,CN=Role");
+        assert_eq!(
+            parts,
+            vec![
+                ("OU".to_string(), "TeamA".to_string()),
+                ("CN".to_string(), "Role".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn test_validate_filters_rejects_malformed() {
+        let filters = Some(vec!["Invalid".to_string(), "OU=TeamB".to_string()]);
+        assert!(validate_filters(&filters).is_err());
+    }
+
+    /// Test legacy single-filter behaviour keeps returning just the CN.
+    #[test]
+    fn test_collect_roles_single_filter() {
+        let roles = collect_roles_from_dn(
+            "CN=SomeRole,OU=TeamA,DC=example,DC=com",
+            &Some("TeamA".to_string()),
+            &None,
+        );
+
+        assert_eq!(roles, vec!["SomeRole".to_string()]);
+    }
+
+    /// Test multi-filter behaviour returns path/CN for matches (ancestor includes children).
+    #[test]
+    fn test_collect_roles_multiple_filters() {
+        let roles = collect_roles_from_dn(
+            "CN=SomeRole,OU=TeamB,OU=TeamA,DC=example,DC=com",
+            &None,
+            &Some(vec!["OU=TeamA".to_string(), "OU=TeamB".to_string()]),
+        );
+
+        assert_eq!(
+            roles,
+            vec![
+                "TeamA/TeamB/SomeRole".to_string(),
+                "TeamB/SomeRole".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_collect_roles_multiple_filters_multi_attribute_root_order() {
+        let roles = collect_roles_from_dn(
+            "CN=SomeRole,OU=TeamB,OU=TeamA,DC=example,DC=com",
+            &None,
+            &Some(vec!["OU=TeamA,OU=TeamB".to_string()]),
+        );
+
+        assert_eq!(roles, vec!["TeamA/TeamB/SomeRole".to_string()]);
+    }
+
+    #[test]
+    fn test_collect_roles_multiple_filters_multi_attribute_dn_order() {
+        let roles = collect_roles_from_dn(
+            "CN=SomeRole,OU=TeamB,OU=TeamA,DC=example,DC=com",
+            &None,
+            &Some(vec!["OU=TeamB,OU=TeamA".to_string()]),
+        );
+
+        assert_eq!(roles, vec!["TeamA/TeamB/SomeRole".to_string()]);
+    }
+
+    #[test]
+    fn test_collect_roles_multiple_filters_non_contiguous_no_match() {
+        let roles = collect_roles_from_dn(
+            "CN=SomeRole,OU=TeamC,OU=TeamB,OU=TeamA,DC=example,DC=com",
+            &None,
+            &Some(vec!["OU=TeamA,OU=TeamC".to_string()]),
+        );
+
+        // Filter fragments must be contiguous in the role DN; this should not match.
+        assert!(roles.is_empty());
+    }
+
+    /// Test multi-filter configuration yields no roles when nothing matches.
+    #[test]
+    fn test_collect_roles_multiple_filters_no_match() {
+        let roles = collect_roles_from_dn(
+            "CN=SomeRole,OU=TeamC,DC=example,DC=com",
+            &None,
+            &Some(vec!["OU=TeamA".to_string(), "OU=TeamB".to_string()]),
+        );
+
+        assert!(roles.is_empty());
     }
 }

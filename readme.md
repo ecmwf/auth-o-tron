@@ -72,6 +72,26 @@ augmenters:
 
 Matching is inclusive: a hit on either `match.username` or `match.role` triggers the augmentation. Attributes overwrite existing keys; roles are appended without duplicates.
 
+**ldap** looks up `memberOf` groups for a user and turns them into roles. You can:
+
+* Use legacy `filter` to only accept DNs containing the string and emit the CN (e.g. `CN=TeamA` → `TeamA`).
+* Or provide `filters` (list of DN fragments like `OU=TeamA,OU=TeamB`). Each filter is parsed as key/value components. When a filter matches part of a role's DN, we emit the path of attribute values from that match down to the CN (e.g. `OU=TeamA,OU=TeamB,CN=Role` with filter `OU=TeamA` → `TeamA/TeamB/Role`; filter `OU=TeamB` → `TeamB/Role`). Invalid filters are rejected.
+
+```yaml
+augmenters:
+  - name: "LDAP roles"
+    type: "ldap"
+    realm: "ecmwf"
+    uri: "ldaps://ldap.example.com"
+    search_base: "DC=example,DC=com"
+    ldap_user: "svc_ldap"
+    ldap_password: "..."
+    # Legacy single filter keeps emitting bare CN values.
+    # filter: "OU=Teams"
+    # New multi-filter emits filter/CN for matches.
+    filters: ["OU=Platform", "OU=Data"]
+```
+
 ## FAQ
 
 ### What authentication methods are supported?

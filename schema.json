@@ -95,6 +95,16 @@
                 "null"
               ]
             },
+            "filters": {
+              "description": "Separate filters of LDAP RDN format (e.g. 'OU=Resources,OU=Common')",
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string"
+              }
+            },
             "ldap_password": {
               "type": "string"
             },
