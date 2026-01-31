@@ -75,7 +75,7 @@ Matching is inclusive: a hit on either `match.username` or `match.role` triggers
 **ldap** looks up `memberOf` groups for a user and turns them into roles. You can:
 
 * Use legacy `filter` to only accept DNs containing the string and emit the CN (e.g. `CN=TeamA` → `TeamA`).
-* Or provide `filters` (list of DN fragments like `OU=TeamA,OU=TeamB`). Each filter is parsed as key/value components. When a filter matches part of a role's DN, we emit the path of attribute values from that match down to the CN (e.g. `OU=TeamA,OU=TeamB,CN=Role` with filter `OU=TeamA` → `TeamA/TeamB/Role`; filter `OU=TeamB` → `TeamB/Role`). Invalid filters are rejected.
+* Or provide `filters` (list of DN fragments like `OU=TeamA,OU=TeamB`). Each filter is parsed as key/value components. When a filter matches part of a role's DN, we emit the path of attribute values from that match down to the CN, prefixed with `/` (e.g. `OU=TeamA,OU=TeamB,CN=Role` with filter `OU=TeamA` → `/TeamA/TeamB/Role`; filter `OU=TeamB` → `/TeamB/Role`). Invalid filters are rejected.
 * `ldap_user` is used to derive the default bind DN; setting `bind_dn` overrides that default if you need a fully custom DN.
 
 ```yaml
