@@ -22,7 +22,11 @@ pub fn init_logging(logging_config: &LoggingConfig) {
             // JSON output
             tracing_subscriber::registry()
                 .with(filter_layer)
-                .with(fmt::layer().json()) // structured JSON
+                .with(
+                    fmt::layer()
+                        .json()
+                        .flatten_event(true), // lift event fields to the top level
+                )
                 .init();
         }
         "console" => {
