@@ -346,50 +346,72 @@ impl Auth {
         None
     }
 
+    async fn run_augmenter(
+        &self,
+        augmenter: &dyn Augmenter,
+        user: Arc<Mutex<User>>,
+        metrics: &Metrics,
+        realm: &str,
+    ) {
+        let metrics = metrics.clone();
+        let name = augmenter.get_name().to_string();
+        let aug_type = augmenter.get_type().to_string();
+
+        let start = Instant::now();
+        let result = augmenter.augment(user).await;
+        let duration = start.elapsed().as_secs_f64();
+
+        match result {
+            Ok(_) => {
+                metrics.record_augmenter_attempt(&name, &aug_type, realm, "success");
+                metrics.record_augmenter_duration(&aug_type, realm, duration);
+            }
+            Err(e) => {
+                warn!("Augmenter '{}' failed: {}", name, e);
+                metrics.record_augmenter_attempt(&name, &aug_type, realm, "error");
+                metrics.record_augmenter_duration(&aug_type, realm, duration);
+            }
+        }
+    }
+
     async fn check_augmenters(&self, user: User, metrics: &Metrics) -> Option<User> {
         info!("Applying augmentations for user '{}'", user.username);
         let realm = user.realm.clone();
         let user = Arc::new(Mutex::new(user));
 
-        let futures = self
+        // Partition: run advanced-plain synchronously afterwards
+        let (serial, parallel): (Vec<_>, Vec<_>) = self
             .augmenters
             .iter()
             .filter(|a| a.get_realm() == realm)
-            .map(|augmenter| {
-                let metrics = metrics.clone();
-                let realm = realm.clone();
-                let name = augmenter.get_name().to_string();
-                let aug_type = augmenter.get_type().to_string();
-                let user_ref = user.clone();
+            .partition(|a| a.get_type().eq_ignore_ascii_case("plain_advanced"));
 
-                async move {
-                    let start = Instant::now();
-                    let result = augmenter.augment(user_ref).await;
-                    let duration = start.elapsed().as_secs_f64();
+        // Run non-advanced in parallel
+        join_all(
+            parallel
+                .iter()
+                .map(|aug| self.run_augmenter(aug.as_ref(), user.clone(), metrics, &realm)),
+        )
+        .await;
 
-                    match result {
-                        Ok(_) => {
-                            metrics.record_augmenter_attempt(&name, &aug_type, &realm, "success");
-                            metrics.record_augmenter_duration(&aug_type, &realm, duration);
-                        }
-                        Err(e) => {
-                            warn!("Augmenter '{}' failed: {}", name, e);
-                            metrics.record_augmenter_attempt(&name, &aug_type, &realm, "error");
-                            metrics.record_augmenter_duration(&aug_type, &realm, duration);
-                        }
-                    }
-                }
-            });
+        // Then run advanced-plain synchronously
+        for aug in serial {
+            self.run_augmenter(aug.as_ref(), user.clone(), metrics, &realm)
+                .await;
+        }
 
-        let _ = join_all(futures).await;
-
-        // Return the authenticated user.
         Some(user.lock().await.clone())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::augmenters::plain_advanced_augmenter::{
+        PlainAdvancedAugmenter,
+        PlainAdvancedAugmenterAugment,
+        PlainAdvancedAugmenterConfig,
+        PlainAdvancedAugmenterMatcher,
+    };
     use crate::augmenters::plain_augmenter::{PlainAugmenter, PlainAugmenterConfig};
 
     use super::*;
@@ -397,6 +419,7 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use tokio::time::{sleep, Duration};
 
     /// Checks if a metric's labels match all the expected label pairs.
     ///
@@ -930,6 +953,90 @@ mod tests {
         };
         let user = auth.check_augmenters(user, &metrics).await.unwrap();
         assert!(user.roles.is_empty());
+    }
+
+    struct DelayedPlainAugmenter {
+        name: String,
+        realm: String,
+        username: String,
+        role: String,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl Augmenter for DelayedPlainAugmenter {
+        async fn augment(&self, user: Arc<Mutex<User>>) -> Result<(), String> {
+            let user_guard = user.lock().await;
+            if user_guard.realm != self.realm || user_guard.username != self.username {
+                return Ok(());
+            }
+            drop(user_guard);
+
+            sleep(self.delay).await;
+
+            let mut user_guard = user.lock().await;
+            user_guard.roles.push(self.role.clone());
+            Ok(())
+        }
+
+        fn get_name(&self) -> &str {
+            &self.name
+        }
+
+        fn get_type(&self) -> &str {
+            "plain"
+        }
+
+        fn get_realm(&self) -> &str {
+            &self.realm
+        }
+    }
+
+    #[tokio::test]
+    async fn test_plain_then_advanced_runs_sequentially() {
+        let delayed_plain = DelayedPlainAugmenter {
+            name: "delayed_plain".to_string(),
+            realm: "r1".to_string(),
+            username: "bob".to_string(),
+            role: "base".to_string(),
+            delay: Duration::from_millis(100),
+        };
+
+        let advanced_config = PlainAdvancedAugmenterConfig {
+            name: "advanced".to_string(),
+            realm: "r1".to_string(),
+            r#match: PlainAdvancedAugmenterMatcher {
+                role: vec!["base".to_string()],
+                ..Default::default()
+            },
+            augment: PlainAdvancedAugmenterAugment {
+                roles: vec!["derived".to_string()],
+                ..Default::default()
+            },
+        };
+
+        let auth = Auth {
+            providers: vec![],
+            augmenters: vec![
+                Box::new(delayed_plain),
+                Box::new(PlainAdvancedAugmenter::new(&advanced_config)),
+            ],
+            config: AuthConfig { timeout_in_ms: 5 },
+            token_store: Arc::new(DummyStore),
+        };
+
+        let metrics = Metrics::new();
+        let user = User {
+            username: "bob".to_string(),
+            roles: vec![],
+            realm: "r1".to_string(),
+            ..Default::default()
+        };
+
+        let user = auth.check_augmenters(user, &metrics).await.unwrap();
+
+        assert!(user.roles.contains(&"base".to_string()));
+        assert!(user.roles.contains(&"derived".to_string()));
     }
     /// A dummy Provider implementation for testing.
     struct DummyProvider {

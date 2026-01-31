@@ -51,6 +51,8 @@ It is important to understand that **roles** and **attributes** are used by a se
 
 Augmenters run after a user is authenticated to add or override roles and attributes. Static augmenters are helpful when upstream providers cannot supply all authorization data.
 
+Execution order within a realm: standard augmenters (`plain`, `ldap`) run in parallel; `plain_advanced` augmenters run afterwards, one-by-one. This lets advanced rules depend on roles added by earlier augmenters.
+
 **plain** maps roles directly to usernames.
 
 **plain_advanced** can match on usernames *or* existing roles, then add new roles (deduped) and upsert attributes. Example:
