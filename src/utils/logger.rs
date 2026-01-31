@@ -23,9 +23,7 @@ pub fn init_logging(logging_config: &LoggingConfig) {
             tracing_subscriber::registry()
                 .with(filter_layer)
                 .with(
-                    fmt::layer()
-                        .json()
-                        .flatten_event(true), // lift event fields to the top level
+                    fmt::layer().json().flatten_event(true), // lift event fields to the top level
                 )
                 .init();
         }
