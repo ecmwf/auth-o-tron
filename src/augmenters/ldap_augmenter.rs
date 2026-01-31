@@ -133,7 +133,7 @@ fn collect_roles_from_dn(
         let mut roles = Vec::new();
         for filter in filter_list {
             if let Ok(Some(path)) = match_filter_path(&role_attrs, filter) {
-                roles.push(path);
+                roles.push(format!("/{}", path));
             }
         }
         return roles;
@@ -382,8 +382,8 @@ mod tests {
         assert_eq!(
             roles,
             vec![
-                "TeamA/TeamB/SomeRole".to_string(),
-                "TeamB/SomeRole".to_string()
+                "/TeamA/TeamB/SomeRole".to_string(),
+                "/TeamB/SomeRole".to_string()
             ]
         );
     }
@@ -396,7 +396,7 @@ mod tests {
             &Some(vec!["OU=TeamA,OU=TeamB".to_string()]),
         );
 
-        assert_eq!(roles, vec!["TeamA/TeamB/SomeRole".to_string()]);
+        assert_eq!(roles, vec!["/TeamA/TeamB/SomeRole".to_string()]);
     }
 
     #[test]
@@ -407,7 +407,7 @@ mod tests {
             &Some(vec!["OU=TeamB,OU=TeamA".to_string()]),
         );
 
-        assert_eq!(roles, vec!["TeamA/TeamB/SomeRole".to_string()]);
+        assert_eq!(roles, vec!["/TeamA/TeamB/SomeRole".to_string()]);
     }
 
     #[test]
