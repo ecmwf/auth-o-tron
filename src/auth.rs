@@ -407,9 +407,7 @@ impl Auth {
 #[cfg(test)]
 mod tests {
     use crate::augmenters::plain_advanced_augmenter::{
-        PlainAdvancedAugmenter,
-        PlainAdvancedAugmenterAugment,
-        PlainAdvancedAugmenterConfig,
+        PlainAdvancedAugmenter, PlainAdvancedAugmenterAugment, PlainAdvancedAugmenterConfig,
         PlainAdvancedAugmenterMatcher,
     };
     use crate::augmenters::plain_augmenter::{PlainAugmenter, PlainAugmenterConfig};
@@ -419,7 +417,7 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::{Duration, sleep};
 
     /// Checks if a metric's labels match all the expected label pairs.
     ///
