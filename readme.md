@@ -51,6 +51,8 @@ It is important to understand that **roles** and **attributes** are used by a se
 
 Augmenters run after a user is authenticated to add or override roles and attributes. Static augmenters are helpful when upstream providers cannot supply all authorization data.
 
+Execution order within a realm: standard augmenters (`plain`, `ldap`) run in parallel; `plain_advanced` augmenters run afterwards, one-by-one. This lets advanced rules depend on roles added by earlier augmenters.
+
 **plain** maps roles directly to usernames.
 
 **plain_advanced** can match on usernames *or* existing roles, then add new roles (deduped) and upsert attributes. Example:
@@ -71,6 +73,29 @@ augmenters:
 ```
 
 Matching is inclusive: a hit on either `match.username` or `match.role` triggers the augmentation. Attributes overwrite existing keys; roles are appended without duplicates.
+
+**ldap** looks up `memberOf` groups for a user and turns them into roles. You can:
+
+* Use legacy `filter` to only accept DNs containing the string and emit the CN (e.g. `CN=TeamA` → `TeamA`).
+* Or provide `filters` (list of DN fragments like `OU=TeamA,OU=TeamB`). Each filter is parsed as key/value components. When a filter matches part of a role's DN, we emit the path of attribute values from that match down to the CN, prefixed with `/` (e.g. `OU=TeamA,OU=TeamB,CN=Role` with filter `OU=TeamA` → `/TeamA/TeamB/Role`; filter `OU=TeamB` → `/TeamB/Role`). Invalid filters are rejected.
+* `ldap_user` is used to derive the default bind DN; setting `bind_dn` overrides that default if you need a fully custom DN.
+
+```yaml
+augmenters:
+  - name: "LDAP roles"
+    type: "ldap"
+    realm: "ecmwf"
+    uri: "ldaps://ldap.example.com"
+    search_base: "DC=example,DC=com"
+    ldap_user: "svc_ldap"
+    ldap_password: "..."
+    # Optional explicit bind DN (defaults to CN=<ldap_user>,OU=Connectors,OU=Service Accounts,DC=ecmwf,DC=int)
+    # bind_dn: "CN=svc_ldap,OU=Custom,DC=example,DC=com"
+    # Legacy single filter keeps emitting bare CN values.
+    # filter: "OU=Teams"
+    # New multi-filter emits filter/CN for matches.
+    filters: ["OU=Platform", "OU=Data"]
+```
 
 ## FAQ
 
