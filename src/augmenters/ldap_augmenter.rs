@@ -20,7 +20,7 @@ pub struct LDAPAugmenterConfig {
     pub uri: String,
     pub search_base: String,
     pub filter: Option<String>,
-    pub filters: Option<Vec<String>>, // When provided, prefix roles with "filter/CN"
+    pub filters: Option<Vec<String>>, // When provided, roles are derived as value-paths (e.g. "/TeamA/TeamB/Role")
     pub bind_dn: Option<String>, // Optional explicit bind DN; overrides ldap_user-derived default
     pub ldap_user: String,
     pub ldap_password: String,
