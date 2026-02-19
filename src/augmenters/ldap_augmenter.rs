@@ -21,8 +21,7 @@ pub struct LDAPAugmenterConfig {
     pub search_base: String,
     pub filter: Option<String>,
     pub filters: Option<Vec<String>>, // When provided, roles are derived as value-paths (e.g. "/TeamA/TeamB/Role")
-    pub bind_dn: Option<String>, // Optional explicit bind DN; overrides ldap_user-derived default
-    pub ldap_user: String,
+    pub bind_dn: Option<String>,      // LDAP User DN to bind with
     pub ldap_password: String,
 }
 
@@ -160,17 +159,6 @@ fn validate_filters(filters: &Option<Vec<String>>) -> Result<(), String> {
     Ok(())
 }
 
-fn compute_bind_dn(config: &LDAPAugmenterConfig) -> String {
-    if let Some(custom) = &config.bind_dn {
-        return custom.clone();
-    }
-
-    format!(
-        "CN={},OU=Connectors,OU=Service Accounts,DC=ecmwf,DC=int",
-        &config.ldap_user
-    )
-}
-
 /// This function looks up user roles in LDAP, caching results for 120 seconds.
 /// We bind with a service account, search for the user by `uid`, and parse "memberOf" attributes.
 /// With `filters` configured, we parse each filter as a DN fragment; when it matches part of the
@@ -194,7 +182,10 @@ async fn retrieve_ldap_user_roles(
     ldap3::drive!(conn);
 
     // We do a simple bind using the configured service account
-    let bind_dn = compute_bind_dn(&config);
+    let bind_dn = &config
+        .bind_dn
+        .as_ref()
+        .ok_or_else(|| "No bind DN provided for LDAP augmenter.".to_string())?;
     ldap.simple_bind(&bind_dn, &config.ldap_password)
         .await
         .map_err(|e| e.to_string())?
@@ -319,43 +310,6 @@ mod tests {
     fn test_validate_filters_rejects_malformed() {
         let filters = Some(vec!["Invalid".to_string(), "OU=TeamB".to_string()]);
         assert!(validate_filters(&filters).is_err());
-    }
-
-    #[test]
-    fn test_compute_bind_dn_default() {
-        let cfg = LDAPAugmenterConfig {
-            name: "test".to_string(),
-            realm: "r".to_string(),
-            uri: "u".to_string(),
-            search_base: "dc".to_string(),
-            filter: None,
-            filters: None,
-            bind_dn: None,
-            ldap_user: "svc".to_string(),
-            ldap_password: "p".to_string(),
-        };
-
-        assert_eq!(
-            compute_bind_dn(&cfg),
-            "CN=svc,OU=Connectors,OU=Service Accounts,DC=ecmwf,DC=int"
-        );
-    }
-
-    #[test]
-    fn test_compute_bind_dn_override() {
-        let cfg = LDAPAugmenterConfig {
-            name: "test".to_string(),
-            realm: "r".to_string(),
-            uri: "u".to_string(),
-            search_base: "dc".to_string(),
-            filter: None,
-            filters: None,
-            bind_dn: Some("CN=custom,DC=example".to_string()),
-            ldap_user: "svc".to_string(),
-            ldap_password: "p".to_string(),
-        };
-
-        assert_eq!(compute_bind_dn(&cfg), "CN=custom,DC=example");
     }
 
     /// Test legacy single-filter behaviour keeps returning just the CN.

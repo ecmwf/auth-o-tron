@@ -964,11 +964,14 @@ mod tests {
     #[async_trait]
     impl Augmenter for DelayedPlainAugmenter {
         async fn augment(&self, user: Arc<Mutex<User>>) -> Result<(), String> {
-            let user_guard = user.lock().await;
-            if user_guard.realm != self.realm || user_guard.username != self.username {
+            let mismatch = {
+                let u = user.lock().await;
+                u.realm != self.realm || u.username != self.username
+            }; // guard is dropped here
+
+            if mismatch {
                 return Ok(());
             }
-            drop(user_guard);
 
             sleep(self.delay).await;
 
