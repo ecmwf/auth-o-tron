@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::Instant;
 
 use crate::augmenters::{Augmenter, AugmenterConfig, create_auth_augmenter};
@@ -8,10 +9,13 @@ use crate::metrics::{Metrics, MetricsRecorder};
 use crate::models::user::User;
 use crate::providers::{Provider, ProviderConfig, create_auth_provider};
 use crate::store::Store;
+use crate::utils::log_throttle::should_emit;
 use futures::future::{FutureExt, join_all, select_ok};
 use futures::lock::Mutex;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
+
+const AUTH_LOG_SUPPRESSION_WINDOW: Duration = Duration::from_secs(30);
 
 /// Holds all authentication providers, augmenters, and a reference to the store.
 pub struct Auth {
@@ -42,20 +46,36 @@ impl Auth {
         token_store: Arc<dyn Store>,
         config: AuthConfig,
     ) -> Self {
-        info!("Creating auth providers...");
+        info!(
+            event_name = "auth.initialization.providers.started",
+            event_domain = "auth",
+            "creating auth providers"
+        );
         // Convert configs into providers
         let mut providers: Vec<Box<dyn Provider>> =
             provider_config.iter().map(create_auth_provider).collect();
 
         // Only add token store as provider if it's enabled
         if token_store.is_enabled() {
-            info!("Token store is enabled, adding as Bearer provider");
+            info!(
+                event_name = "auth.initialization.providers.token_store_enabled",
+                event_domain = "auth",
+                "token store is enabled; adding bearer provider"
+            );
             providers.push(Box::new(token_store.clone()) as Box<dyn Provider>);
         } else {
-            info!("Token store is disabled, skipping as provider");
+            info!(
+                event_name = "auth.initialization.providers.token_store_disabled",
+                event_domain = "auth",
+                "token store is disabled; skipping bearer provider"
+            );
         }
 
-        info!("Creating auth augmenters...");
+        info!(
+            event_name = "auth.initialization.augmenters.started",
+            event_domain = "auth",
+            "creating auth augmenters"
+        );
         let augmenters = augmenter_config.iter().map(create_auth_augmenter).collect();
 
         Auth {
@@ -139,7 +159,16 @@ impl Auth {
         let start = Instant::now();
 
         if auth_header.trim().is_empty() {
-            warn!("No Authorization header provided.");
+            if let Some(suppressed_count) =
+                should_emit("auth.header.missing", AUTH_LOG_SUPPRESSION_WINDOW)
+            {
+                debug!(
+                    event_name = "auth.header.missing",
+                    event_domain = "auth",
+                    suppressed_count,
+                    "authorization header is missing"
+                );
+            }
             // For metrics, use "unknown" since we don't know the realm yet
             metrics.record_auth_attempt("no_auth_header", "unknown");
             metrics.record_auth_duration(
@@ -152,10 +181,11 @@ impl Auth {
 
         // Log the client's IP address for debugging purposes.
         debug!(
-            "Authenticating request with auth header {} from IP {} Realm filter {}",
-            auth_header,
-            ip,
-            realm_filter.unwrap_or("None")
+            event_name = "auth.request.started",
+            event_domain = "auth",
+            client_ip = ip,
+            realm_filter = realm_filter.unwrap_or("none"),
+            "auth request received"
         );
 
         // Use a HashMap with owned Strings for credentials.
@@ -168,15 +198,28 @@ impl Auth {
             let trimmed = part.trim();
             // Discard duplicate trimmed parts
             if !seen_trimmed.insert(trimmed.to_string()) {
-                warn!(
-                    "Duplicate auth header part detected and discarded: '{}'",
-                    trimmed
+                debug!(
+                    event_name = "auth.header.duplicate_part_discarded",
+                    event_domain = "auth",
+                    "duplicate authorization header part detected and discarded"
                 );
                 continue;
             }
             unique_count += 1;
             if unique_count > 3 {
-                warn!("Too many unique Authorization header credentials (>{})", 3);
+                if let Some(suppressed_count) = should_emit(
+                    "auth.header.too_many_credentials",
+                    AUTH_LOG_SUPPRESSION_WINDOW,
+                ) {
+                    warn!(
+                        event_name = "auth.header.invalid",
+                        event_domain = "auth",
+                        reason = "too_many_credentials",
+                        suppressed_count,
+                        max_credentials = 3,
+                        "too many unique authorization credentials"
+                    );
+                }
                 metrics.record_auth_attempt("invalid_header", "unknown");
                 metrics.record_auth_duration(
                     start.elapsed().as_secs_f64(),
@@ -188,7 +231,17 @@ impl Auth {
             // Each part should be in the format: <scheme> <credentials>
             let parts: Vec<&str> = trimmed.split_whitespace().collect();
             if parts.len() != 2 {
-                warn!("Invalid auth part format: '{}'", trimmed);
+                if let Some(suppressed_count) =
+                    should_emit("auth.header.invalid_format", AUTH_LOG_SUPPRESSION_WINDOW)
+                {
+                    warn!(
+                        event_name = "auth.header.invalid",
+                        event_domain = "auth",
+                        reason = "invalid_format",
+                        suppressed_count,
+                        "invalid authorization header format"
+                    );
+                }
                 metrics.record_auth_attempt("invalid_header", "unknown");
                 metrics.record_auth_duration(
                     start.elapsed().as_secs_f64(),
@@ -225,6 +278,16 @@ impl Auth {
         let user_realm = &user.realm;
         metrics.record_auth_attempt("success", user_realm);
         metrics.record_auth_duration(start.elapsed().as_secs_f64(), "success", user_realm);
+        info!(
+            event_name = "auth.request.authenticated",
+            event_domain = "auth",
+            username = user.username.as_str(),
+            realm = user.realm.as_str(),
+            roles_count = user.roles.len(),
+            attributes_count = user.attributes.len(),
+            scopes_services_count = user.scopes.as_ref().map_or(0, |m| m.len()),
+            "authentication request succeeded"
+        );
 
         Some(user)
     }
@@ -240,6 +303,7 @@ impl Auth {
         for (scheme, credential) in creds_map.into_iter() {
             // Set the timeout duration based on the configuration.
             let timeout_duration = std::time::Duration::from_millis(self.config.timeout_in_ms);
+            let timeout_ms = self.config.timeout_in_ms;
             // Filter providers by matching type and (if provided) realm.
             let futures = self
                 .providers
@@ -297,7 +361,13 @@ impl Auth {
                                     &provider_realm,
                                     duration,
                                 );
-                                debug!("Provider '{}' failed to authenticate: {}", name, e);
+                                debug!(
+                                    event_name = "auth.provider.failed",
+                                    event_domain = "auth",
+                                    provider_name = name.as_str(),
+                                    error = e.as_str(),
+                                    "provider failed to authenticate request"
+                                );
                                 Err(format!("Provider '{}' failed: {}", name, e))
                             }
                             Err(_) => {
@@ -307,7 +377,13 @@ impl Auth {
                                     &provider_realm,
                                     "timeout",
                                 );
-                                debug!("Provider '{}' timed out during authentication", name);
+                                debug!(
+                                    event_name = "auth.provider.timeout",
+                                    event_domain = "auth",
+                                    provider_name = name.as_str(),
+                                    timeout_ms,
+                                    "provider authentication timed out"
+                                );
                                 Err(format!("Provider '{}' timed out", name))
                             }
                         }
@@ -316,11 +392,14 @@ impl Auth {
                 })
                 .collect::<Vec<_>>();
 
-            // If no providers matched, log a warning and try the next credential.
+            // If no providers matched, try the next credential.
             if futures.is_empty() {
-                warn!(
-                    "No providers found for auth scheme '{}' with realm filter {:?}",
-                    scheme, realm_filter
+                debug!(
+                    event_name = "auth.provider.not_found",
+                    event_domain = "auth",
+                    scheme = scheme.as_str(),
+                    realm_filter = realm_filter.unwrap_or("none"),
+                    "no providers matched scheme and realm filter"
                 );
                 continue;
             }
@@ -328,17 +407,29 @@ impl Auth {
             // Use select_ok to await the first future that completes successfully.
             match select_ok(futures).await {
                 Ok(((provider_name, user, _), _)) => {
-                    info!(
-                        "Provider '{}' successfully authenticated user '{}'",
-                        provider_name, user.username
+                    debug!(
+                        event_name = "auth.provider.success",
+                        event_domain = "auth",
+                        provider_name = provider_name.as_str(),
+                        realm = user.realm.as_str(),
+                        "provider authenticated request"
                     );
                     return Some(user);
                 }
                 Err(e) => {
-                    warn!(
-                        "All providers failed for scheme '{}'; last error: {}",
-                        scheme, e
-                    );
+                    if let Some(suppressed_count) = should_emit(
+                        &format!("auth.provider.all_failed.{}", scheme.to_lowercase()),
+                        AUTH_LOG_SUPPRESSION_WINDOW,
+                    ) {
+                        warn!(
+                            event_name = "auth.provider.all_failed",
+                            event_domain = "auth",
+                            scheme = scheme.as_str(),
+                            suppressed_count,
+                            last_error = e.to_string(),
+                            "all providers failed for scheme"
+                        );
+                    }
                     // Continue with the next credential if available.
                 }
             }
@@ -367,7 +458,21 @@ impl Auth {
                 metrics.record_augmenter_duration(&aug_type, realm, duration);
             }
             Err(e) => {
-                warn!("Augmenter '{}' failed: {}", name, e);
+                if let Some(suppressed_count) = should_emit(
+                    &format!("auth.augmenter.failed.{}.{}", realm, name),
+                    AUTH_LOG_SUPPRESSION_WINDOW,
+                ) {
+                    warn!(
+                        event_name = "auth.augmenter.failed",
+                        event_domain = "auth",
+                        augmenter_name = name.as_str(),
+                        augmenter_type = aug_type.as_str(),
+                        realm,
+                        suppressed_count,
+                        error = e.as_str(),
+                        "augmenter failed"
+                    );
+                }
                 metrics.record_augmenter_attempt(&name, &aug_type, realm, "error");
                 metrics.record_augmenter_duration(&aug_type, realm, duration);
             }
@@ -375,7 +480,12 @@ impl Auth {
     }
 
     async fn check_augmenters(&self, user: User, metrics: &Metrics) -> Option<User> {
-        info!("Applying augmentations for user '{}'", user.username);
+        debug!(
+            event_name = "auth.augmenters.started",
+            event_domain = "auth",
+            realm = user.realm.as_str(),
+            "applying augmenters for authenticated user"
+        );
         let realm = user.realm.clone();
         let user = Arc::new(Mutex::new(user));
 

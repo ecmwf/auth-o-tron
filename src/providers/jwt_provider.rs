@@ -1,3 +1,4 @@
+use cached::Return;
 #[allow(unused_imports)]
 use cached::proc_macro::cached;
 use jsonwebtoken::jwk::JwkSet;
@@ -6,11 +7,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-#[cfg(not(test))]
 use std::time::Duration;
 use tracing::{debug, info};
 
+use crate::utils::log_throttle::should_emit;
 use crate::{models::user::User, providers::Provider, utils::value::value_to_string};
+const CACHE_HIT_LOG_WINDOW: Duration = Duration::from_secs(30);
 
 /// JWT config structure for external usage
 #[derive(Deserialize, Serialize, JsonSchema, Debug, Clone)]
@@ -78,6 +80,22 @@ impl Provider for JWTProvider {
 
         // Fetch the JWK set (cached)
         let certs = get_certs(self.config.cert_uri.to_string()).await?;
+        if certs.was_cached
+            && let Some(suppressed_count) =
+                should_emit("providers.jwt.jwks.cache.hit", CACHE_HIT_LOG_WINDOW)
+        {
+            debug!(
+                event_name = "providers.jwt.jwks.cache.hit",
+                event_domain = "providers",
+                provider_name = self.config.name.as_str(),
+                realm = self.config.realm.as_str(),
+                cache_result = "hit",
+                cache_ttl_seconds = 600,
+                cache_key_type = "jwks_uri",
+                suppressed_count,
+                "JWT JWK set served from cache"
+            );
+        }
         let header =
             decode_header(token).map_err(|e| format!("Failed to decode JWT header: {}", e))?;
 
@@ -166,8 +184,16 @@ impl Provider for JWTProvider {
 }
 
 /// Retrieves the certificates (JWKS) from a remote URI. Cached for 600s to avoid repeated fetches.
-#[cfg_attr(not(test), cached(time = 600, sync_writes = "default"))]
-pub async fn get_certs(cert_uri: String) -> Result<String, String> {
+#[cfg_attr(
+    not(test),
+    cached(
+        time = 600,
+        result = true,
+        with_cached_flag = true,
+        sync_writes = "default"
+    )
+)]
+pub async fn get_certs(cert_uri: String) -> Result<Return<String>, String> {
     debug!("Fetching certificates from {}", cert_uri);
     let res = reqwest::get(&cert_uri)
         .await
@@ -178,7 +204,7 @@ pub async fn get_certs(cert_uri: String) -> Result<String, String> {
             .json()
             .await
             .map_err(|e| format!("Failed to parse certificate JSON: {}", e))?;
-        Ok(json.to_string())
+        Ok(Return::new(json.to_string()))
     } else {
         Err(format!("Failed to download certificates: {}", res.status()))
     }
@@ -213,7 +239,7 @@ mod tests {
         let expected: serde_json::Value =
             serde_json::from_str(jwks).expect("Invalid expected JSON");
         let actual: serde_json::Value =
-            serde_json::from_str(&result.unwrap()).expect("Invalid actual JSON");
+            serde_json::from_str(&result.unwrap().to_string()).expect("Invalid actual JSON");
         assert_eq!(actual, expected);
     }
 

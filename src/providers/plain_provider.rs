@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::models::user::User;
 use crate::providers::Provider;
@@ -66,7 +66,12 @@ impl Provider for PlainAuthProvider {
         let decoded_bytes = match general_purpose::STANDARD.decode(credentials) {
             Ok(b) => b,
             Err(e) => {
-                warn!("Base64 decode error: {}", e);
+                debug!(
+                    event_name = "providers.plain.decode.failed",
+                    event_domain = "providers",
+                    error = e.to_string(),
+                    "basic auth base64 decode failed"
+                );
                 return Err("Invalid base64 in Basic auth".to_string());
             }
         };
@@ -75,7 +80,12 @@ impl Provider for PlainAuthProvider {
         let decoded_str = match String::from_utf8(decoded_bytes) {
             Ok(s) => s,
             Err(e) => {
-                warn!("Invalid UTF-8 in Basic auth: {}", e);
+                debug!(
+                    event_name = "providers.plain.decode.failed",
+                    event_domain = "providers",
+                    error = e.to_string(),
+                    "basic auth payload is not valid UTF-8"
+                );
                 return Err("Invalid UTF-8 in Basic auth".to_string());
             }
         };
@@ -90,7 +100,13 @@ impl Provider for PlainAuthProvider {
         }
 
         // 4) Compare with the user list in config
-        debug!("Basic auth attempt for user '{}'", user_part);
+        debug!(
+            event_name = "providers.plain.authenticate.started",
+            event_domain = "providers",
+            realm = self.config.realm.as_str(),
+            username = user_part,
+            "basic authentication attempt"
+        );
         for entry in &self.config.users {
             if entry.username == user_part && entry.password == pass_part {
                 // Found a match! Return a new user object.

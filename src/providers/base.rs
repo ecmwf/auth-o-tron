@@ -17,7 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
-use tracing::{debug, info};
+use tracing::debug;
 
 /// Configuration options for each authentication provider.
 #[derive(Deserialize, Serialize, JsonSchema, Debug)]
@@ -68,7 +68,12 @@ pub async fn list_providers(
     ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
 ) -> Json<Value> {
     let client_ip = client_addr.ip();
-    info!("Received request for provider list from IP: {}", client_ip);
+    debug!(
+        event_name = "providers.list.started",
+        event_domain = "providers",
+        client_ip = client_ip.to_string(),
+        "listing configured providers"
+    );
 
     let providers: Vec<Value> = state
         .config
@@ -94,16 +99,22 @@ pub async fn list_providers(
                     "realm": realm,
                 })
             } else {
-                debug!("Provider configuration was not an object: {:?}", provider);
+                debug!(
+                    event_name = "providers.list.invalid_config_shape",
+                    event_domain = "providers",
+                    "provider configuration was not an object"
+                );
                 json!({})
             }
         })
         .collect();
 
-    info!(
-        "Returning sanitized provider list to IP: {}. Number of providers: {}",
-        client_ip,
-        providers.len()
+    debug!(
+        event_name = "providers.list.completed",
+        event_domain = "providers",
+        client_ip = client_ip.to_string(),
+        provider_count = providers.len(),
+        "provider listing completed"
     );
     Json(json!({ "providers": providers }))
 }

@@ -1,16 +1,20 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use cached::Return;
 use cached::proc_macro::cached;
 use futures::lock::Mutex;
 use ldap3::{LdapConnAsync, Scope, SearchEntry};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::augmenters::Augmenter;
 use crate::models::user::User;
+use crate::utils::log_throttle::should_emit;
+
+const CACHE_HIT_LOG_WINDOW: Duration = Duration::from_secs(30);
 
 /// Configuration required to connect to LDAP and fetch user roles.
 #[derive(Deserialize, Serialize, JsonSchema, Debug, Hash, PartialEq, Eq, Clone)]
@@ -164,11 +168,16 @@ fn validate_filters(filters: &Option<Vec<String>>) -> Result<(), String> {
 /// With `filters` configured, we parse each filter as a DN fragment; when it matches part of the
 /// user's DN we emit the path of attribute values from that match down to the CN. Legacy single
 /// `filter` keeps returning just the CN when matched.
-#[cached(time = 120, sync_writes = "default")]
+#[cached(
+    time = 120,
+    result = true,
+    with_cached_flag = true,
+    sync_writes = "default"
+)]
 async fn retrieve_ldap_user_roles(
     config: LDAPAugmenterConfig,
     uid: String,
-) -> Result<Vec<String>, String> {
+) -> Result<Return<Vec<String>>, String> {
     validate_filters(&config.filters)?;
 
     debug!(
@@ -182,11 +191,11 @@ async fn retrieve_ldap_user_roles(
     ldap3::drive!(conn);
 
     // We do a simple bind using the configured service account
-    let bind_dn = &config
+    let bind_dn = config
         .bind_dn
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| "No bind DN provided for LDAP augmenter.".to_string())?;
-    ldap.simple_bind(&bind_dn, &config.ldap_password)
+    ldap.simple_bind(bind_dn, &config.ldap_password)
         .await
         .map_err(|e| e.to_string())?
         .success()
@@ -216,7 +225,7 @@ async fn retrieve_ldap_user_roles(
         }
     }
 
-    Ok(roles)
+    Ok(Return::new(roles))
 }
 
 #[async_trait]
@@ -239,8 +248,8 @@ impl Augmenter for LDAPAugmenter {
     /// Adds additional roles to the user from LDAP, if the realms match.
     async fn augment(&self, user: Arc<Mutex<User>>) -> Result<(), String> {
         let user_guard = user.lock().await;
-        let realm = &user_guard.realm.clone();
-        let username = &user_guard.username.clone();
+        let realm = user_guard.realm.clone();
+        let username = user_guard.username.clone();
         drop(user_guard);
         if realm != self.get_realm() {
             return Err(format!(
@@ -250,19 +259,73 @@ impl Augmenter for LDAPAugmenter {
             ));
         }
 
-        info!("Retrieving LDAP roles for user '{}'", username);
+        debug!(
+            event_name = "augmenters.ldap.lookup.started",
+            event_domain = "augmenters",
+            augmenter_name = self.config.name.as_str(),
+            augmenter_type = "ldap",
+            username = username.as_str(),
+            realm = realm.as_str(),
+            "retrieving LDAP roles for user"
+        );
         match retrieve_ldap_user_roles(self.config.clone(), username.clone()).await {
             Ok(roles) => {
-                info!(
-                    "Fetched {} roles from LDAP for user '{}'",
-                    roles.len(),
-                    username
-                );
-                user.lock().await.roles.extend(roles);
+                if roles.was_cached
+                    && let Some(suppressed_count) =
+                        should_emit("augmenters.ldap.lookup.cache.hit", CACHE_HIT_LOG_WINDOW)
+                {
+                    debug!(
+                        event_name = "augmenters.ldap.lookup.cache.hit",
+                        event_domain = "augmenters",
+                        augmenter_name = self.config.name.as_str(),
+                        augmenter_type = "ldap",
+                        cache_result = "hit",
+                        cache_ttl_seconds = 120,
+                        cache_key_type = "username",
+                        suppressed_count,
+                        "LDAP role lookup served from cache"
+                    );
+                }
+
+                let fetched_roles_count = roles.len();
+                if fetched_roles_count == 0 {
+                    debug!(
+                        event_name = "augmenters.ldap.no_change",
+                        event_domain = "augmenters",
+                        augmenter_name = self.config.name.as_str(),
+                        augmenter_type = "ldap",
+                        username = username.as_str(),
+                        realm = realm.as_str(),
+                        "LDAP augmenter returned no roles"
+                    );
+                } else {
+                    let added_roles = (*roles).clone();
+                    user.lock().await.roles.extend((*roles).clone());
+                    info!(
+                        event_name = "augmenters.ldap.roles_added",
+                        event_domain = "augmenters",
+                        augmenter_name = self.config.name.as_str(),
+                        augmenter_type = "ldap",
+                        username = username.as_str(),
+                        realm = realm.as_str(),
+                        added_roles_count = fetched_roles_count,
+                        added_roles = ?added_roles,
+                        "LDAP augmenter added roles"
+                    );
+                }
                 Ok(())
             }
             Err(err) => {
-                warn!("Failed to retrieve LDAP user roles: {}", err);
+                debug!(
+                    event_name = "augmenters.ldap.lookup.failed",
+                    event_domain = "augmenters",
+                    augmenter_name = self.config.name.as_str(),
+                    augmenter_type = "ldap",
+                    username = username.as_str(),
+                    realm = realm.as_str(),
+                    error = err.as_str(),
+                    "LDAP role lookup failed"
+                );
                 Err(format!("Failed to retrieve LDAP user roles: {}", err))
             }
         }

@@ -64,11 +64,11 @@ impl User {
         let sub = format!("{}-{}", self.realm, self.username);
 
         let mut expiry = now + jwtconfig.exp;
-        if self.attributes.contains_key("exp") {
-            if let Ok(attr_exp) = self.attributes.get("exp").unwrap().parse::<i64>() {
-                // Set expiry to the minimum of the two values
-                expiry = std::cmp::min(expiry, attr_exp);
-            }
+        if let Some(attr_exp) = self.attributes.get("exp")
+            && let Ok(attr_exp) = attr_exp.parse::<i64>()
+        {
+            // Set expiry to the minimum of the two values
+            expiry = std::cmp::min(expiry, attr_exp);
         }
         let claims = Claims {
             sub: &sub,
@@ -113,7 +113,11 @@ impl FromRequestParts<AppState> for User {
             .get::<ConnectInfo<SocketAddr>>()
             .map(|ConnectInfo(addr)| addr.ip())
             .unwrap_or_else(|| {
-                warn!("Unable to determine client IP address.");
+                warn!(
+                    event_name = "auth.request.client_ip.missing",
+                    event_domain = "auth",
+                    "unable to determine client IP address"
+                );
                 "unknown".parse().unwrap()
             });
 
@@ -153,7 +157,6 @@ mod tests {
     /// Note: We disable audience validation in this test (as in production code)
     /// by setting `validation.validate_aud = false`. This prevents the decoder from
     /// failing with an "InvalidAudience" error.
-
     fn decode_claims(token: &str, jwt_config: &JWTConfig) -> serde_json::Value {
         let mut validation = Validation::default();
         validation.validate_aud = false;
