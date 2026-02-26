@@ -19,7 +19,12 @@ async fn main() {
     init_logging(&config.logging);
 
     if let Err(e) = startup::run(config).await {
-        tracing::error!("Server error: {}", e);
+        tracing::error!(
+            event_name = "startup.server.failed",
+            event_domain = "startup",
+            error = e.to_string(),
+            "server error"
+        );
         std::process::exit(1);
     }
 }
