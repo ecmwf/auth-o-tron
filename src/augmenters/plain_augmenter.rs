@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures::lock::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::augmenters::Augmenter;
 use crate::models::user::User;
@@ -45,15 +45,20 @@ impl Augmenter for PlainAugmenter {
     /// Augment the user with additional roles based on the configuration.
     async fn augment(&self, user: Arc<Mutex<User>>) -> Result<(), String> {
         let user_guard = user.lock().await;
-        let username = &user_guard.username.clone();
-        let realm = &user_guard.realm.clone();
+        let username = user_guard.username.clone();
+        let realm = user_guard.realm.clone();
         drop(user_guard); // Release the lock before doing work
-        info!("Augmenting user {} with roles", username);
 
-        if *realm != self.config.realm {
-            warn!(
-                "User {} is in realm {}, but this provider is for realm {}",
-                username, realm, self.config.realm
+        if realm != self.config.realm {
+            debug!(
+                event_name = "augmenters.plain.realm_mismatch",
+                event_domain = "augmenters",
+                augmenter_name = self.config.name.as_str(),
+                augmenter_type = "plain",
+                username = username.as_str(),
+                user_realm = realm.as_str(),
+                augmenter_realm = self.config.realm.as_str(),
+                "skipping plain augmenter because realms do not match"
             );
             return Ok(()); // No roles to add if realms don't match
         }
@@ -61,17 +66,36 @@ impl Augmenter for PlainAugmenter {
         // Find roles for the user in the config
         let mut additional_roles = Vec::new();
         for (role_name, users) in &self.config.roles {
-            if users.contains(username) {
-                info!("Adding role {} to user {}", role_name, username);
+            if users.contains(&username) {
                 additional_roles.push(role_name.clone());
             }
         }
 
         if additional_roles.is_empty() {
-            info!("No additional roles found for user {}", username);
+            debug!(
+                event_name = "augmenters.plain.no_change",
+                event_domain = "augmenters",
+                augmenter_name = self.config.name.as_str(),
+                augmenter_type = "plain",
+                username = username.as_str(),
+                realm = realm.as_str(),
+                "plain augmenter made no role changes"
+            );
         } else {
-            info!("Adding roles to user {}: {:?}", username, additional_roles);
+            let added_count = additional_roles.len();
+            let added_roles = additional_roles.clone();
             user.lock().await.roles.extend(additional_roles);
+            info!(
+                event_name = "augmenters.plain.roles_added",
+                event_domain = "augmenters",
+                augmenter_name = self.config.name.as_str(),
+                augmenter_type = "plain",
+                username = username.as_str(),
+                realm = realm.as_str(),
+                added_roles_count = added_count,
+                added_roles = ?added_roles,
+                "plain augmenter added roles"
+            );
         }
 
         Ok(())

@@ -34,10 +34,19 @@ pub async fn run(config: Arc<ConfigV1>) -> Result<(), Box<dyn std::error::Error>
         auth_config,
     ));
 
-    info!("Starting server on {}", config.bind_address);
+    info!(
+        event_name = "startup.server.starting",
+        event_domain = "startup",
+        bind_address = config.bind_address.as_str(),
+        "starting http server"
+    );
 
     let metrics = Metrics::new();
-    info!("Metrics initialized");
+    info!(
+        event_name = "startup.metrics.initialized",
+        event_domain = "startup",
+        "metrics initialized"
+    );
 
     let state = AppState {
         config: config.clone(),

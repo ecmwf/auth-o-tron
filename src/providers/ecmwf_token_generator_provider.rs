@@ -1,15 +1,17 @@
+use cached::Return;
 #[allow(unused_imports)]
 use cached::proc_macro::cached;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-#[cfg(not(test))]
 use std::time::Duration;
 use tracing::{debug, info};
 
 use super::jwt_provider::{JWTAuthConfig, JWTProvider};
 use crate::models::user::User;
 use crate::providers::Provider;
+use crate::utils::log_throttle::should_emit;
+const CACHE_HIT_LOG_WINDOW: Duration = Duration::from_secs(30);
 
 /// Config for an ECMWF Token Generator provider that validates tokens through the token generator API.
 #[derive(Deserialize, Debug, Serialize, JsonSchema, Hash, Clone, PartialEq, Eq)]
@@ -54,11 +56,19 @@ impl EcmwfTokenGeneratorProvider {
 
 /// Validates a token using the ECMWF Token Generator validate-token endpoint.
 /// Caches results for 240 seconds (tokens valid for 300) to reduce load on the token generator.
-#[cfg_attr(not(test), cached(time = 240, sync_writes = "default"))]
+#[cfg_attr(
+    not(test),
+    cached(
+        time = 240,
+        result = true,
+        with_cached_flag = true,
+        sync_writes = "default"
+    )
+)]
 async fn validate_token_with_generator(
     config: EcmwfTokenGeneratorProviderConfig,
     token: String,
-) -> Result<bool, String> {
+) -> Result<Return<bool>, String> {
     debug!(
         "Validating token with ECMWF Token Generator at '{}' for realm='{}'",
         config.token_generator_url, config.realm
@@ -86,16 +96,24 @@ async fn validate_token_with_generator(
     // Check if the token is active
     let active = resp["active"].as_bool().unwrap_or(false);
     debug!("Token validation completed: active={}", active);
-    Ok(active)
+    Ok(Return::new(active))
 }
 
 /// Exchanges an offline/refresh token for an access token using the ECMWF Token Generator API.
 /// Caches results for 240 seconds (tokens valid for 300) to reduce load on the token generator.
-#[cfg_attr(not(test), cached(time = 240, sync_writes = "default"))]
+#[cfg_attr(
+    not(test),
+    cached(
+        time = 240,
+        result = true,
+        with_cached_flag = true,
+        sync_writes = "default"
+    )
+)]
 async fn get_access_token_from_generator(
     config: EcmwfTokenGeneratorProviderConfig,
     refresh_token: String,
-) -> Result<String, String> {
+) -> Result<Return<String>, String> {
     debug!(
         "Exchanging refresh token for access token via ECMWF Token Generator at '{}'",
         config.token_generator_url
@@ -129,7 +147,7 @@ async fn get_access_token_from_generator(
         .to_string();
 
     debug!("Access token exchange completed successfully");
-    Ok(access_token)
+    Ok(Return::new(access_token))
 }
 
 #[async_trait::async_trait]
@@ -151,13 +169,51 @@ impl Provider for EcmwfTokenGeneratorProvider {
     /// Finally calls the internal jwt_auth to authenticate and get user info.
     async fn authenticate(&self, credentials: &str) -> Result<User, String> {
         // First, validate the token with the ECMWF Token Generator
-        if !validate_token_with_generator(self.config.clone(), credentials.to_string()).await? {
+        let validation =
+            validate_token_with_generator(self.config.clone(), credentials.to_string()).await?;
+        if validation.was_cached
+            && let Some(suppressed_count) = should_emit(
+                "providers.ecmwf_token_generator.validate.cache.hit",
+                CACHE_HIT_LOG_WINDOW,
+            )
+        {
+            debug!(
+                event_name = "providers.ecmwf_token_generator.validate.cache.hit",
+                event_domain = "providers",
+                provider_name = self.config.name.as_str(),
+                realm = self.config.realm.as_str(),
+                cache_result = "hit",
+                cache_ttl_seconds = 240,
+                cache_key_type = "token",
+                suppressed_count,
+                "token-generator validation served from cache"
+            );
+        }
+        if !*validation {
             return Err("Token is not valid according to ECMWF Token Generator".into());
         }
 
         // Get access token from token generator
         let access_token =
             get_access_token_from_generator(self.config.clone(), credentials.to_string()).await?;
+        if access_token.was_cached
+            && let Some(suppressed_count) = should_emit(
+                "providers.ecmwf_token_generator.exchange.cache.hit",
+                CACHE_HIT_LOG_WINDOW,
+            )
+        {
+            debug!(
+                event_name = "providers.ecmwf_token_generator.exchange.cache.hit",
+                event_domain = "providers",
+                provider_name = self.config.name.as_str(),
+                realm = self.config.realm.as_str(),
+                cache_result = "hit",
+                cache_ttl_seconds = 240,
+                cache_key_type = "token",
+                suppressed_count,
+                "token-generator exchange served from cache"
+            );
+        }
 
         // Now authenticate with the access token
         self.jwt_auth.authenticate(&access_token).await
@@ -206,7 +262,7 @@ mod tests {
 
         m.assert_async().await;
         assert!(result.is_ok(), "Expected successful validation");
-        assert!(result.unwrap(), "Expected token to be active");
+        assert!(*result.unwrap(), "Expected token to be active");
     }
 
     #[tokio::test]
@@ -226,7 +282,7 @@ mod tests {
         .await;
 
         assert!(result.is_ok(), "Request should succeed");
-        assert!(!result.unwrap(), "Expected token to be inactive");
+        assert!(!*result.unwrap(), "Expected token to be inactive");
     }
 
     #[tokio::test]
@@ -271,7 +327,7 @@ mod tests {
 
         m.assert_async().await;
         assert!(result.is_ok(), "Expected successful token exchange");
-        assert_eq!(result.unwrap(), "new_access_token");
+        assert_eq!(*result.unwrap(), "new_access_token");
     }
 
     #[tokio::test]

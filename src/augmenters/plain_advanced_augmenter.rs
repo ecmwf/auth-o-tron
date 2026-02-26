@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use futures::lock::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{debug, info};
 
 use crate::augmenters::Augmenter;
 use crate::models::user::User;
@@ -68,9 +68,15 @@ impl Augmenter for PlainAdvancedAugmenter {
         drop(user_guard);
 
         if realm != self.config.realm {
-            warn!(
-                "User {} is in realm {}, but this provider is for realm {}",
-                username, realm, self.config.realm
+            debug!(
+                event_name = "augmenters.plain_advanced.realm_mismatch",
+                event_domain = "augmenters",
+                augmenter_name = self.config.name.as_str(),
+                augmenter_type = "plain_advanced",
+                username = username.as_str(),
+                user_realm = realm.as_str(),
+                augmenter_realm = self.config.realm.as_str(),
+                "skipping advanced plain augmenter because realms do not match"
             );
             return Ok(());
         }
@@ -85,7 +91,15 @@ impl Augmenter for PlainAdvancedAugmenter {
         });
 
         if !username_match && !role_match {
-            info!("No advanced plain match for user {}", username);
+            debug!(
+                event_name = "augmenters.plain_advanced.no_match",
+                event_domain = "augmenters",
+                augmenter_name = self.config.name.as_str(),
+                augmenter_type = "plain_advanced",
+                username = username.as_str(),
+                realm = realm.as_str(),
+                "advanced plain augmenter did not match user"
+            );
             return Ok(());
         }
 
@@ -97,20 +111,45 @@ impl Augmenter for PlainAdvancedAugmenter {
             }
         }
 
+        let mut added_roles_count = 0usize;
+        let added_roles_for_log = roles_to_add.clone();
         let mut user_guard = user.lock().await;
         if !roles_to_add.is_empty() {
-            info!("Adding roles to user {}: {:?}", username, roles_to_add);
+            added_roles_count = roles_to_add.len();
             user_guard.roles.extend(roles_to_add);
         }
 
+        let mut upserted_attributes_count = 0usize;
         if !self.config.augment.attributes.is_empty() {
-            info!(
-                "Upserting attributes for user {}: {:?}",
-                username, self.config.augment.attributes
-            );
+            upserted_attributes_count = self.config.augment.attributes.len();
             for (key, value) in &self.config.augment.attributes {
                 user_guard.attributes.insert(key.clone(), value.clone());
             }
+        }
+
+        if added_roles_count == 0 && upserted_attributes_count == 0 {
+            debug!(
+                event_name = "augmenters.plain_advanced.no_change",
+                event_domain = "augmenters",
+                augmenter_name = self.config.name.as_str(),
+                augmenter_type = "plain_advanced",
+                username = username.as_str(),
+                realm = realm.as_str(),
+                "advanced plain augmenter made no changes"
+            );
+        } else {
+            info!(
+                event_name = "augmenters.plain_advanced.applied",
+                event_domain = "augmenters",
+                augmenter_name = self.config.name.as_str(),
+                augmenter_type = "plain_advanced",
+                username = username.as_str(),
+                realm = realm.as_str(),
+                added_roles_count,
+                added_roles = ?added_roles_for_log,
+                upserted_attributes_count,
+                "advanced plain augmenter applied changes"
+            );
         }
 
         Ok(())
@@ -144,7 +183,7 @@ mod tests {
             .expect("Failed to parse test config")
     }
 
-    static YAML_1: &'static str = r#"
+    static YAML_1: &str = r#"
 name: "Polytope plain admin augmenter"
 realm: "ecmwf"
 type: "plain_advanced"

@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::net::SocketAddr;
-use tracing::info;
+use tracing::debug;
 
 use super::{
     ldap_augmenter::{LDAPAugmenter, LDAPAugmenterConfig},
@@ -61,7 +61,12 @@ pub async fn list_augmenters(
     ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
 ) -> Json<Value> {
     let client_ip = client_addr.ip();
-    info!("Received request for augmenter list from IP: {}", client_ip);
+    debug!(
+        event_name = "augmenters.list.started",
+        event_domain = "augmenters",
+        client_ip = client_ip.to_string(),
+        "listing configured augmenters"
+    );
 
     let augmenters: Vec<Value> = state
         .config
@@ -87,10 +92,12 @@ pub async fn list_augmenters(
         })
         .collect();
 
-    info!(
-        "Returning sanitized augmenter list to IP: {}. Number of augmenters: {}",
-        client_ip,
-        augmenters.len()
+    debug!(
+        event_name = "augmenters.list.completed",
+        event_domain = "augmenters",
+        client_ip = client_ip.to_string(),
+        augmenter_count = augmenters.len(),
+        "augmenter listing completed"
     );
 
     Json(json!({

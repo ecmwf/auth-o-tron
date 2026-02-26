@@ -1,15 +1,17 @@
+use cached::Return;
 #[allow(unused_imports)]
 use cached::proc_macro::cached;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-#[cfg(not(test))]
 use std::time::Duration;
 use tracing::{debug, info};
 
 use super::jwt_provider::{JWTAuthConfig, JWTProvider};
 use crate::models::user::User;
 use crate::providers::Provider;
+use crate::utils::log_throttle::should_emit;
+const CACHE_HIT_LOG_WINDOW: Duration = Duration::from_secs(30);
 
 /// Config for an OpenID provider that also supports offline tokens.
 #[derive(Deserialize, Debug, Serialize, JsonSchema, Hash, Clone, PartialEq, Eq)]
@@ -54,11 +56,19 @@ impl OpenIDOfflineProvider {
 }
 
 /// Checks if the given token has "offline_access" scope. If valid, returns true.
-#[cfg_attr(not(test), cached(time = 120, sync_writes = "default"))]
+#[cfg_attr(
+    not(test),
+    cached(
+        time = 120,
+        result = true,
+        with_cached_flag = true,
+        sync_writes = "default"
+    )
+)]
 async fn check_offline_access_token(
     config: OpenIDOfflineProviderConfig,
     token: String,
-) -> Result<bool, String> {
+) -> Result<Return<bool>, String> {
     debug!("Checking offline access token at realm='{}'", config.realm);
 
     let introspection_url = format!(
@@ -82,15 +92,23 @@ async fn check_offline_access_token(
     let active = resp["active"].as_bool().unwrap_or(false);
     let scope = resp["scope"].as_str().unwrap_or("");
 
-    Ok(active && scope.contains("offline_access"))
+    Ok(Return::new(active && scope.contains("offline_access")))
 }
 
 /// Exchanges the offline token for a regular access token using a refresh call.
-#[cfg_attr(not(test), cached(time = 10, sync_writes = "default"))]
+#[cfg_attr(
+    not(test),
+    cached(
+        time = 10,
+        result = true,
+        with_cached_flag = true,
+        sync_writes = "default"
+    )
+)]
 async fn get_access_token(
     config: OpenIDOfflineProviderConfig,
     refresh_token: String,
-) -> Result<String, String> {
+) -> Result<Return<String>, String> {
     debug!(
         "Exchanging offline token for an online access token at realm='{}'",
         config.realm
@@ -126,7 +144,7 @@ async fn get_access_token(
         .ok_or_else(|| "Failed to retrieve access token from response".to_string())?
         .to_string();
 
-    Ok(access_token)
+    Ok(Return::new(access_token))
 }
 
 #[async_trait::async_trait]
@@ -146,11 +164,50 @@ impl Provider for OpenIDOfflineProvider {
     /// First checks if the token is valid offline token, then uses it to fetch an online token,
     /// and finally calls the internal `jwt_auth` to authenticate.
     async fn authenticate(&self, credentials: &str) -> Result<User, String> {
-        if !check_offline_access_token(self.config.clone(), credentials.to_string()).await? {
+        let offline_check =
+            check_offline_access_token(self.config.clone(), credentials.to_string()).await?;
+        if offline_check.was_cached
+            && let Some(suppressed_count) = should_emit(
+                "providers.openid_offline.introspection.cache.hit",
+                CACHE_HIT_LOG_WINDOW,
+            )
+        {
+            debug!(
+                event_name = "providers.openid_offline.introspection.cache.hit",
+                event_domain = "providers",
+                provider_name = self.config.name.as_str(),
+                realm = self.config.realm.as_str(),
+                cache_result = "hit",
+                cache_ttl_seconds = 120,
+                cache_key_type = "token",
+                suppressed_count,
+                "offline token introspection served from cache"
+            );
+        }
+
+        if !*offline_check {
             return Err("Not a valid offline_access token".into());
         }
 
         let access_token = get_access_token(self.config.clone(), credentials.to_string()).await?;
+        if access_token.was_cached
+            && let Some(suppressed_count) = should_emit(
+                "providers.openid_offline.exchange.cache.hit",
+                CACHE_HIT_LOG_WINDOW,
+            )
+        {
+            debug!(
+                event_name = "providers.openid_offline.exchange.cache.hit",
+                event_domain = "providers",
+                provider_name = self.config.name.as_str(),
+                realm = self.config.realm.as_str(),
+                cache_result = "hit",
+                cache_ttl_seconds = 10,
+                cache_key_type = "token",
+                suppressed_count,
+                "offline token exchange served from cache"
+            );
+        }
         self.jwt_auth.authenticate(&access_token).await
     }
 }
@@ -195,7 +252,7 @@ mod tests {
         let result = check_offline_access_token(config, "dummy_token".to_string()).await;
         m.assert_async().await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(*result.unwrap());
     }
 
     /// Test that check_offline_access_token returns false when the introspection endpoint indicates an inactive token.
@@ -227,7 +284,7 @@ mod tests {
         let result = check_offline_access_token(config, "dummy_token".to_string()).await;
         m.assert_async().await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), false);
+        assert!(!*result.unwrap());
     }
 
     /// Test that get_access_token successfully exchanges a refresh token for an access token.
@@ -259,6 +316,6 @@ mod tests {
         let result = get_access_token(config, "dummy_refresh_token".to_string()).await;
         m.assert_async().await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "new_access_token".to_string());
+        assert_eq!(*result.unwrap(), "new_access_token".to_string());
     }
 }

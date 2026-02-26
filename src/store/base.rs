@@ -52,18 +52,38 @@ pub async fn create_store(config: &StoreConfig) -> Arc<dyn Store> {
 #[async_trait]
 impl Provider for Arc<dyn Store> {
     async fn authenticate(&self, token: &str) -> Result<User, String> {
-        debug!("Authenticating using token-store with token='{}'", token);
+        let token_length = token.len();
+        debug!(
+            event_name = "store.token.authenticate.started",
+            event_domain = "store",
+            token_length,
+            "authenticating via token store"
+        );
         match self.get_user(token).await {
             Ok(Some(user)) => {
-                debug!("Token found, returning user.");
+                debug!(
+                    event_name = "store.token.authenticate.success",
+                    event_domain = "store",
+                    realm = user.realm.as_str(),
+                    "token found in store"
+                );
                 Ok(user)
             }
             Ok(None) => {
-                debug!("Token not found in store.");
+                debug!(
+                    event_name = "store.token.authenticate.not_found",
+                    event_domain = "store",
+                    "token not found in store"
+                );
                 Err("Token not found".to_string())
             }
             Err(e) => {
-                error!("Error while looking up user by token: {}", e);
+                debug!(
+                    event_name = "store.token.authenticate.error",
+                    event_domain = "store",
+                    error = e.as_str(),
+                    "error while looking up token"
+                );
                 Err(e)
             }
         }

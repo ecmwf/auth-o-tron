@@ -3,14 +3,16 @@ use std::collections::HashMap;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-#[cfg(not(test))]
 use std::time::Duration;
 use tracing::{debug, info};
 
+use crate::utils::log_throttle::should_emit;
 use crate::{models::user::User, providers::Provider};
+use cached::Return;
 #[allow(unused_imports)]
 use cached::proc_macro::cached;
 use reqwest;
+const CACHE_HIT_LOG_WINDOW: Duration = Duration::from_secs(30);
 
 /// The config needed for the ECMWF API provider (who-am-i endpoint).
 #[derive(Deserialize, Serialize, Debug, JsonSchema, Clone)]
@@ -48,12 +50,29 @@ impl Provider for EcmwfApiProvider {
     }
 
     async fn authenticate(&self, token: &str) -> Result<User, String> {
-        query(
+        let cached_user = query(
             self.config.uri.clone(),
             token.to_string(),
             self.config.realm.clone(),
         )
-        .await
+        .await?;
+        if cached_user.was_cached
+            && let Some(suppressed_count) =
+                should_emit("providers.ecmwf_api.cache.hit", CACHE_HIT_LOG_WINDOW)
+        {
+            debug!(
+                event_name = "providers.ecmwf_api.cache.hit",
+                event_domain = "providers",
+                provider_name = self.config.name.as_str(),
+                realm = self.config.realm.as_str(),
+                cache_result = "hit",
+                cache_ttl_seconds = 60,
+                cache_key_type = "token",
+                suppressed_count,
+                "provider authentication result served from cache"
+            );
+        }
+        Ok((*cached_user).clone())
     }
 
     fn get_name(&self) -> &str {
@@ -62,8 +81,16 @@ impl Provider for EcmwfApiProvider {
 }
 
 /// Queries the ECMWF who-am-i endpoint with the provided token, returning a User on success.
-#[cfg_attr(not(test), cached(time = 60, sync_writes = "default"))]
-async fn query(uri: String, token: String, realm: String) -> Result<User, String> {
+#[cfg_attr(
+    not(test),
+    cached(
+        time = 60,
+        result = true,
+        with_cached_flag = true,
+        sync_writes = "default"
+    )
+)]
+async fn query(uri: String, token: String, realm: String) -> Result<Return<User>, String> {
     let client = reqwest::Client::new();
     let url = format!("{}/who-am-i?token={}", uri, token);
 
@@ -88,14 +115,14 @@ async fn query(uri: String, token: String, realm: String) -> Result<User, String
             attributes.insert("ecmwf-email".to_string(), email);
         }
         attributes.insert("ecmwf-apikey".to_string(), token.clone());
-        Ok(User::new(
+        Ok(Return::new(User::new(
             realm,
             username,
             None,
             Some(attributes),
             None,
             None,
-        ))
+        )))
     } else if response.status() == 403 {
         Err("Invalid API token".to_string())
     } else {
