@@ -137,13 +137,18 @@ where
 
 pub fn init_logging(logging_config: &LoggingConfig) {
     // Parse level string -> LevelFilter
-    let level_filter = match logging_config.level.to_lowercase().as_str() {
+    let level_filter = match logging_config.level.trim().to_lowercase().as_str() {
         "trace" => LevelFilter::TRACE,
         "debug" => LevelFilter::DEBUG,
+        "info" => LevelFilter::INFO,
         "warn" => LevelFilter::WARN,
         "error" => LevelFilter::ERROR,
-        // default to INFO
-        _ => LevelFilter::INFO,
+        _ => {
+            panic!(
+                "Invalid logging.level '{}'. Valid values: trace, debug, info, warn, error",
+                logging_config.level
+            );
+        }
     };
 
     // This can be used to allow env-based overrides, plus the default:
