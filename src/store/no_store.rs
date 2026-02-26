@@ -12,6 +12,12 @@ impl NoStore {
     }
 }
 
+impl Default for NoStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl Store for NoStore {
     async fn add_token(&self, _token: &Token, _user: &User, _expiry: i64) -> Result<(), String> {
