@@ -1,8 +1,3 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
-
 use crate::augmenters::{Augmenter, AugmenterConfig, create_auth_augmenter};
 use crate::config::AuthConfig;
 use crate::metrics::{Metrics, MetricsRecorder};
@@ -12,6 +7,10 @@ use crate::store::Store;
 use crate::utils::log_throttle::should_emit;
 use futures::future::{FutureExt, join_all, select_ok};
 use futures::lock::Mutex;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
@@ -284,6 +283,7 @@ impl Auth {
             username = user.username.as_str(),
             realm = user.realm.as_str(),
             roles_count = user.roles.len(),
+            roles = user.roles.join(","),
             attributes_count = user.attributes.len(),
             scopes_services_count = user.scopes.as_ref().map_or(0, |m| m.len()),
             "authentication request succeeded"
