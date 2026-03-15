@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Auth-O-Tron</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --accent: #e63946;
+      --accent-hover: #d62839;
+
+      --text-main: #111827;
+      --text-muted: #4b5563;
+      --text-light: #9ca3af;
+      --border: #e5e7eb;
+      --border-light: #f3f4f6;
+      --font-stack: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text-main);
+      font-family: var(--font-stack);
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 0 1.5rem;
+      width: 100%;
+    }
+
+    /* Animations */
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .animate-up {
+      opacity: 0;
+      animation: fadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+    .delay-1 { animation-delay: 0.1s; }
+    .delay-2 { animation-delay: 0.2s; }
+
+    /* Hero Section */
+    .hero {
+      text-align: center;
+      padding: 5rem 0 3rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .logo {
+      width: 100%;
+      max-width: 420px;
+      height: auto;
+      margin-bottom: 2.5rem;
+    }
+
+    .hero-title {
+      font-size: clamp(2.5rem, 5vw, 4rem);
+      font-weight: 800;
+      letter-spacing: -0.025em;
+      line-height: 1.1;
+      margin-bottom: 1.25rem;
+      color: var(--text-main);
+    }
+
+    .hero-subtitle {
+      font-size: clamp(1.125rem, 2vw, 1.25rem);
+      color: var(--text-muted);
+      max-width: 600px;
+      margin: 0 auto 2.5rem;
+    }
+
+    .actions {
+      display: flex;
+      gap: 1rem;
+      justify-content: center;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.75rem 1.5rem;
+      font-size: 1rem;
+      font-weight: 500;
+      border-radius: 6px;
+      text-decoration: none;
+      transition: all 0.2s ease;
+      cursor: pointer;
+    }
+
+    .btn-primary {
+      background-color: var(--accent);
+      color: #fff;
+      border: 1px solid var(--accent);
+      box-shadow: 0 4px 14px rgba(230, 57, 70, 0.2);
+    }
+
+    .btn-primary:hover {
+      background-color: var(--accent-hover);
+      border-color: var(--accent-hover);
+      transform: translateY(-1px);
+      box-shadow: 0 6px 20px rgba(230, 57, 70, 0.3);
+    }
+
+    .btn-secondary {
+      background-color: var(--bg);
+      color: var(--text-main);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover {
+      border-color: var(--text-muted);
+      background-color: var(--border-light);
+    }
+
+    /* Architecture Diagram */
+    .diagram-section {
+      padding: 3rem 0 5rem;
+    }
+
+    .diagram {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 1rem;
+      padding: 2.5rem;
+      background: #fafafa;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      position: relative;
+    }
+
+    .node {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      padding: 1rem 1.5rem;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 0.9rem;
+      color: var(--text-main);
+      box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+      z-index: 2;
+      text-align: center;
+    }
+
+    .node.highlight {
+      border-color: var(--accent);
+      color: var(--accent);
+      box-shadow: 0 4px 14px rgba(230, 57, 70, 0.15);
+    }
+
+    .arrow {
+      height: 2px;
+      width: 40px;
+      background: var(--border);
+      position: relative;
+      z-index: 1;
+    }
+
+    .arrow::after {
+      content: '';
+      position: absolute;
+      right: -2px;
+      top: -4px;
+      border-top: 5px solid transparent;
+      border-bottom: 5px solid transparent;
+      border-left: 6px solid var(--border);
+    }
+
+    /* Footer */
+    footer {
+      margin-top: auto;
+      padding: 2rem 0;
+      text-align: center;
+      color: var(--text-light);
+      font-size: 0.875rem;
+      border-top: 1px solid var(--border-light);
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      .diagram {
+        flex-direction: column;
+        padding: 2rem;
+        gap: 0.5rem;
+      }
+      .arrow {
+        width: 2px;
+        height: 30px;
+      }
+      .arrow::after {
+        right: -4px;
+        top: auto;
+        bottom: -2px;
+        border-left: 5px solid transparent;
+        border-right: 5px solid transparent;
+        border-top: 6px solid var(--border);
+      }
+      .hero {
+        padding: 3rem 0 2rem;
+      }
+      .actions {
+        flex-direction: column;
+        width: 100%;
+        max-width: 300px;
+      }
+      .btn {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <main>
+      <section class="hero animate-up">
+        <img src="/static/logo.png" alt="Auth-O-Tron" class="logo">
+        <h1 class="hero-title">One service.<br>Every auth method.<br>Zero hassle.</h1>
+        <p class="hero-subtitle">The open-source Rust authentication gateway. Drop it in front of your backend, configure your providers, and never write auth middleware again.</p>
+        <div class="actions">
+          <a href="https://github.com/ecmwf/auth-o-tron" class="btn btn-primary">GitHub</a>
+          <a href="#" class="btn btn-secondary">Documentation</a>
+        </div>
+      </section>
+
+      <section class="diagram-section animate-up delay-1">
+        <div class="diagram">
+          <div class="node">Browser</div>
+          <div class="arrow"></div>
+          <div class="node">Ingress (NGINX)</div>
+          <div class="arrow"></div>
+          <div class="node highlight">Auth-O-Tron</div>
+          <div class="arrow"></div>
+          <div class="node">Backend Services</div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="animate-up delay-2">
+      Auth-O-Tron {{version}}
+    </footer>
+  </div>
+</body>
+</html>

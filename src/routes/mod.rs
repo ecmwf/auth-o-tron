@@ -6,6 +6,7 @@
 mod augmenters;
 mod auth;
 mod health;
+mod homepage;
 mod metrics;
 mod providers;
 mod tokens;
@@ -15,6 +16,7 @@ use axum::Router;
 
 pub fn create_app_router(state: AppState) -> Router {
     Router::new()
+        .merge(homepage::routes())
         .merge(auth::routes())
         .merge(tokens::routes())
         .merge(providers::routes())
