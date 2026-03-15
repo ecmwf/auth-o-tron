@@ -304,12 +304,10 @@ services: []
         use figment::providers::{Env, Yaml};
         use std::env;
 
-        // Save any previous value for cleanup
-        let original_jwt_iss = env::var("APP_JWT__ISS").ok();
+        let original_jwt_iss = env::var("AOT_JWT__ISS").ok();
 
-        // Set the environment variable to override jwt.iss.
         unsafe {
-            env::set_var("APP_JWT__ISS", "overridden-issuer");
+            env::set_var("AOT_JWT__ISS", "overridden-issuer");
         }
 
         let yaml = r#"
@@ -332,31 +330,27 @@ auth:
   timeout_in_ms: 8000
         "#;
 
-        // Create a Figment that merges the YAML and the environment overrides.
         let figment = figment::Figment::new()
             .merge(Yaml::string(yaml))
-            .merge(Env::prefixed("APP_").split("__"));
+            .merge(Env::prefixed("AOT_").split("__"));
 
-        // Extract the configuration.
         let config = figment
             .extract::<super::Config>()
             .expect("Failed to parse config");
 
-        // Verify that the jwt.iss value is overridden by the environment variable.
         match config {
             super::Config::ConfigV1(c) => {
                 assert_eq!(c.jwt.iss, "overridden-issuer");
             }
         }
 
-        // Clean up by restoring the original env variable (if any).
         if let Some(val) = original_jwt_iss {
             unsafe {
-                env::set_var("APP_JWT__ISS", val);
+                env::set_var("AOT_JWT__ISS", val);
             }
         } else {
             unsafe {
-                env::remove_var("APP_JWT__ISS");
+                env::remove_var("AOT_JWT__ISS");
             }
         }
     }

@@ -34,37 +34,47 @@ pub async fn run(config: Arc<ConfigV1>) -> Result<(), Box<dyn std::error::Error>
     };
 
     if config.metrics.enabled && config.server.port == config.metrics.port {
-        panic!(
+        return Err(format!(
             "application port and metrics port are both {}, they must be different",
             config.server.port
-        );
+        )
+        .into());
     }
 
-    let app_addr = format!("{}:{}", config.server.host, config.server.port);
+    let host = config.server.host.as_str();
     let app = routes::create_app_router(state.clone());
-    let app_listener = TcpListener::bind(&app_addr)
+    let app_listener = TcpListener::bind((host, config.server.port))
         .await
-        .expect("could not bind application server");
+        .map_err(|e| {
+            format!(
+                "could not bind application server on {}:{}: {e}",
+                host, config.server.port
+            )
+        })?;
 
     info!(
         event_name = "startup.server.listening",
         event_domain = "startup",
-        host = config.server.host.as_str(),
+        host,
         port = config.server.port,
         "application server listening"
     );
 
     if config.metrics.enabled {
-        let metrics_addr = format!("{}:{}", config.server.host, config.metrics.port);
         let metrics_router = routes::create_metrics_router(state);
-        let metrics_listener = TcpListener::bind(&metrics_addr)
+        let metrics_listener = TcpListener::bind((host, config.metrics.port))
             .await
-            .expect("could not bind metrics server");
+            .map_err(|e| {
+                format!(
+                    "could not bind metrics server on {}:{}: {e}",
+                    host, config.metrics.port
+                )
+            })?;
 
         info!(
             event_name = "startup.metrics.listening",
             event_domain = "startup",
-            host = config.server.host.as_str(),
+            host,
             port = config.metrics.port,
             "metrics server listening"
         );

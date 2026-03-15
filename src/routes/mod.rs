@@ -1,7 +1,7 @@
 //! HTTP route definitions and handlers.
 //!
-//! This module organizes all HTTP endpoints into logical groups:
-//! authentication, token management, provider information, and health checks.
+//! Application routes (auth, tokens, providers, augmenters, health) and
+//! metrics routes (metrics, health) are served on separate ports.
 
 mod augmenters;
 mod auth;
