@@ -62,8 +62,8 @@ jwt:
 server:
   host: "127.0.0.1"
   port: 8081
-  metrics:
-    enabled: false
+metrics:
+  enabled: false
 "#;
 
 fn load_test_config() -> ConfigV1 {

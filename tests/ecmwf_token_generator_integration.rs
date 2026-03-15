@@ -48,8 +48,8 @@ jwt:
 server:
   host: "{TEST_HOST}"
   port: {TEST_PORT}
-  metrics:
-    enabled: false
+metrics:
+  enabled: false
 "#
     );
 

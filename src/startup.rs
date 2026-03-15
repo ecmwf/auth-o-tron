@@ -33,7 +33,7 @@ pub async fn run(config: Arc<ConfigV1>) -> Result<(), Box<dyn std::error::Error>
         metrics,
     };
 
-    if config.server.metrics.enabled && config.server.port == config.server.metrics.port {
+    if config.metrics.enabled && config.server.port == config.metrics.port {
         panic!(
             "application port and metrics port are both {}, they must be different",
             config.server.port
@@ -54,8 +54,8 @@ pub async fn run(config: Arc<ConfigV1>) -> Result<(), Box<dyn std::error::Error>
         "application server listening"
     );
 
-    if config.server.metrics.enabled {
-        let metrics_addr = format!("{}:{}", config.server.host, config.server.metrics.port);
+    if config.metrics.enabled {
+        let metrics_addr = format!("{}:{}", config.server.host, config.metrics.port);
         let metrics_router = routes::create_metrics_router(state);
         let metrics_listener = TcpListener::bind(&metrics_addr)
             .await
@@ -65,7 +65,7 @@ pub async fn run(config: Arc<ConfigV1>) -> Result<(), Box<dyn std::error::Error>
             event_name = "startup.metrics.listening",
             event_domain = "startup",
             host = config.server.host.as_str(),
-            port = config.server.metrics.port,
+            port = config.metrics.port,
             "metrics server listening"
         );
 

@@ -26,6 +26,8 @@ pub struct ConfigV1 {
     #[serde(default)]
     pub augmenters: Vec<AugmenterConfig>,
     pub server: ServerConfig,
+    #[serde(default)]
+    pub metrics: MetricsConfig,
     pub jwt: JWTConfig,
     pub include_legacy_headers: Option<bool>,
     pub logging: LoggingConfig,
@@ -37,14 +39,11 @@ fn default_host() -> String {
     "0.0.0.0".to_owned()
 }
 
-/// Server bind configuration with separate application and metrics ports.
 #[derive(Deserialize, Serialize, Debug, JsonSchema)]
 pub struct ServerConfig {
     #[serde(default = "default_host")]
     pub host: String,
     pub port: u16,
-    #[serde(default)]
-    pub metrics: MetricsServerConfig,
 }
 
 fn default_metrics_enabled() -> bool {
@@ -55,18 +54,18 @@ fn default_metrics_port() -> u16 {
     9090
 }
 
-/// Controls the dedicated metrics/health server.
+/// Controls the dedicated metrics/health server on a separate port.
 #[derive(Deserialize, Serialize, Debug, JsonSchema)]
-pub struct MetricsServerConfig {
+pub struct MetricsConfig {
     #[serde(default = "default_metrics_enabled")]
     pub enabled: bool,
     #[serde(default = "default_metrics_port")]
     pub port: u16,
 }
 
-impl Default for MetricsServerConfig {
+impl Default for MetricsConfig {
     fn default() -> Self {
-        MetricsServerConfig {
+        MetricsConfig {
             enabled: default_metrics_enabled(),
             port: default_metrics_port(),
         }
@@ -202,8 +201,8 @@ services: []
             Config::ConfigV1(c) => {
                 assert_eq!(c.server.host, "127.0.0.1");
                 assert_eq!(c.server.port, 3000);
-                assert!(c.server.metrics.enabled);
-                assert_eq!(c.server.metrics.port, 9090);
+                assert!(c.metrics.enabled);
+                assert_eq!(c.metrics.port, 9090);
                 assert_eq!(c.logging.level, "info");
                 assert_eq!(c.jwt.iss, "issuer");
                 assert_eq!(c.jwt.exp, 3600);
