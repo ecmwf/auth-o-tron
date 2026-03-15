@@ -1,7 +1,8 @@
 //! HTTP route definitions and handlers.
 //!
-//! Application routes (auth, tokens, providers, augmenters, health) and
-//! metrics routes (metrics, health) are served on separate ports.
+//! Application routes and metrics routes are served on separate ports.
+//! Health is registered on both so K8s probes and external uptime monitors
+//! can reach it regardless of which port they target.
 
 mod augmenters;
 mod auth;
