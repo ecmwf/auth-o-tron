@@ -105,14 +105,20 @@ pub fn load_config() -> ConfigV2 {
     };
 
     match config {
-        Config::ConfigV1(v1) => convert_v1_to_v2(v1),
+        Config::ConfigV1(v1) => match convert_v1_to_v2(v1) {
+            Ok(v2) => v2,
+            Err(e) => {
+                eprintln!("Error migrating v1 config: {e}");
+                std::process::exit(1);
+            }
+        },
         Config::ConfigV2(v2) => v2,
     }
 }
 
-fn convert_v1_to_v2(v1: ConfigV1) -> ConfigV2 {
-    let (host, port) = parse_bind_address(&v1.bind_address);
-    ConfigV2 {
+fn convert_v1_to_v2(v1: ConfigV1) -> Result<ConfigV2, String> {
+    let (host, port) = parse_bind_address(&v1.bind_address)?;
+    Ok(ConfigV2 {
         store: v1.store,
         services: v1.services,
         providers: v1.providers,
@@ -123,22 +129,22 @@ fn convert_v1_to_v2(v1: ConfigV1) -> ConfigV2 {
         include_legacy_headers: v1.include_legacy_headers,
         logging: v1.logging,
         auth: v1.auth,
-    }
+    })
 }
 
-fn parse_bind_address(addr: &str) -> (String, u16) {
+fn parse_bind_address(addr: &str) -> Result<(String, u16), String> {
     let colon_pos = addr
         .rfind(':')
-        .unwrap_or_else(|| panic!("bind_address must be in host:port format, got: {addr}"));
+        .ok_or_else(|| format!("bind_address must be in host:port format, got: {addr}"))?;
     let host = &addr[..colon_pos];
     if host.is_empty() {
-        panic!("bind_address has empty host, got: {addr}");
+        return Err(format!("bind_address has empty host, got: {addr}"));
     }
     let port = addr[colon_pos + 1..]
         .parse::<u16>()
-        .unwrap_or_else(|_| panic!("invalid port in bind_address: {addr}"));
+        .map_err(|_| format!("invalid port in bind_address: {addr}"))?;
     let host = host.trim_start_matches('[').trim_end_matches(']');
-    (host.to_owned(), port)
+    Ok((host.to_owned(), port))
 }
 
 /// Print the JSON schema for the configuration to stdout.
@@ -439,7 +445,7 @@ services: []
         let Config::ConfigV1(v1) = config else {
             panic!("expected ConfigV1");
         };
-        let v2 = convert_v1_to_v2(v1);
+        let v2 = convert_v1_to_v2(v1).unwrap();
         assert_eq!(v2.server.host, "127.0.0.1");
         assert_eq!(v2.server.port, 8080);
         assert!(v2.metrics.enabled);
@@ -470,21 +476,35 @@ services: []
         let Config::ConfigV1(v1) = config else {
             panic!("expected ConfigV1");
         };
-        let v2 = convert_v1_to_v2(v1);
+        let v2 = convert_v1_to_v2(v1).unwrap();
         assert_eq!(v2.server.host, "::1");
         assert_eq!(v2.server.port, 3000);
     }
 
     #[test]
-    #[should_panic(expected = "empty host")]
     fn test_v1_rejects_empty_host() {
-        parse_bind_address(":3000");
+        let err = parse_bind_address(":3000").unwrap_err();
+        assert!(err.contains("empty host"), "got: {err}");
     }
 
     #[test]
-    #[should_panic(expected = "host:port format")]
     fn test_v1_rejects_missing_port() {
-        parse_bind_address("localhost");
+        let err = parse_bind_address("localhost").unwrap_err();
+        assert!(err.contains("host:port"), "got: {err}");
+    }
+
+    #[test]
+    fn test_v1_parse_hostname() {
+        let (host, port) = parse_bind_address("localhost:8080").unwrap();
+        assert_eq!(host, "localhost");
+        assert_eq!(port, 8080);
+    }
+
+    #[test]
+    fn test_v1_parse_unbracketed_ipv6() {
+        let (host, port) = parse_bind_address("::1:3000").unwrap();
+        assert_eq!(host, "::1");
+        assert_eq!(port, 3000);
     }
 
     #[test]
