@@ -1,7 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Config",
-  "description": "A top-level enum for versioned configurations.",
   "oneOf": [
     {
       "type": "object",
@@ -12,6 +11,19 @@
         }
       },
       "$ref": "#/$defs/ConfigV1",
+      "required": [
+        "version"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string",
+          "const": "2.0.0"
+        }
+      },
+      "$ref": "#/$defs/ConfigV2",
       "required": [
         "version"
       ]
@@ -538,41 +550,6 @@
         "augment"
       ]
     },
-    "ServerConfig": {
-      "type": "object",
-      "properties": {
-        "host": {
-          "type": "string",
-          "default": "0.0.0.0"
-        },
-        "port": {
-          "type": "integer",
-          "format": "uint16",
-          "minimum": 0,
-          "maximum": 65535
-        }
-      },
-      "required": [
-        "port"
-      ]
-    },
-    "MetricsConfig": {
-      "description": "Controls the dedicated metrics/health server on a separate port.",
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        },
-        "port": {
-          "type": "integer",
-          "format": "uint16",
-          "minimum": 0,
-          "maximum": 65535,
-          "default": 9090
-        }
-      }
-    },
     "JWTConfig": {
       "description": "A simple definition for JWT usage in tokens.",
       "type": "object",
@@ -637,7 +614,97 @@
       }
     },
     "ConfigV1": {
-      "description": "Main config for v1.0.0, containing store, providers, augmenters, etc.",
+      "type": "object",
+      "properties": {
+        "store": {
+          "$ref": "#/$defs/StoreConfig"
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ServiceConfig"
+          }
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderConfig"
+          }
+        },
+        "augmenters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AugmenterConfig"
+          },
+          "default": []
+        },
+        "bind_address": {
+          "type": "string"
+        },
+        "jwt": {
+          "$ref": "#/$defs/JWTConfig"
+        },
+        "include_legacy_headers": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "logging": {
+          "$ref": "#/$defs/LoggingConfig"
+        },
+        "auth": {
+          "$ref": "#/$defs/AuthConfig",
+          "default": {
+            "timeout_in_ms": 5000
+          }
+        }
+      },
+      "required": [
+        "store",
+        "services",
+        "providers",
+        "bind_address",
+        "jwt",
+        "logging"
+      ]
+    },
+    "ServerConfig": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "type": "string",
+          "default": "0.0.0.0"
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        }
+      },
+      "required": [
+        "port"
+      ]
+    },
+    "MetricsConfig": {
+      "description": "Controls the dedicated metrics/health server on a separate port.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535,
+          "default": 9090
+        }
+      }
+    },
+    "ConfigV2": {
       "type": "object",
       "properties": {
         "store": {

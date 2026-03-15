@@ -137,6 +137,7 @@ fn parse_bind_address(addr: &str) -> (String, u16) {
     let port = addr[colon_pos + 1..]
         .parse::<u16>()
         .unwrap_or_else(|_| panic!("invalid port in bind_address: {addr}"));
+    let host = host.trim_start_matches('[').trim_end_matches(']');
     (host.to_owned(), port)
 }
 
@@ -447,14 +448,14 @@ services: []
     }
 
     #[test]
-    fn test_v1_backward_compat_ipv6() {
+    fn test_v1_backward_compat_ipv6_bracketed() {
         let yaml = r#"
 version: "1.0.0"
 store:
   enabled: false
 providers: []
 augmenters: []
-bind_address: "::1:3000"
+bind_address: "[::1]:3000"
 jwt:
   iss: "issuer"
   exp: 3600
