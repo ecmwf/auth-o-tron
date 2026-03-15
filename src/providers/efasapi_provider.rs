@@ -108,6 +108,8 @@ async fn query(uri: String, token: String, realm: String) -> Result<Return<User>
     debug!(
         event_name = "providers.efas_api.query.started",
         event_domain = "providers",
+        base_uri = uri.as_str(),
+        realm = realm.as_str(),
         "sending EFAS user-details request"
     );
     let response = match client.get(&url).send().await {

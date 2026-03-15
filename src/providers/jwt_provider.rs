@@ -215,6 +215,7 @@ pub async fn get_certs(cert_uri: String) -> Result<Return<String>, String> {
     debug!(
         event_name = "providers.jwt.jwks.fetch.started",
         event_domain = "providers",
+        cert_uri = cert_uri.as_str(),
         "fetching JWK set from certificate URI"
     );
     let res = reqwest::get(&cert_uri)

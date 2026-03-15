@@ -75,6 +75,7 @@ async fn validate_token_with_generator(
     debug!(
         event_name = "providers.ecmwf_token_generator.validate.started",
         event_domain = "providers",
+        token_generator_url = config.token_generator_url.as_str(),
         realm = config.realm.as_str(),
         "validating token with ECMWF token generator"
     );
@@ -127,6 +128,7 @@ async fn get_access_token_from_generator(
     debug!(
         event_name = "providers.ecmwf_token_generator.exchange.started",
         event_domain = "providers",
+        token_generator_url = config.token_generator_url.as_str(),
         realm = config.realm.as_str(),
         "exchanging refresh token for access token"
     );
