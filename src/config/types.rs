@@ -25,13 +25,52 @@ pub struct ConfigV1 {
     pub providers: Vec<ProviderConfig>,
     #[serde(default)]
     pub augmenters: Vec<AugmenterConfig>,
-    pub bind_address: String,
+    pub server: ServerConfig,
     pub jwt: JWTConfig,
     pub include_legacy_headers: Option<bool>,
     pub logging: LoggingConfig,
-    // If the YAML omits the auth section, Serde calls AuthConfig::default().
     #[serde(default)]
     pub auth: AuthConfig,
+}
+
+fn default_host() -> String {
+    "0.0.0.0".to_owned()
+}
+
+/// Server bind configuration with separate application and metrics ports.
+#[derive(Deserialize, Serialize, Debug, JsonSchema)]
+pub struct ServerConfig {
+    #[serde(default = "default_host")]
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub metrics: MetricsServerConfig,
+}
+
+fn default_metrics_enabled() -> bool {
+    true
+}
+
+fn default_metrics_port() -> u16 {
+    9090
+}
+
+/// Controls the dedicated metrics/health server.
+#[derive(Deserialize, Serialize, Debug, JsonSchema)]
+pub struct MetricsServerConfig {
+    #[serde(default = "default_metrics_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_metrics_port")]
+    pub port: u16,
+}
+
+impl Default for MetricsServerConfig {
+    fn default() -> Self {
+        MetricsServerConfig {
+            enabled: default_metrics_enabled(),
+            port: default_metrics_port(),
+        }
+    }
 }
 
 /// Load configuration using a flexible approach:
@@ -145,7 +184,9 @@ store:
   enabled: false
 providers: []
 augmenters: []
-bind_address: "127.0.0.1:3000"
+server:
+  host: "127.0.0.1"
+  port: 3000
 jwt:
   iss: "issuer"
   exp: 3600
@@ -159,20 +200,20 @@ services: []
         let config: Config = figment.extract().expect("Should parse config");
         match config {
             Config::ConfigV1(c) => {
-                // Check that basic fields are deserialized as expected.
-                assert_eq!(c.bind_address, "127.0.0.1:3000");
+                assert_eq!(c.server.host, "127.0.0.1");
+                assert_eq!(c.server.port, 3000);
+                assert!(c.server.metrics.enabled);
+                assert_eq!(c.server.metrics.port, 9090);
                 assert_eq!(c.logging.level, "info");
                 assert_eq!(c.jwt.iss, "issuer");
                 assert_eq!(c.jwt.exp, 3600);
                 assert_eq!(c.jwt.secret, "secret");
-                // Since the auth section is omitted, we expect AuthConfig::default()
-                // to be used, which sets timeout_in_ms to 5000.
                 assert_eq!(c.auth.timeout_in_ms, 5000);
             }
         }
     }
 
-    /// Test that deserialization fails when a required field (e.g., bind_address) is missing.
+    /// Test that deserialization fails when the server section is missing.
     #[test]
     fn test_config_deserialization_missing_fields() {
         let yaml = r#"
@@ -191,11 +232,10 @@ logging:
 services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
-        // Extraction should fail because bind_address is required.
         let result = figment.extract::<Config>();
         assert!(
             result.is_err(),
-            "Deserialization should fail when bind_address is missing"
+            "Deserialization should fail when server section is missing"
         );
     }
 
@@ -208,7 +248,8 @@ store:
   enabled: false
 providers: []
 augmenters: []
-bind_address: "127.0.0.1:3000"
+server:
+  port: 3000
 jwt:
   iss: "issuer"
   exp: 3600
@@ -224,7 +265,6 @@ auth:
         let config: Config = figment.extract().expect("Should parse config with auth");
         match config {
             Config::ConfigV1(c) => {
-                // Here, the auth section is provided, so timeout_in_ms should be as specified.
                 assert_eq!(c.auth.timeout_in_ms, 8000);
             }
         }
@@ -233,15 +273,14 @@ auth:
     /// Test that if the auth section is omitted, the default AuthConfig is used.
     #[test]
     fn test_config_auth_absence() {
-        // When the auth section is omitted, our manual Default implementation
-        // for AuthConfig should set timeout_in_ms to 5000.
         let yaml = r#"
 version: "1.0.0"
 store:
   enabled: false
 providers: []
 augmenters: []
-bind_address: "127.0.0.1:3000"
+server:
+  port: 3000
 jwt:
   iss: "issuer"
   exp: 3600
@@ -274,14 +313,14 @@ services: []
             env::set_var("APP_JWT__ISS", "overridden-issuer");
         }
 
-        // Use a YAML string that has a default "issuer" value for jwt.iss.
         let yaml = r#"
 version: "1.0.0"
 store:
   enabled: false
 providers: []
 augmenters: []
-bind_address: "127.0.0.1:3000"
+server:
+  port: 3000
 jwt:
   iss: "issuer"
   exp: 3600
