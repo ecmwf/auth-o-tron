@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use authotron::auth::Auth;
-use authotron::config::{AuthConfig, ConfigV1};
+use authotron::config::{AuthConfig, ConfigV2};
 use authotron::metrics::Metrics;
 use authotron::routes::create_app_router;
 use authotron::state::AppState;
@@ -25,7 +25,7 @@ pub struct Claims {
     pub realm: Option<String>,
 }
 
-pub async fn build_app(config: ConfigV1) -> (Router, Arc<ConfigV1>) {
+pub async fn build_app(config: ConfigV2) -> (Router, Arc<ConfigV2>) {
     let config = Arc::new(config);
     let store = create_store(&config.store).await;
     let auth = Arc::new(Auth::new(

@@ -1,4 +1,4 @@
-use authotron::config::{Config, ConfigV1, MetricsConfig, ServerConfig};
+use authotron::config::{Config, ConfigV2, MetricsConfig, ServerConfig};
 use authotron::startup;
 use figment::{
     Figment,
@@ -6,9 +6,9 @@ use figment::{
 };
 use std::sync::Arc;
 
-fn base_config(server_port: u16, metrics_enabled: bool, metrics_port: u16) -> ConfigV1 {
+fn base_config(server_port: u16, metrics_enabled: bool, metrics_port: u16) -> ConfigV2 {
     let yaml = r#"
-version: "1.0.0"
+version: "2.0.0"
 store:
   enabled: false
 providers: []
@@ -30,7 +30,9 @@ services: []
         .extract()
         .expect("Failed to parse config");
 
-    let Config::ConfigV1(mut cfg) = config;
+    let Config::ConfigV2(mut cfg) = config else {
+        panic!("expected ConfigV2");
+    };
 
     cfg.server = ServerConfig {
         host: "127.0.0.1".to_owned(),

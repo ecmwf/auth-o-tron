@@ -4,7 +4,7 @@
 //! including configuration, authentication, and token storage.
 
 use crate::auth::Auth;
-use crate::config::ConfigV1;
+use crate::config::ConfigV2;
 use crate::metrics::Metrics;
 use crate::store::Store;
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct AppState {
     /// Application configuration loaded at startup.
-    pub config: Arc<ConfigV1>,
+    pub config: Arc<ConfigV2>,
     /// Authentication system handling provider and augmenter chains.
     pub auth: Arc<Auth>,
     /// Token store for managing persistent authentication tokens.

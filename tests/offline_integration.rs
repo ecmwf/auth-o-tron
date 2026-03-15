@@ -1,4 +1,4 @@
-use authotron::config::{Config, ConfigV1};
+use authotron::config::{Config, ConfigV2};
 use axum::http::{Method, StatusCode};
 use figment::{
     Figment,
@@ -11,7 +11,7 @@ mod common;
 use common::{build_app, decode_claims, request_with_basic};
 
 const TEST_CONFIG: &str = r#"
-version: "1.0.0"
+version: "2.0.0"
 logging:
   level: "debug"
   format: "json"
@@ -66,15 +66,16 @@ metrics:
   enabled: false
 "#;
 
-fn load_test_config() -> ConfigV1 {
+fn load_test_config() -> ConfigV2 {
     let config: Config = Figment::new()
         .merge(Yaml::string(TEST_CONFIG))
         .extract()
         .expect("Failed to parse test config YAML");
 
-    match config {
-        Config::ConfigV1(cfg) => cfg,
-    }
+    let Config::ConfigV2(cfg) = config else {
+        panic!("expected ConfigV2");
+    };
+    cfg
 }
 
 #[tokio::test]

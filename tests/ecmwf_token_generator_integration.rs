@@ -1,4 +1,4 @@
-use authotron::config::{Config, ConfigV1};
+use authotron::config::{Config, ConfigV2};
 use axum::http::{Method, StatusCode};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use figment::{
@@ -20,10 +20,10 @@ const TEST_HOST: &str = "127.0.0.1";
 const TEST_PORT: u16 = 8082;
 const FUTURE_EXP: i64 = 4_102_444_800; // Far in the future to avoid flakiness.
 
-fn build_config(generator_url: &str, cert_url: &str) -> ConfigV1 {
+fn build_config(generator_url: &str, cert_url: &str) -> ConfigV2 {
     let yaml = format!(
         r#"
-version: "1.0.0"
+version: "2.0.0"
 logging:
   level: "warn"
   format: "json"
@@ -58,9 +58,10 @@ metrics:
         .extract()
         .expect("Failed to parse integration test config");
 
-    match config {
-        Config::ConfigV1(cfg) => cfg,
-    }
+    let Config::ConfigV2(cfg) = config else {
+        panic!("expected ConfigV2");
+    };
+    cfg
 }
 
 fn build_jwks(kid: &str, secret: &[u8]) -> String {

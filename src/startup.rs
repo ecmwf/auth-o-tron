@@ -8,13 +8,13 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 use crate::auth::Auth;
-use crate::config::ConfigV1;
+use crate::config::ConfigV2;
 use crate::metrics::Metrics;
 use crate::routes;
 use crate::state::AppState;
 use crate::store::create_store;
 
-pub async fn run(config: Arc<ConfigV1>) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(config: Arc<ConfigV2>) -> Result<(), Box<dyn std::error::Error>> {
     let store = create_store(&config.store).await;
     let auth_config = config.auth.clone();
     let auth = Arc::new(Auth::new(
