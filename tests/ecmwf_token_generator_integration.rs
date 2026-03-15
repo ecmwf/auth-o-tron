@@ -16,7 +16,8 @@ use common::{build_app, decode_claims, request_with_bearer};
 
 const CLIENT_ID: &str = "polytope";
 const CLIENT_SECRET: &str = "polytope-secret";
-const TEST_BIND_ADDRESS: &str = "127.0.0.1:8082";
+const TEST_HOST: &str = "127.0.0.1";
+const TEST_PORT: u16 = 8082;
 const FUTURE_EXP: i64 = 4_102_444_800; // Far in the future to avoid flakiness.
 
 fn build_config(generator_url: &str, cert_url: &str) -> ConfigV1 {
@@ -44,7 +45,11 @@ jwt:
   exp: 3600
   iss: authotron-test
   secret: test-secret
-bind_address: {TEST_BIND_ADDRESS}
+server:
+  host: "{TEST_HOST}"
+  port: {TEST_PORT}
+  metrics:
+    enabled: false
 "#
     );
 
