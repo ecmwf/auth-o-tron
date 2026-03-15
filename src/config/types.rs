@@ -354,4 +354,95 @@ auth:
             }
         }
     }
+
+    #[test]
+    fn test_metrics_config_defaults_when_omitted() {
+        let yaml = r#"
+version: "1.0.0"
+store:
+  enabled: false
+providers: []
+augmenters: []
+server:
+  port: 3000
+jwt:
+  iss: "issuer"
+  exp: 3600
+  secret: "secret"
+logging:
+  level: "info"
+  format: "console"
+services: []
+        "#;
+        let figment = Figment::new().merge(Yaml::string(yaml));
+        let config: Config = figment.extract().expect("Should parse config");
+        match config {
+            Config::ConfigV1(c) => {
+                assert!(c.metrics.enabled);
+                assert_eq!(c.metrics.port, 9090);
+                assert_eq!(c.server.host, "0.0.0.0");
+            }
+        }
+    }
+
+    #[test]
+    fn test_metrics_config_explicit_disabled() {
+        let yaml = r#"
+version: "1.0.0"
+store:
+  enabled: false
+providers: []
+augmenters: []
+server:
+  port: 3000
+metrics:
+  enabled: false
+jwt:
+  iss: "issuer"
+  exp: 3600
+  secret: "secret"
+logging:
+  level: "info"
+  format: "console"
+services: []
+        "#;
+        let figment = Figment::new().merge(Yaml::string(yaml));
+        let config: Config = figment.extract().expect("Should parse config");
+        match config {
+            Config::ConfigV1(c) => {
+                assert!(!c.metrics.enabled);
+            }
+        }
+    }
+
+    #[test]
+    fn test_metrics_config_custom_port() {
+        let yaml = r#"
+version: "1.0.0"
+store:
+  enabled: false
+providers: []
+augmenters: []
+server:
+  port: 3000
+metrics:
+  port: 9999
+jwt:
+  iss: "issuer"
+  exp: 3600
+  secret: "secret"
+logging:
+  level: "info"
+  format: "console"
+services: []
+        "#;
+        let figment = Figment::new().merge(Yaml::string(yaml));
+        let config: Config = figment.extract().expect("Should parse config");
+        match config {
+            Config::ConfigV1(c) => {
+                assert!(c.metrics.enabled);
+                assert_eq!(c.metrics.port, 9999);
+            }
+        }
+    }
 }
