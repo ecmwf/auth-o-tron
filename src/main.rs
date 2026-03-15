@@ -5,6 +5,7 @@ use authotron::startup;
 use authotron::utils::logger::init_logging;
 use std::env;
 use std::sync::Arc;
+use tracing::error;
 
 #[tokio::main]
 async fn main() {
@@ -19,10 +20,10 @@ async fn main() {
     init_logging(&config.logging);
 
     if let Err(e) = startup::run(config).await {
-        tracing::error!(
+        error!(
             event_name = "startup.server.failed",
             event_domain = "startup",
-            error = e.to_string(),
+            error = %e,
             "server error"
         );
         std::process::exit(1);

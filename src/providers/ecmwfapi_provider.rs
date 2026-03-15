@@ -30,8 +30,11 @@ pub struct EcmwfApiProvider {
 impl EcmwfApiProvider {
     pub fn new(config: &EcmwfApiProviderConfig) -> Self {
         info!(
-            "Creating EcmwfApiAuth provider for realm '{}', name='{}'",
-            config.realm, config.name
+            event_name = "providers.ecmwf_api.initialization",
+            event_domain = "providers",
+            provider_name = config.name.as_str(),
+            realm = config.realm.as_str(),
+            "creating ECMWF API provider"
         );
         Self {
             config: config.clone(),
@@ -94,7 +97,11 @@ async fn query(uri: String, token: String, realm: String) -> Result<Return<User>
     let client = reqwest::Client::new();
     let url = format!("{}/who-am-i?token={}", uri, token);
 
-    debug!("Sending ECMWF who-am-i request to: {}", url);
+    debug!(
+        event_name = "providers.ecmwf_api.query.started",
+        event_domain = "providers",
+        "sending ECMWF who-am-i request"
+    );
     let response = match client.get(&url).send().await {
         Ok(r) => r,
         Err(e) => return Err(format!("Error sending request: {}", e)),

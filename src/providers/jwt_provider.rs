@@ -51,8 +51,11 @@ impl JWTProvider {
     /// Creates a new JWTProvider with the given config.
     pub fn new(config: &JWTAuthConfig) -> Self {
         info!(
-            "Creating JWTAuth provider for realm '{}', name='{}'",
-            config.realm, config.name
+            event_name = "providers.jwt.initialization",
+            event_domain = "providers",
+            provider_name = config.name.as_str(),
+            realm = config.realm.as_str(),
+            "creating JWT provider"
         );
         Self {
             config: config.clone(),
@@ -74,8 +77,11 @@ impl Provider for JWTProvider {
     /// Authenticates a token by decoding its header, fetching the right key, and validating.
     async fn authenticate(&self, token: &str) -> Result<User, String> {
         debug!(
-            "Attempting JWT decode for realm='{}', name='{}'",
-            self.config.realm, self.config.name
+            event_name = "providers.jwt.decode.started",
+            event_domain = "providers",
+            provider_name = self.config.name.as_str(),
+            realm = self.config.realm.as_str(),
+            "attempting JWT decode"
         );
 
         // Fetch the JWK set (cached)
@@ -112,7 +118,12 @@ impl Provider for JWTProvider {
             .map_err(|e| format!("Failed to parse certificates: {}", e))?;
 
         let kid = header.kid.ok_or("Missing 'kid' in JWT header")?;
-        debug!("Using kid: {}", kid);
+        debug!(
+            event_name = "providers.jwt.decode.kid_selected",
+            event_domain = "providers",
+            kid = kid.as_str(),
+            "selected key identifier for JWT validation"
+        );
         let jwk = jwks.find(&kid).ok_or(format!(
             "Failed to find certificate with matching kid {}",
             kid
@@ -126,7 +137,14 @@ impl Provider for JWTProvider {
 
         let decoded = decode::<Claims>(token, &decoding_key, &validation)
             .map_err(|e| format!("Failed to decode JWT: {}", e))?;
-        debug!("Decoded jwt contents: {:?}", decoded);
+        debug!(
+            event_name = "providers.jwt.decode.success",
+            event_domain = "providers",
+            provider_name = self.config.name.as_str(),
+            realm = self.config.realm.as_str(),
+            alg,
+            "JWT decoded successfully"
+        );
 
         let claims = decoded.claims;
         // Collect roles from various places
@@ -194,7 +212,11 @@ impl Provider for JWTProvider {
     )
 )]
 pub async fn get_certs(cert_uri: String) -> Result<Return<String>, String> {
-    debug!("Fetching certificates from {}", cert_uri);
+    debug!(
+        event_name = "providers.jwt.jwks.fetch.started",
+        event_domain = "providers",
+        "fetching JWK set from certificate URI"
+    );
     let res = reqwest::get(&cert_uri)
         .await
         .map_err(|e| format!("Failed to download certificates: {}", e))?;
