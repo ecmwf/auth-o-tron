@@ -113,14 +113,14 @@ where
         let mut root = Map::new();
         root.insert(
             "timestamp".to_string(),
-            Value::from(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)),
+            Value::from(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)),
         );
         root.insert(
-            "severity_text".to_string(),
+            "severityText".to_string(),
             Value::from(metadata.level().as_str()),
         );
         root.insert(
-            "severity_number".to_string(),
+            "severityNumber".to_string(),
             Value::from(Self::severity_number(metadata.level())),
         );
         root.insert("body".to_string(), Value::from(body));
