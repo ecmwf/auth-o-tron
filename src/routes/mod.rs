@@ -1,7 +1,7 @@
 //! HTTP route definitions and handlers.
 //!
-//! This module organizes all HTTP endpoints into logical groups:
-//! authentication, token management, provider information, and health checks.
+//! Application routes (auth, tokens, providers, augmenters, health) and
+//! metrics routes (metrics, health) are served on separate ports.
 
 mod augmenters;
 mod auth;
@@ -13,16 +13,18 @@ mod tokens;
 use crate::state::AppState;
 use axum::Router;
 
-/// Creates the application router with all configured routes.
-///
-/// Combines all route modules into a single router and attaches
-/// the application state for access in handlers.
-pub fn create_router(state: AppState) -> Router {
+pub fn create_app_router(state: AppState) -> Router {
     Router::new()
         .merge(auth::routes())
         .merge(tokens::routes())
         .merge(providers::routes())
         .merge(augmenters::routes())
+        .merge(health::routes())
+        .with_state(state)
+}
+
+pub fn create_metrics_router(state: AppState) -> Router {
+    Router::new()
         .merge(health::routes())
         .merge(metrics::routes())
         .with_state(state)

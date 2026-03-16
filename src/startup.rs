@@ -1,7 +1,7 @@
 //! Application startup and server initialization.
 //!
-//! This module handles the creation and configuration of the HTTP server,
-//! including initialization of the authentication system, token store, and route setup.
+//! Starts the application server and, when enabled, a dedicated metrics/health server
+//! on a separate port.
 
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -14,16 +14,6 @@ use crate::routes;
 use crate::state::AppState;
 use crate::store::create_store;
 
-/// Initializes and runs the application server.
-///
-/// Sets up the authentication system, token store, and HTTP server
-/// with configured routes. Binds to the address specified in the configuration
-/// and starts serving requests.
-///
-/// # Errors
-///
-/// Returns an error if the server fails to bind to the specified address
-/// or encounters a runtime error during execution.
 pub async fn run(config: Arc<ConfigV1>) -> Result<(), Box<dyn std::error::Error>> {
     let store = create_store(&config.store).await;
     let auth_config = config.auth.clone();
@@ -34,19 +24,7 @@ pub async fn run(config: Arc<ConfigV1>) -> Result<(), Box<dyn std::error::Error>
         auth_config,
     ));
 
-    info!(
-        event_name = "startup.server.starting",
-        event_domain = "startup",
-        bind_address = config.bind_address.as_str(),
-        "starting http server"
-    );
-
     let metrics = Metrics::new();
-    info!(
-        event_name = "startup.metrics.initialized",
-        event_domain = "startup",
-        "metrics initialized"
-    );
 
     let state = AppState {
         config: config.clone(),
@@ -55,18 +33,80 @@ pub async fn run(config: Arc<ConfigV1>) -> Result<(), Box<dyn std::error::Error>
         metrics,
     };
 
-    let app = routes::create_router(state);
+    if config.metrics.enabled && config.server.port == config.metrics.port {
+        return Err(format!(
+            "application port and metrics port are both {}, they must be different",
+            config.server.port
+        )
+        .into());
+    }
 
-    let listener = TcpListener::bind(&config.bind_address)
+    let host = config.server.host.as_str();
+    let app = routes::create_app_router(state.clone());
+    let app_listener = TcpListener::bind((host, config.server.port))
         .await
-        .expect("Could not bind to specified address");
+        .map_err(|e| {
+            format!(
+                "could not bind application server on {}:{}: {e}",
+                host, config.server.port
+            )
+        })?;
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await
-    .unwrap();
+    info!(
+        event_name = "startup.server.listening",
+        event_domain = "startup",
+        host,
+        port = config.server.port,
+        "application server listening"
+    );
+
+    if config.metrics.enabled {
+        let metrics_router = routes::create_metrics_router(state);
+        let metrics_listener = TcpListener::bind((host, config.metrics.port))
+            .await
+            .map_err(|e| {
+                format!(
+                    "could not bind metrics server on {}:{}: {e}",
+                    host, config.metrics.port
+                )
+            })?;
+
+        info!(
+            event_name = "startup.metrics.listening",
+            event_domain = "startup",
+            host,
+            port = config.metrics.port,
+            "metrics server listening"
+        );
+
+        tokio::try_join!(
+            async {
+                axum::serve(
+                    app_listener,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+            },
+            async {
+                axum::serve(metrics_listener, metrics_router)
+                    .await
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+            }
+        )?;
+    } else {
+        info!(
+            event_name = "startup.metrics.disabled",
+            event_domain = "startup",
+            "metrics server disabled"
+        );
+
+        axum::serve(
+            app_listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await?;
+    }
 
     Ok(())
 }

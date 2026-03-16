@@ -4,7 +4,7 @@ use std::sync::Arc;
 use authotron::auth::Auth;
 use authotron::config::{AuthConfig, ConfigV1};
 use authotron::metrics::Metrics;
-use authotron::routes::create_router;
+use authotron::routes::create_app_router;
 use authotron::state::AppState;
 use authotron::store::create_store;
 use axum::Router;
@@ -45,7 +45,7 @@ pub async fn build_app(config: ConfigV1) -> (Router, Arc<ConfigV1>) {
         metrics,
     };
 
-    (create_router(state), config)
+    (create_app_router(state), config)
 }
 
 #[allow(dead_code)]

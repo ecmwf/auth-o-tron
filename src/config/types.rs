@@ -25,13 +25,51 @@ pub struct ConfigV1 {
     pub providers: Vec<ProviderConfig>,
     #[serde(default)]
     pub augmenters: Vec<AugmenterConfig>,
-    pub bind_address: String,
+    pub server: ServerConfig,
+    #[serde(default)]
+    pub metrics: MetricsConfig,
     pub jwt: JWTConfig,
     pub include_legacy_headers: Option<bool>,
     pub logging: LoggingConfig,
-    // If the YAML omits the auth section, Serde calls AuthConfig::default().
     #[serde(default)]
     pub auth: AuthConfig,
+}
+
+fn default_host() -> String {
+    "0.0.0.0".to_owned()
+}
+
+#[derive(Deserialize, Serialize, Debug, JsonSchema)]
+pub struct ServerConfig {
+    #[serde(default = "default_host")]
+    pub host: String,
+    pub port: u16,
+}
+
+fn default_metrics_enabled() -> bool {
+    true
+}
+
+fn default_metrics_port() -> u16 {
+    9090
+}
+
+/// Controls the dedicated metrics/health server on a separate port.
+#[derive(Deserialize, Serialize, Debug, JsonSchema)]
+pub struct MetricsConfig {
+    #[serde(default = "default_metrics_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_metrics_port")]
+    pub port: u16,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        MetricsConfig {
+            enabled: default_metrics_enabled(),
+            port: default_metrics_port(),
+        }
+    }
 }
 
 /// Load configuration using a flexible approach:
@@ -145,7 +183,9 @@ store:
   enabled: false
 providers: []
 augmenters: []
-bind_address: "127.0.0.1:3000"
+server:
+  host: "127.0.0.1"
+  port: 3000
 jwt:
   iss: "issuer"
   exp: 3600
@@ -159,20 +199,20 @@ services: []
         let config: Config = figment.extract().expect("Should parse config");
         match config {
             Config::ConfigV1(c) => {
-                // Check that basic fields are deserialized as expected.
-                assert_eq!(c.bind_address, "127.0.0.1:3000");
+                assert_eq!(c.server.host, "127.0.0.1");
+                assert_eq!(c.server.port, 3000);
+                assert!(c.metrics.enabled);
+                assert_eq!(c.metrics.port, 9090);
                 assert_eq!(c.logging.level, "info");
                 assert_eq!(c.jwt.iss, "issuer");
                 assert_eq!(c.jwt.exp, 3600);
                 assert_eq!(c.jwt.secret, "secret");
-                // Since the auth section is omitted, we expect AuthConfig::default()
-                // to be used, which sets timeout_in_ms to 5000.
                 assert_eq!(c.auth.timeout_in_ms, 5000);
             }
         }
     }
 
-    /// Test that deserialization fails when a required field (e.g., bind_address) is missing.
+    /// Test that deserialization fails when the server section is missing.
     #[test]
     fn test_config_deserialization_missing_fields() {
         let yaml = r#"
@@ -191,11 +231,10 @@ logging:
 services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
-        // Extraction should fail because bind_address is required.
         let result = figment.extract::<Config>();
         assert!(
             result.is_err(),
-            "Deserialization should fail when bind_address is missing"
+            "Deserialization should fail when server section is missing"
         );
     }
 
@@ -208,7 +247,8 @@ store:
   enabled: false
 providers: []
 augmenters: []
-bind_address: "127.0.0.1:3000"
+server:
+  port: 3000
 jwt:
   iss: "issuer"
   exp: 3600
@@ -224,7 +264,6 @@ auth:
         let config: Config = figment.extract().expect("Should parse config with auth");
         match config {
             Config::ConfigV1(c) => {
-                // Here, the auth section is provided, so timeout_in_ms should be as specified.
                 assert_eq!(c.auth.timeout_in_ms, 8000);
             }
         }
@@ -233,15 +272,14 @@ auth:
     /// Test that if the auth section is omitted, the default AuthConfig is used.
     #[test]
     fn test_config_auth_absence() {
-        // When the auth section is omitted, our manual Default implementation
-        // for AuthConfig should set timeout_in_ms to 5000.
         let yaml = r#"
 version: "1.0.0"
 store:
   enabled: false
 providers: []
 augmenters: []
-bind_address: "127.0.0.1:3000"
+server:
+  port: 3000
 jwt:
   iss: "issuer"
   exp: 3600
@@ -266,22 +304,20 @@ services: []
         use figment::providers::{Env, Yaml};
         use std::env;
 
-        // Save any previous value for cleanup
-        let original_jwt_iss = env::var("APP_JWT__ISS").ok();
+        let original_jwt_iss = env::var("AOT_JWT__ISS").ok();
 
-        // Set the environment variable to override jwt.iss.
         unsafe {
-            env::set_var("APP_JWT__ISS", "overridden-issuer");
+            env::set_var("AOT_JWT__ISS", "overridden-issuer");
         }
 
-        // Use a YAML string that has a default "issuer" value for jwt.iss.
         let yaml = r#"
 version: "1.0.0"
 store:
   enabled: false
 providers: []
 augmenters: []
-bind_address: "127.0.0.1:3000"
+server:
+  port: 3000
 jwt:
   iss: "issuer"
   exp: 3600
@@ -294,31 +330,118 @@ auth:
   timeout_in_ms: 8000
         "#;
 
-        // Create a Figment that merges the YAML and the environment overrides.
         let figment = figment::Figment::new()
             .merge(Yaml::string(yaml))
-            .merge(Env::prefixed("APP_").split("__"));
+            .merge(Env::prefixed("AOT_").split("__"));
 
-        // Extract the configuration.
         let config = figment
             .extract::<super::Config>()
             .expect("Failed to parse config");
 
-        // Verify that the jwt.iss value is overridden by the environment variable.
         match config {
             super::Config::ConfigV1(c) => {
                 assert_eq!(c.jwt.iss, "overridden-issuer");
             }
         }
 
-        // Clean up by restoring the original env variable (if any).
         if let Some(val) = original_jwt_iss {
             unsafe {
-                env::set_var("APP_JWT__ISS", val);
+                env::set_var("AOT_JWT__ISS", val);
             }
         } else {
             unsafe {
-                env::remove_var("APP_JWT__ISS");
+                env::remove_var("AOT_JWT__ISS");
+            }
+        }
+    }
+
+    #[test]
+    fn test_metrics_config_defaults_when_omitted() {
+        let yaml = r#"
+version: "1.0.0"
+store:
+  enabled: false
+providers: []
+augmenters: []
+server:
+  port: 3000
+jwt:
+  iss: "issuer"
+  exp: 3600
+  secret: "secret"
+logging:
+  level: "info"
+  format: "console"
+services: []
+        "#;
+        let figment = Figment::new().merge(Yaml::string(yaml));
+        let config: Config = figment.extract().expect("Should parse config");
+        match config {
+            Config::ConfigV1(c) => {
+                assert!(c.metrics.enabled);
+                assert_eq!(c.metrics.port, 9090);
+                assert_eq!(c.server.host, "0.0.0.0");
+            }
+        }
+    }
+
+    #[test]
+    fn test_metrics_config_explicit_disabled() {
+        let yaml = r#"
+version: "1.0.0"
+store:
+  enabled: false
+providers: []
+augmenters: []
+server:
+  port: 3000
+metrics:
+  enabled: false
+jwt:
+  iss: "issuer"
+  exp: 3600
+  secret: "secret"
+logging:
+  level: "info"
+  format: "console"
+services: []
+        "#;
+        let figment = Figment::new().merge(Yaml::string(yaml));
+        let config: Config = figment.extract().expect("Should parse config");
+        match config {
+            Config::ConfigV1(c) => {
+                assert!(!c.metrics.enabled);
+            }
+        }
+    }
+
+    #[test]
+    fn test_metrics_config_custom_port() {
+        let yaml = r#"
+version: "1.0.0"
+store:
+  enabled: false
+providers: []
+augmenters: []
+server:
+  port: 3000
+metrics:
+  port: 9999
+jwt:
+  iss: "issuer"
+  exp: 3600
+  secret: "secret"
+logging:
+  level: "info"
+  format: "console"
+services: []
+        "#;
+        let figment = Figment::new().merge(Yaml::string(yaml));
+        let config: Config = figment.extract().expect("Should parse config");
+        match config {
+            Config::ConfigV1(c) => {
+                assert!(c.metrics.enabled);
+                assert_eq!(c.metrics.port, 9999);
             }
         }
     }
