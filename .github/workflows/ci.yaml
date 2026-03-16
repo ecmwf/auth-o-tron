@@ -3,21 +3,22 @@ name: CI
 on:
   push:
     branches:
-      - '**'  # Run on every branch push
-  # pull_request: # this is not necessary if we run on each push
+      - '**'
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
 
-      - name: Install rustfmt
-        run: rustup component add rustfmt
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
 
       - name: Check code formatting
         run: cargo fmt -- --check
