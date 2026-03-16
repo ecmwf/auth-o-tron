@@ -9,17 +9,32 @@ use super::store::StoreConfig;
 use crate::augmenters::AugmenterConfig;
 use crate::providers::ProviderConfig;
 
-/// A top-level enum for versioned configurations.
 #[derive(Deserialize, Serialize, JsonSchema)]
 #[serde(tag = "version")]
 pub enum Config {
     #[serde(rename = "1.0.0")]
     ConfigV1(ConfigV1),
+    #[serde(rename = "2.0.0")]
+    ConfigV2(ConfigV2),
 }
 
-/// Main config for v1.0.0, containing store, providers, augmenters, etc.
 #[derive(Deserialize, Serialize, Debug, JsonSchema)]
 pub struct ConfigV1 {
+    pub store: StoreConfig,
+    pub services: Vec<ServiceConfig>,
+    pub providers: Vec<ProviderConfig>,
+    #[serde(default)]
+    pub augmenters: Vec<AugmenterConfig>,
+    pub bind_address: String,
+    pub jwt: JWTConfig,
+    pub include_legacy_headers: Option<bool>,
+    pub logging: LoggingConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
+}
+
+#[derive(Deserialize, Serialize, Debug, JsonSchema)]
+pub struct ConfigV2 {
     pub store: StoreConfig,
     pub services: Vec<ServiceConfig>,
     pub providers: Vec<ProviderConfig>,
@@ -72,22 +87,15 @@ impl Default for MetricsConfig {
     }
 }
 
-/// Load configuration using a flexible approach:
-/// - Reads the YAML file path from the CONFIG_PATH environment variable, defaulting to "./config.yaml".
-/// - Merges environment variable overrides (prefixed with "AOT_" and using "__" to denote nested keys).
-pub fn load_config() -> ConfigV1 {
-    // Get the config file path from the environment variable `CONFIG_PATH` or default to "./config.yaml"
+/// Loads versioned config from `AOT_CONFIG_PATH` (default `./config.yaml`),
+/// merges `AOT_`-prefixed env overrides, and converts v1 configs to v2.
+pub fn load_config() -> ConfigV2 {
     let config_path = env::var("AOT_CONFIG_PATH").unwrap_or_else(|_| "./config.yaml".to_owned());
 
-    // Create a Figment provider that:
-    // 1. Loads configuration from the YAML file at `config_path`.
-    // 2. Merges environment variable overrides with the prefix "AOT_".
-    //    (For nested keys, use "__", e.g., AOT_JWT__ISS to override jwt.iss)
     let figment = Figment::new()
         .merge(Yaml::file(config_path))
         .merge(Env::prefixed("AOT_").split("__"));
 
-    // Extract the configuration. Exit the process with an error if extraction fails.
     let config = match figment.extract::<Config>() {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -96,10 +104,47 @@ pub fn load_config() -> ConfigV1 {
         }
     };
 
-    // Match on the versioned configuration and return the appropriate config struct.
     match config {
-        Config::ConfigV1(c) => c,
+        Config::ConfigV1(v1) => match convert_v1_to_v2(v1) {
+            Ok(v2) => v2,
+            Err(e) => {
+                eprintln!("Error migrating v1 config: {e}");
+                std::process::exit(1);
+            }
+        },
+        Config::ConfigV2(v2) => v2,
     }
+}
+
+fn convert_v1_to_v2(v1: ConfigV1) -> Result<ConfigV2, String> {
+    let (host, port) = parse_bind_address(&v1.bind_address)?;
+    Ok(ConfigV2 {
+        store: v1.store,
+        services: v1.services,
+        providers: v1.providers,
+        augmenters: v1.augmenters,
+        server: ServerConfig { host, port },
+        metrics: MetricsConfig::default(),
+        jwt: v1.jwt,
+        include_legacy_headers: v1.include_legacy_headers,
+        logging: v1.logging,
+        auth: v1.auth,
+    })
+}
+
+fn parse_bind_address(addr: &str) -> Result<(String, u16), String> {
+    let colon_pos = addr
+        .rfind(':')
+        .ok_or_else(|| format!("bind_address must be in host:port format, got: {addr}"))?;
+    let host = &addr[..colon_pos];
+    if host.is_empty() {
+        return Err(format!("bind_address has empty host, got: {addr}"));
+    }
+    let port = addr[colon_pos + 1..]
+        .parse::<u16>()
+        .map_err(|_| format!("invalid port in bind_address: {addr}"))?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    Ok((host.to_owned(), port))
 }
 
 /// Print the JSON schema for the configuration to stdout.
@@ -174,11 +219,10 @@ mod tests {
         );
     }
 
-    /// Test that a minimal valid configuration in YAML is deserialized properly.
     #[test]
-    fn test_config_deserialization_minimal() {
+    fn test_v2_config_deserialization_minimal() {
         let yaml = r#"
-version: "1.0.0"
+version: "2.0.0"
 store:
   enabled: false
 providers: []
@@ -197,26 +241,22 @@ services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let config: Config = figment.extract().expect("Should parse config");
-        match config {
-            Config::ConfigV1(c) => {
-                assert_eq!(c.server.host, "127.0.0.1");
-                assert_eq!(c.server.port, 3000);
-                assert!(c.metrics.enabled);
-                assert_eq!(c.metrics.port, 9090);
-                assert_eq!(c.logging.level, "info");
-                assert_eq!(c.jwt.iss, "issuer");
-                assert_eq!(c.jwt.exp, 3600);
-                assert_eq!(c.jwt.secret, "secret");
-                assert_eq!(c.auth.timeout_in_ms, 5000);
-            }
-        }
+        let Config::ConfigV2(c) = config else {
+            panic!("expected ConfigV2");
+        };
+        assert_eq!(c.server.host, "127.0.0.1");
+        assert_eq!(c.server.port, 3000);
+        assert!(c.metrics.enabled);
+        assert_eq!(c.metrics.port, 9090);
+        assert_eq!(c.logging.level, "info");
+        assert_eq!(c.jwt.iss, "issuer");
+        assert_eq!(c.auth.timeout_in_ms, 5000);
     }
 
-    /// Test that deserialization fails when the server section is missing.
     #[test]
-    fn test_config_deserialization_missing_fields() {
+    fn test_v2_config_deserialization_missing_server() {
         let yaml = r#"
-version: "1.0.0"
+version: "2.0.0"
 store:
   enabled: false
 providers: []
@@ -234,15 +274,14 @@ services: []
         let result = figment.extract::<Config>();
         assert!(
             result.is_err(),
-            "Deserialization should fail when server section is missing"
+            "should fail when server section is missing"
         );
     }
 
-    /// Test that a configuration with an "auth" section correctly deserializes the auth timeout.
     #[test]
-    fn test_config_auth_defaults() {
+    fn test_v2_auth_timeout_override() {
         let yaml = r#"
-version: "1.0.0"
+version: "2.0.0"
 store:
   enabled: false
 providers: []
@@ -261,104 +300,17 @@ auth:
   timeout_in_ms: 8000
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
-        let config: Config = figment.extract().expect("Should parse config with auth");
-        match config {
-            Config::ConfigV1(c) => {
-                assert_eq!(c.auth.timeout_in_ms, 8000);
-            }
-        }
-    }
-
-    /// Test that if the auth section is omitted, the default AuthConfig is used.
-    #[test]
-    fn test_config_auth_absence() {
-        let yaml = r#"
-version: "1.0.0"
-store:
-  enabled: false
-providers: []
-augmenters: []
-server:
-  port: 3000
-jwt:
-  iss: "issuer"
-  exp: 3600
-  secret: "secret"
-logging:
-  level: "info"
-  format: "console"
-services: []
-        "#;
-        let figment = Figment::new().merge(Yaml::string(yaml));
-        let config: Config = figment.extract().expect("Should parse config without auth");
-        match config {
-            Config::ConfigV1(c) => {
-                // Expect the default auth configuration.
-                assert_eq!(c.auth.timeout_in_ms, 5000);
-            }
-        }
+        let config: Config = figment.extract().expect("Should parse config");
+        let Config::ConfigV2(c) = config else {
+            panic!("expected ConfigV2");
+        };
+        assert_eq!(c.auth.timeout_in_ms, 8000);
     }
 
     #[test]
-    fn test_env_variable_override() {
-        use figment::providers::{Env, Yaml};
-        use std::env;
-
-        let original_jwt_iss = env::var("AOT_JWT__ISS").ok();
-
-        unsafe {
-            env::set_var("AOT_JWT__ISS", "overridden-issuer");
-        }
-
+    fn test_v2_auth_defaults_when_omitted() {
         let yaml = r#"
-version: "1.0.0"
-store:
-  enabled: false
-providers: []
-augmenters: []
-server:
-  port: 3000
-jwt:
-  iss: "issuer"
-  exp: 3600
-  secret: "secret"
-logging:
-  level: "info"
-  format: "console"
-services: []
-auth:
-  timeout_in_ms: 8000
-        "#;
-
-        let figment = figment::Figment::new()
-            .merge(Yaml::string(yaml))
-            .merge(Env::prefixed("AOT_").split("__"));
-
-        let config = figment
-            .extract::<super::Config>()
-            .expect("Failed to parse config");
-
-        match config {
-            super::Config::ConfigV1(c) => {
-                assert_eq!(c.jwt.iss, "overridden-issuer");
-            }
-        }
-
-        if let Some(val) = original_jwt_iss {
-            unsafe {
-                env::set_var("AOT_JWT__ISS", val);
-            }
-        } else {
-            unsafe {
-                env::remove_var("AOT_JWT__ISS");
-            }
-        }
-    }
-
-    #[test]
-    fn test_metrics_config_defaults_when_omitted() {
-        let yaml = r#"
-version: "1.0.0"
+version: "2.0.0"
 store:
   enabled: false
 providers: []
@@ -376,19 +328,45 @@ services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let config: Config = figment.extract().expect("Should parse config");
-        match config {
-            Config::ConfigV1(c) => {
-                assert!(c.metrics.enabled);
-                assert_eq!(c.metrics.port, 9090);
-                assert_eq!(c.server.host, "0.0.0.0");
-            }
-        }
+        let Config::ConfigV2(c) = config else {
+            panic!("expected ConfigV2");
+        };
+        assert_eq!(c.auth.timeout_in_ms, 5000);
     }
 
     #[test]
-    fn test_metrics_config_explicit_disabled() {
+    fn test_v2_metrics_defaults_when_omitted() {
         let yaml = r#"
-version: "1.0.0"
+version: "2.0.0"
+store:
+  enabled: false
+providers: []
+augmenters: []
+server:
+  port: 3000
+jwt:
+  iss: "issuer"
+  exp: 3600
+  secret: "secret"
+logging:
+  level: "info"
+  format: "console"
+services: []
+        "#;
+        let figment = Figment::new().merge(Yaml::string(yaml));
+        let config: Config = figment.extract().expect("Should parse config");
+        let Config::ConfigV2(c) = config else {
+            panic!("expected ConfigV2");
+        };
+        assert!(c.metrics.enabled);
+        assert_eq!(c.metrics.port, 9090);
+        assert_eq!(c.server.host, "0.0.0.0");
+    }
+
+    #[test]
+    fn test_v2_metrics_explicit_disabled() {
+        let yaml = r#"
+version: "2.0.0"
 store:
   enabled: false
 providers: []
@@ -408,17 +386,16 @@ services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let config: Config = figment.extract().expect("Should parse config");
-        match config {
-            Config::ConfigV1(c) => {
-                assert!(!c.metrics.enabled);
-            }
-        }
+        let Config::ConfigV2(c) = config else {
+            panic!("expected ConfigV2");
+        };
+        assert!(!c.metrics.enabled);
     }
 
     #[test]
-    fn test_metrics_config_custom_port() {
+    fn test_v2_metrics_custom_port() {
         let yaml = r#"
-version: "1.0.0"
+version: "2.0.0"
 store:
   enabled: false
 providers: []
@@ -438,10 +415,147 @@ services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let config: Config = figment.extract().expect("Should parse config");
-        match config {
-            Config::ConfigV1(c) => {
-                assert!(c.metrics.enabled);
-                assert_eq!(c.metrics.port, 9999);
+        let Config::ConfigV2(c) = config else {
+            panic!("expected ConfigV2");
+        };
+        assert!(c.metrics.enabled);
+        assert_eq!(c.metrics.port, 9999);
+    }
+
+    #[test]
+    fn test_v1_backward_compat_bind_address() {
+        let yaml = r#"
+version: "1.0.0"
+store:
+  enabled: false
+providers: []
+augmenters: []
+bind_address: "127.0.0.1:8080"
+jwt:
+  iss: "issuer"
+  exp: 3600
+  secret: "secret"
+logging:
+  level: "info"
+  format: "console"
+services: []
+        "#;
+        let figment = Figment::new().merge(Yaml::string(yaml));
+        let config: Config = figment.extract().expect("Should parse v1 config");
+        let Config::ConfigV1(v1) = config else {
+            panic!("expected ConfigV1");
+        };
+        let v2 = convert_v1_to_v2(v1).unwrap();
+        assert_eq!(v2.server.host, "127.0.0.1");
+        assert_eq!(v2.server.port, 8080);
+        assert!(v2.metrics.enabled);
+        assert_eq!(v2.metrics.port, 9090);
+        assert_eq!(v2.jwt.iss, "issuer");
+    }
+
+    #[test]
+    fn test_v1_backward_compat_ipv6_bracketed() {
+        let yaml = r#"
+version: "1.0.0"
+store:
+  enabled: false
+providers: []
+augmenters: []
+bind_address: "[::1]:3000"
+jwt:
+  iss: "issuer"
+  exp: 3600
+  secret: "secret"
+logging:
+  level: "info"
+  format: "console"
+services: []
+        "#;
+        let figment = Figment::new().merge(Yaml::string(yaml));
+        let config: Config = figment.extract().expect("Should parse v1 config");
+        let Config::ConfigV1(v1) = config else {
+            panic!("expected ConfigV1");
+        };
+        let v2 = convert_v1_to_v2(v1).unwrap();
+        assert_eq!(v2.server.host, "::1");
+        assert_eq!(v2.server.port, 3000);
+    }
+
+    #[test]
+    fn test_v1_rejects_empty_host() {
+        let err = parse_bind_address(":3000").unwrap_err();
+        assert!(err.contains("empty host"), "got: {err}");
+    }
+
+    #[test]
+    fn test_v1_rejects_missing_port() {
+        let err = parse_bind_address("localhost").unwrap_err();
+        assert!(err.contains("host:port"), "got: {err}");
+    }
+
+    #[test]
+    fn test_v1_parse_hostname() {
+        let (host, port) = parse_bind_address("localhost:8080").unwrap();
+        assert_eq!(host, "localhost");
+        assert_eq!(port, 8080);
+    }
+
+    #[test]
+    fn test_v1_parse_unbracketed_ipv6() {
+        let (host, port) = parse_bind_address("::1:3000").unwrap();
+        assert_eq!(host, "::1");
+        assert_eq!(port, 3000);
+    }
+
+    #[test]
+    fn test_v2_env_variable_override() {
+        use figment::providers::{Env, Yaml};
+        use std::env;
+
+        let original_jwt_iss = env::var("AOT_JWT__ISS").ok();
+
+        unsafe {
+            env::set_var("AOT_JWT__ISS", "overridden-issuer");
+        }
+
+        let yaml = r#"
+version: "2.0.0"
+store:
+  enabled: false
+providers: []
+augmenters: []
+server:
+  port: 3000
+jwt:
+  iss: "issuer"
+  exp: 3600
+  secret: "secret"
+logging:
+  level: "info"
+  format: "console"
+services: []
+        "#;
+
+        let figment = figment::Figment::new()
+            .merge(Yaml::string(yaml))
+            .merge(Env::prefixed("AOT_").split("__"));
+
+        let config = figment
+            .extract::<super::Config>()
+            .expect("Failed to parse config");
+
+        let super::Config::ConfigV2(c) = config else {
+            panic!("expected ConfigV2");
+        };
+        assert_eq!(c.jwt.iss, "overridden-issuer");
+
+        if let Some(val) = original_jwt_iss {
+            unsafe {
+                env::set_var("AOT_JWT__ISS", val);
+            }
+        } else {
+            unsafe {
+                env::remove_var("AOT_JWT__ISS");
             }
         }
     }
