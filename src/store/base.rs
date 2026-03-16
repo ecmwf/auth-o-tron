@@ -26,23 +26,43 @@ pub trait Store: Send + Sync {
 /// If `store.enabled = false`, returns NoStore. Otherwise, picks the specified backend.
 pub async fn create_store(config: &StoreConfig) -> Arc<dyn Store> {
     if !config.enabled {
-        info!("Token store is disabled. Using NoStore.");
+        info!(
+            event_name = "store.initialization.disabled",
+            event_domain = "store",
+            "token store is disabled, using no-op store"
+        );
         return Arc::new(NoStore::new());
     }
 
     match &config.backend {
         Some(StoreBackend::MongoDB(mongo_config)) => match MongoDBStore::new(mongo_config).await {
             Ok(store) => {
-                info!("Successfully created MongoDB store.");
+                info!(
+                    event_name = "store.initialization.success",
+                    event_domain = "store",
+                    backend = "mongodb",
+                    "token store created"
+                );
                 Arc::new(store)
             }
             Err(e) => {
-                error!("Failed to create MongoDB store: {}", e);
+                error!(
+                    event_name = "store.initialization.failed",
+                    event_domain = "store",
+                    backend = "mongodb",
+                    error = e.as_str(),
+                    "failed to create token store"
+                );
                 std::process::exit(1);
             }
         },
         None => {
-            error!("Store is enabled, but no backend config is provided!");
+            error!(
+                event_name = "store.initialization.failed",
+                event_domain = "store",
+                reason = "missing_backend_config",
+                "store is enabled but no backend config is provided"
+            );
             std::process::exit(1);
         }
     }

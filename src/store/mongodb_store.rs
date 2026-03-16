@@ -50,7 +50,11 @@ impl MongoDBStore {
     /// Creates a new `MongoDBStore` from the given config.
     /// It initializes client connections, sets up indexes, etc.
     pub async fn new(config: &MongoDBConfig) -> Result<Self, String> {
-        info!("Connecting to MongoDB at URI: {}", config.uri);
+        info!(
+            event_name = "store.mongodb.connecting",
+            event_domain = "store",
+            "connecting to MongoDB"
+        );
 
         // Parse the connection string from the config
         let mut client_options = ClientOptions::parse(&config.uri)
@@ -64,7 +68,11 @@ impl MongoDBStore {
         let client = Client::with_options(client_options)
             .map_err(|e| format!("Failed to create MongoDB client: {}", e))?;
 
-        info!("MongoDB connection established successfully.");
+        info!(
+            event_name = "store.mongodb.connected",
+            event_domain = "store",
+            "MongoDB connection established"
+        );
 
         // Retrieve the specified database and relevant collections
         let database = client.database(&config.database);
@@ -155,7 +163,11 @@ impl Store for MongoDBStore {
         let user_doc = match user_doc {
             Some(ud) => ud,
             None => {
-                debug!("User not found in DB, inserting new user document.");
+                debug!(
+                    event_name = "store.mongodb.user.not_found",
+                    event_domain = "store",
+                    "user not found in DB, inserting new document"
+                );
                 let new_user_doc = Self::user_to_doc(user);
                 self.user_collection
                     .insert_one(new_user_doc.clone())
@@ -223,7 +235,11 @@ impl Store for MongoDBStore {
                 .map_err(|e| format!("Failed to fetch user by user_id: {}", e))?;
 
             if let Some(ud) = user_doc {
-                debug!("User document found for token. user_id = {}", ud.user_id);
+                debug!(
+                    event_name = "store.mongodb.user.found",
+                    event_domain = "store",
+                    "user document found for token"
+                );
                 return Ok(Some(Self::doc_to_user(&ud)));
             }
         }

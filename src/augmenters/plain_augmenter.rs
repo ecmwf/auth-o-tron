@@ -29,11 +29,18 @@ impl PlainAugmenter {
     /// Create a new `PlainAugmenter` from the config struct.
     pub fn new(config: &PlainAugmenterConfig) -> Self {
         warn!(
-            "Plain augmenters are being deprecated in favour of advanced plain augmenters - please migrate your configuration"
+            event_name = "augmenters.plain.deprecation",
+            event_domain = "augmenters",
+            augmenter_name = config.name.as_str(),
+            realm = config.realm.as_str(),
+            "plain augmenters are deprecated, migrate to advanced plain augmenters"
         );
         info!(
-            "Creating PlainAugmenter for realm='{}', name='{}'",
-            config.realm, config.name
+            event_name = "augmenters.plain.initialization",
+            event_domain = "augmenters",
+            augmenter_name = config.name.as_str(),
+            realm = config.realm.as_str(),
+            "creating plain augmenter"
         );
         Self {
             config: config.clone(),

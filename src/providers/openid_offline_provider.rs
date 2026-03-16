@@ -36,8 +36,11 @@ impl OpenIDOfflineProvider {
     /// Creates a new `OpenIDOfflineProvider`, internally using a `JWTProvider` for final validation.
     pub fn new(config: &OpenIDOfflineProviderConfig) -> Self {
         info!(
-            "Creating OpenIDOfflineProvider for realm '{}', name='{}'",
-            config.realm, config.name
+            event_name = "providers.openid_offline.initialization",
+            event_domain = "providers",
+            provider_name = config.name.as_str(),
+            realm = config.realm.as_str(),
+            "creating OpenID offline provider"
         );
 
         // The nested JWT auth will handle the final token validation
@@ -69,7 +72,12 @@ async fn check_offline_access_token(
     config: OpenIDOfflineProviderConfig,
     token: String,
 ) -> Result<Return<bool>, String> {
-    debug!("Checking offline access token at realm='{}'", config.realm);
+    debug!(
+        event_name = "providers.openid_offline.introspection.started",
+        event_domain = "providers",
+        realm = config.realm.as_str(),
+        "checking offline access token"
+    );
 
     let introspection_url = format!(
         "{}/realms/{}/protocol/openid-connect/token/introspect",
@@ -110,8 +118,10 @@ async fn get_access_token(
     refresh_token: String,
 ) -> Result<Return<String>, String> {
     debug!(
-        "Exchanging offline token for an online access token at realm='{}'",
-        config.realm
+        event_name = "providers.openid_offline.exchange.started",
+        event_domain = "providers",
+        realm = config.realm.as_str(),
+        "exchanging offline token for access token"
     );
 
     let refresh_data = [

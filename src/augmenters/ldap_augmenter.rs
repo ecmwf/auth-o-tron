@@ -38,8 +38,11 @@ impl LDAPAugmenter {
     /// Creates a new LDAPAugmenter with the given config.
     pub fn new(config: &LDAPAugmenterConfig) -> LDAPAugmenter {
         info!(
-            "Creating LDAPAugmenter for realm='{}', name='{}'",
-            config.realm, config.name
+            event_name = "augmenters.ldap.initialization",
+            event_domain = "augmenters",
+            augmenter_name = config.name.as_str(),
+            realm = config.realm.as_str(),
+            "creating LDAP augmenter"
         );
         LDAPAugmenter {
             config: config.clone(),
@@ -181,8 +184,10 @@ async fn retrieve_ldap_user_roles(
     validate_filters(&config.filters)?;
 
     debug!(
-        "Connecting to LDAP at {}, searching for user CN={}",
-        config.uri, uid
+        event_name = "augmenters.ldap.lookup.connecting",
+        event_domain = "augmenters",
+        username = uid.as_str(),
+        "connecting to LDAP to retrieve user roles"
     );
 
     let (conn, mut ldap) = LdapConnAsync::new(&config.uri)

@@ -49,8 +49,11 @@ pub struct PlainAdvancedAugmenter {
 impl PlainAdvancedAugmenter {
     pub fn new(config: &PlainAdvancedAugmenterConfig) -> Self {
         info!(
-            "Creating PlainAdvancedAugmenter for realm='{}', name='{}'",
-            config.realm, config.name
+            event_name = "augmenters.plain_advanced.initialization",
+            event_domain = "augmenters",
+            augmenter_name = config.name.as_str(),
+            realm = config.realm.as_str(),
+            "creating advanced plain augmenter"
         );
         Self {
             config: config.clone(),

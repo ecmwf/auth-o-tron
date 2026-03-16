@@ -37,7 +37,13 @@ struct EfasUserDetailsResponse {
 
 impl EfasApiProvider {
     pub fn new(config: &EFASApiProviderConfig) -> Self {
-        info!("Creating EFASApiAuth provider for realm");
+        info!(
+            event_name = "providers.efas_api.initialization",
+            event_domain = "providers",
+            provider_name = config.name.as_str(),
+            realm = config.realm.as_str(),
+            "creating EFAS API provider"
+        );
         Self {
             config: config.clone(),
         }
@@ -99,7 +105,13 @@ async fn query(uri: String, token: String, realm: String) -> Result<Return<User>
     let client = reqwest::Client::new();
     let url = format!("{}?token={}", uri, token);
 
-    debug!("Sending EFAS user-details request to: {}", url);
+    debug!(
+        event_name = "providers.efas_api.query.started",
+        event_domain = "providers",
+        base_uri = uri.as_str(),
+        realm = realm.as_str(),
+        "sending EFAS user-details request"
+    );
     let response = match client.get(&url).send().await {
         Ok(r) => r,
         Err(e) => return Err(format!("Error sending request: {}", e)),

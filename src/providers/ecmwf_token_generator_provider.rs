@@ -35,8 +35,11 @@ impl EcmwfTokenGeneratorProvider {
     /// Creates a new `EcmwfTokenGeneratorProvider`, internally using a `JWTProvider` for final validation.
     pub fn new(config: &EcmwfTokenGeneratorProviderConfig) -> Self {
         info!(
-            "Creating EcmwfTokenGeneratorProvider for realm '{}', name='{}'",
-            config.realm, config.name
+            event_name = "providers.ecmwf_token_generator.initialization",
+            event_domain = "providers",
+            provider_name = config.name.as_str(),
+            realm = config.realm.as_str(),
+            "creating ECMWF token generator provider"
         );
 
         // The nested JWT auth will handle the final token validation
@@ -70,8 +73,11 @@ async fn validate_token_with_generator(
     token: String,
 ) -> Result<Return<bool>, String> {
     debug!(
-        "Validating token with ECMWF Token Generator at '{}' for realm='{}'",
-        config.token_generator_url, config.realm
+        event_name = "providers.ecmwf_token_generator.validate.started",
+        event_domain = "providers",
+        token_generator_url = config.token_generator_url.as_str(),
+        realm = config.realm.as_str(),
+        "validating token with ECMWF token generator"
     );
 
     let validate_url = format!("{}/validate-token", config.token_generator_url);
@@ -95,7 +101,12 @@ async fn validate_token_with_generator(
 
     // Check if the token is active
     let active = resp["active"].as_bool().unwrap_or(false);
-    debug!("Token validation completed: active={}", active);
+    debug!(
+        event_name = "providers.ecmwf_token_generator.validate.completed",
+        event_domain = "providers",
+        active,
+        "token validation completed"
+    );
     Ok(Return::new(active))
 }
 
@@ -115,8 +126,11 @@ async fn get_access_token_from_generator(
     refresh_token: String,
 ) -> Result<Return<String>, String> {
     debug!(
-        "Exchanging refresh token for access token via ECMWF Token Generator at '{}'",
-        config.token_generator_url
+        event_name = "providers.ecmwf_token_generator.exchange.started",
+        event_domain = "providers",
+        token_generator_url = config.token_generator_url.as_str(),
+        realm = config.realm.as_str(),
+        "exchanging refresh token for access token"
     );
 
     let refresh_url = format!("{}/admin/refresh-access-token", config.token_generator_url);
@@ -146,7 +160,11 @@ async fn get_access_token_from_generator(
         .ok_or_else(|| "Failed to retrieve access token from generator response".to_string())?
         .to_string();
 
-    debug!("Access token exchange completed successfully");
+    debug!(
+        event_name = "providers.ecmwf_token_generator.exchange.completed",
+        event_domain = "providers",
+        "access token exchange completed"
+    );
     Ok(Return::new(access_token))
 }
 

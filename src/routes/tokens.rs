@@ -8,6 +8,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tracing::error;
 use uuid::Uuid;
 
 use crate::models::token::Token;
@@ -39,7 +40,12 @@ struct ErrorResponse {
 
 /// Maps store errors to appropriate HTTP responses.
 fn map_store_error(e: String) -> (StatusCode, Json<ErrorResponse>) {
-    tracing::error!("Store error: {}", e);
+    error!(
+        event_name = "routes.tokens.store_error",
+        event_domain = "routes",
+        error = e.as_str(),
+        "token store operation failed"
+    );
     if e.to_lowercase().contains("disabled") {
         let body = ErrorResponse {
             error: "Token store is disabled".to_string(),
