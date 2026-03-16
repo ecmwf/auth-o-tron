@@ -1,3 +1,6 @@
+#[allow(dead_code)]
+mod common;
+
 use authotron::config::{Config, ConfigV2, MetricsConfig, ServerConfig};
 use authotron::startup;
 use axum::body::Body;
