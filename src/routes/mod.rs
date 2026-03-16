@@ -1,11 +1,13 @@
 //! HTTP route definitions and handlers.
 //!
-//! Application routes (auth, tokens, providers, augmenters, health) and
-//! metrics routes (metrics, health) are served on separate ports.
+//! Application routes and metrics routes are served on separate ports.
+//! Health is registered on both so K8s probes and external uptime monitors
+//! can reach it regardless of which port they target.
 
 mod augmenters;
 mod auth;
 mod health;
+mod homepage;
 mod metrics;
 mod providers;
 mod tokens;
@@ -15,6 +17,7 @@ use axum::Router;
 
 pub fn create_app_router(state: AppState) -> Router {
     Router::new()
+        .merge(homepage::routes())
         .merge(auth::routes())
         .merge(tokens::routes())
         .merge(providers::routes())

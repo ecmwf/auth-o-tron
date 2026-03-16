@@ -1,10 +1,16 @@
+#[allow(dead_code)]
+mod common;
+
 use authotron::config::{Config, ConfigV1, MetricsConfig, ServerConfig};
 use authotron::startup;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use figment::{
     Figment,
     providers::{Format, Yaml},
 };
 use std::sync::Arc;
+use tower::ServiceExt;
 
 fn base_config(server_port: u16, metrics_enabled: bool, metrics_port: u16) -> ConfigV1 {
     let yaml = r#"
@@ -55,4 +61,53 @@ async fn startup_rejects_port_collision() {
         err.contains("must be different"),
         "expected port collision error, got: {err}"
     );
+}
+
+#[tokio::test]
+async fn homepage_returns_html_with_version() {
+    let config = base_config(0, false, 0);
+    let (app, _) = common::build_app(config).await;
+
+    let response = app
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers();
+    assert_eq!(
+        headers.get("content-type").unwrap(),
+        "text/html; charset=utf-8"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(
+        html.contains(env!("CARGO_PKG_VERSION")),
+        "homepage should contain the crate version"
+    );
+    assert!(
+        !html.contains("{{version}}"),
+        "version placeholder should be replaced"
+    );
+}
+
+#[tokio::test]
+async fn logo_returns_png() {
+    let config = base_config(0, false, 0);
+    let (app, _) = common::build_app(config).await;
+
+    let response = app
+        .oneshot(
+            Request::get("/static/logo.png")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers().get("content-type").unwrap(), "image/png");
 }
