@@ -1,15 +1,13 @@
-![auth-o-tron logo](docs/logo.png)
+![auth-o-tron logo](https://raw.githubusercontent.com/ecmwf/auth-o-tron/main/docs/logo-light.png)
 
 <div align="center">
-  <a href="https://github.com/ecmwf/codex/raw/refs/heads/main/ESEE">
-    <img src="https://github.com/ecmwf/codex/raw/refs/heads/main/ESEE/foundation_badge.svg" alt="Static Badge">
-  </a>
-  <a href="https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity">
-    <img src="https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity/emerging_badge.svg" alt="Static Badge">
-  </a>
+
+[![Crates.io](https://img.shields.io/crates/v/authotron.svg)](https://crates.io/crates/authotron)
+[![License](https://img.shields.io/crates/l/authotron.svg)](https://github.com/ecmwf/auth-o-tron/blob/main/LICENSE.txt)
+[![ECMWF](https://github.com/ecmwf/codex/raw/refs/heads/main/ESEE/foundation_badge.svg)](https://github.com/ecmwf/codex/raw/refs/heads/main/ESEE)
+[![Maturity](https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity/emerging_badge.svg)](https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity)
+
 </div>
-
-
 
 > [!IMPORTANT]  
 > This software is **Emerging** and subject to ECMWF's guidelines on [Software Maturity](https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity).
@@ -18,102 +16,76 @@ Effortless authentication and authorization for web APIs.
 
 * Easily configure HTTP APIs to use a variety of authentication providers.
 * Make requests to Auth-O-Tron from your service, or simply use Auth-O-Tron as an ingress auth proxy.
-* [TODO] Serves a simple portal for creating and managing scoped API tokens.
 
 
 ## Why do I need Auth-O-Tron?
 
-Modern authentication providers are great for securely authenticating and authorizing interactive users in a browser. However, they often lack sensible flows for access to web APIs, especially in a machine-to-machine environment. Auth-O-Tron is a simple service that sits between your API and your authentication providers, allowing you to easily configure your API to use a variety of authentication providers, and [TODO] allowing users to generate scoped access tokens for long-lived, browserless API access.
+Modern authentication providers are great for securely authenticating and authorizing interactive users in a browser. However, they often lack sensible flows for access to web APIs, especially in a machine-to-machine environment. Auth-O-Tron is a simple service that sits between your API and your authentication providers, allowing you to easily configure your API to use a variety of authentication providers.
 
 
-## How do I use Auth-O-Tron?
+## How does it work?
 
-Auth-O-Tron must be deployed as a standalone service, with ingress-level auth redirection (e.g. using the nginx auth_request module). Auth-O-Tron will proxy authenticated requests to your API via a JWT, containing user roles and scopes for you to do with as you please.
+Auth-O-Tron is deployed as a standalone service alongside your ingress (e.g. NGINX `auth_request`). It validates credentials, enriches users with roles and attributes, and returns a signed JWT that your backend services can trust.
 
-Auth-O-Tron can be configured to use a variety of authentication providers simultaneously and cumulatively. 
-
-[TODO] The Auth-O-Tron service can serve a web portal to provide an interactive page for your users to generate access tokens. Users will log into the portal with the same credentials they use to log into your API, and will be able to generate access tokens with different scopes, which they can then use to access your API.
-
-
-## What are roles, attributes, and scopes?
-
-Auth-O-Tron uses the following terminology:
-
-* **Roles**: A role is a group to which a user belongs. Roles are assigned to users by authentication providers. For example, a user may be assigned the role `admin` by an authentication provider. Users may have multiple roles. You can protect API endpoints by requiring that users have certain roles.
-
-* **Attributes**: An attribute is metadata associated with a user. Attributes are assigned to users by authentication providers. For example, a user may have the attribute `department:engineering` assigned by an authentication provider. Users may have multiple attributes. You can protect API endpoints by requiring that users have certain attributes, or attribute values.
-
-* **Scopes**: [TODO] A scope is a property of an access token. When a user generates an access token, they can assign scopes to that token to limit its use. Endpoints can be associated with a scope, and only tokens with that scope will be allowed to access those endpoints. For example, a user may generate an access token with the scope `read:users`, and then use that token to access endpoints that require the `read:users` scope. Users may assign multiple scopes to a token. A user authenticated directly (i.e. not through an access token) is treated as having all available scopes.
-
-It is important to understand that **roles** and **attributes** are used by a service to allow or restrict API access to different users. [TODO] **Scopes** are set by the user, on a token, to limit the capabilities of particular access tokens, which can make them more secure.
-
-## Augmenters
-
-Augmenters run after a user is authenticated to add or override roles and attributes. Static augmenters are helpful when upstream providers cannot supply all authorization data.
-
-Execution order within a realm: standard augmenters (`plain`, `ldap`) run in parallel; `plain_advanced` augmenters run afterwards, one-by-one. This lets advanced rules depend on roles added by earlier augmenters.
-
-**plain** maps roles directly to usernames.
-
-**plain_advanced** can match on usernames *or* existing roles, then add new roles (deduped) and upsert attributes. Example:
-
-```yaml
-augmenters:
-  - name: "Polytope plain admin augmenter"
-    type: "plain_advanced"
-    realm: "ecmwf"
-    match:
-      username: ["adam"]
-      role: ["admin"]
-    augment:
-      roles: ["observer", "admin"]
-      attributes:
-        team: polytope
-        location: cloud
+```mermaid
+graph LR
+    C[Client] -- "1: Request" --> N[NGINX / Ingress]
+    N -- "2: auth_request" --> A[Auth-O-Tron]
+    A -. "3: validate" .-> P[Providers]
+    A -. "4: enrich" .-> Aug[Augmenters]
+    A -- "5: 200 + JWT" --> N
+    N -- "6: Request + JWT" --> B[Backend Services]
 ```
 
-Matching is inclusive: a hit on either `match.username` or `match.role` triggers the augmentation. Attributes overwrite existing keys; roles are appended without duplicates.
-
-**ldap** looks up `memberOf` groups for a user and turns them into roles. You can:
-
-* Use legacy `filter` to only accept DNs containing the string and emit the CN (e.g. `CN=TeamA` → `TeamA`).
-* Or provide `filters` (list of DN fragments like `OU=TeamA,OU=TeamB`). Each filter is parsed as key/value components. Role DNs are expected in standard LDAP order (`CN=...,OU=...,OU=...`). When a filter matches part of a role's DN, we emit the path of attribute values from that match down to the CN, prefixed with `/` (e.g. `CN=Role,OU=TeamB,OU=TeamA` with filter `OU=TeamA` → `/TeamA/TeamB/Role`; filter `OU=TeamB` → `/TeamB/Role`). Invalid filters are rejected.
-* `ldap_user` is used to derive the default bind DN; setting `bind_dn` overrides that default if you need a fully custom DN.
-
-```yaml
-augmenters:
-  - name: "LDAP roles"
-    type: "ldap"
-    realm: "ecmwf"
-    uri: "ldaps://ldap.example.com"
-    search_base: "DC=example,DC=com"
-    ldap_user: "svc_ldap"
-    ldap_password: "..."
-    # Optional explicit bind DN (defaults to CN=<ldap_user>,OU=Connectors,OU=Service Accounts,DC=ecmwf,DC=int)
-    # bind_dn: "CN=svc_ldap,OU=Custom,DC=example,DC=com"
-    # Legacy single filter keeps emitting bare CN values.
-    # filter: "OU=Teams"
-    # New multi-filter emits a `/`-prefixed value path (e.g. `/Platform/Role`) for matches.
-    filters: ["OU=Platform", "OU=Data"]
-```
+Auth-O-Tron can be configured to use a variety of authentication providers simultaneously and cumulatively. See the [documentation](#documentation) for configuration details.
 
 ## FAQ
 
 ### What authentication methods are supported?
 
-* OAuth2 short-lived access tokens, from an already-established session.
-* OAuth2 offline_access tokens, where auth-o-tron is able to request a short-lived access token.
-* ECMWF API tokens
+* **Basic auth** (plain provider) — static username/password lists
+* **JWT/JWKS** — validate Bearer tokens against a JWKS endpoint
+* **OpenID Connect offline tokens** — introspect and exchange offline tokens for access tokens
+* **ECMWF API keys** — validate tokens against the ECMWF identity service
+* **EFAS API keys** — validate tokens against the EFAS identity service
+* **ECMWF Token Generator** — validate and exchange tokens via the ECMWF token generator
 
-### Why not just give our users JWT tokens?
+Multiple providers can run simultaneously, each targeting a different realm.
 
-One of the main benefits of JWT tokens is that they don't require state on the server, and they are self-contained. However, for long-lived tokens where tokens may need to be revoked by the service adminstrator, state must be stored on the server. Since we need state, there is little benefit to JWT tokens. Additionally, Auth-O-Tron tokens are designed for machine-to-machine deployment, and are likely to be deployed in machines managed by multiple parties. Opaque tokens are more secure in this environment, since they don't contain any information about the user.
+### Why opaque tokens instead of JWTs for long-lived access?
 
-Auth-O-Tron does pass on short-lived JWT tokens to the backend services, so that services can use the information in the token to make authorization decisions. There is no need for long-lived tokens in this case.
+JWTs are self-contained and stateless, which is great for short-lived tokens. But for long-lived machine-to-machine tokens that may need to be revoked, you need server-side state anyway. Opaque tokens are simpler and more secure in this case — they don't leak user information if compromised.
 
-### Why not just use OAuth2?
+Auth-O-Tron issues short-lived JWTs to backend services for authorization decisions. Long-lived opaque tokens are managed separately through the token store.
 
-OAuth2 is a great protocol for interactive users, but it is not well-suited for machine-to-machine communication. OAuth2 tokens are short-lived, and require a refresh token to be exchanged for a new token. This is not a good fit for machine to machine access. The offline_access token flow is closer to our needs, but it is still a complex flow for every application to manage -- auth-o-tron helps by managing this outside the application.
+### Why not just use OAuth2 directly?
 
+OAuth2 works well for interactive browser flows but is complex for machine-to-machine access. The offline_access token flow is closer to what's needed, but every application would have to manage token exchange independently. Auth-O-Tron handles this at the infrastructure level — your applications just trust the JWT.
 
+## Installation
+
+**From crates.io:**
+
+```bash
+cargo install authotron
+```
+
+**Docker:**
+
+```bash
+docker pull eccr.ecmwf.int/auth-o-tron/auth-o-tron:latest
+```
+
+## Documentation
+
+Full documentation is available in the `docs/` directory. To build and view it locally:
+
+```bash
+cargo install mdbook mdbook-mermaid
+mdbook serve docs --open
+```
+
+## License
+
+Apache-2.0 — see [LICENSE.txt](LICENSE.txt).
 
