@@ -39,7 +39,7 @@ jobs:
   publish:
     needs: verify-tag
     if: ${{ always() && (needs.verify-tag.outputs.should_publish == 'true' || github.event_name == 'workflow_dispatch') }}
-    uses: ecmwf/reusable-workflows/.github/workflows/publish-rust-crate.yml@e9c3ef1f810cc57eb7c0d353bd0015a1f169f153
+    uses: ecmwf/reusable-workflows/.github/workflows/publish-rust-crate.yml@d48e754288c678873883a58bfbf26876d394094d
     with:
       dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
       run-checks: false
