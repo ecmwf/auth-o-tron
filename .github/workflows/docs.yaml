@@ -99,22 +99,22 @@ jobs:
     with:
       artifact-id: ${{ needs.build-docs.outputs.artifact-id }}
       space: docs
-      name: dev-section
-      path: auth-o-tron/pull-requests
+      name: authotron
+      path: pull-requests
       link-tag: PREVIEW-PUBLISH-AUTH-O-TRON-DOCS
       link-text: "Docs Preview"
     secrets:
-      sites-token: ${{ secrets.ECMWF_SITES_DOCS_DEV_SECTION_TOKEN }}
+      sites-token: ${{ secrets.ECMWF_SITES_DOCS_AUTHOTRON_TOKEN }}
 
   preview-unpublish:
     if: ${{ github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository }}
     uses: ecmwf/reusable-workflows/.github/workflows/pr-preview-unpublish.yml@5a1d1cb1442aa632f7823e4088d639b980627afc
     with:
       space: docs
-      name: dev-section
-      path: auth-o-tron/pull-requests
+      name: authotron
+      path: pull-requests
     secrets:
-      sites-token: ${{ secrets.ECMWF_SITES_DOCS_DEV_SECTION_TOKEN }}
+      sites-token: ${{ secrets.ECMWF_SITES_DOCS_AUTHOTRON_TOKEN }}
 
   compute-publish-id:
     if: >-
@@ -174,9 +174,9 @@ jobs:
     with:
       artifact-id: ${{ needs.build-docs.outputs.artifact-id }}
       space: docs
-      name: dev-section
-      path: auth-o-tron
+      name: authotron
+      path: ""
       id: ${{ needs.compute-publish-id.outputs.publish-id }}
       softlink: ${{ github.event_name == 'push' && (github.ref_type == 'tag' && 'stable' || github.ref_name == 'main' && 'latest') || '' }}
     secrets:
-      sites-token: ${{ secrets.ECMWF_SITES_DOCS_DEV_SECTION_TOKEN }}
+      sites-token: ${{ secrets.ECMWF_SITES_DOCS_AUTHOTRON_TOKEN }}
