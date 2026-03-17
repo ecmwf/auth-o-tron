@@ -2,6 +2,21 @@
 name = "authotron"
 version = "0.3.1"
 edition = "2024"
+description = "Authentication and authorization gateway for web APIs. Validates credentials from multiple providers, enriches users with roles, and issues signed JWTs."
+license = "Apache-2.0"
+repository = "https://github.com/ecmwf/auth-o-tron"
+readme = "README.md"
+keywords = ["authentication", "authorization", "gateway", "jwt", "nginx"]
+categories = ["authentication", "network-programming"]
+rust-version = "1.85"
+include = [
+    "src/**/*.rs",
+    "src/static/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "LICENSE.txt",
+    "README.md",
+]
 
 [dependencies]
 # Web framework
