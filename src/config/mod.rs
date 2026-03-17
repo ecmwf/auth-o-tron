@@ -1,5 +1,13 @@
-// This module re-exports important pieces for convenience,
-// so we can "use crate::config::*" easily.
+// (C) Copyright 2024- ECMWF and individual contributors.
+//
+// This software is licensed under the terms of the Apache Licence Version 2.0
+// which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+// In applying this licence, ECMWF does not waive the privileges and immunities
+// granted to it by virtue of its status as an intergovernmental organisation nor
+// does it submit to any jurisdiction.
+
+//! Configuration loading, versioning (v1/v2), and environment variable overrides.
+
 pub mod logging;
 pub mod store;
 pub mod types;
