@@ -1,0 +1,47 @@
+name: Publish Crate
+
+on:
+  push:
+    tags:
+      - '*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry-run only (no actual publish)"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  verify-tag:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.check.outputs.should_publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag matches Cargo.toml version
+        id: check
+        run: |
+          set -euo pipefail
+          cargo_version=$(grep '^version\s*=' Cargo.toml | head -1 | cut -d'"' -f2)
+          if [ -z "${cargo_version}" ]; then
+            echo "::error::Could not extract version from Cargo.toml"
+            exit 1
+          fi
+          if [ "${{ github.ref_name }}" = "${cargo_version}" ]; then
+            echo "should_publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag ${{ github.ref_name }} does not match Cargo.toml version ${cargo_version}, skipping."
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    needs: verify-tag
+    if: ${{ always() && (needs.verify-tag.outputs.should_publish == 'true' || github.event_name == 'workflow_dispatch') }}
+    uses: ecmwf/reusable-workflows/.github/workflows/publish-rust-crate.yml@53a05dfbefda4b47a4f1cd7a4d1f7f2f9fcf51a3
+    with:
+      dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+      run-checks: true
+    secrets:
+      cargo_registry_token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
