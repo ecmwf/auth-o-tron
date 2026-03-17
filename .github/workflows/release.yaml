@@ -29,15 +29,16 @@ jobs:
       - name: Extract package version and name
         id: get_version
         run: |
-          # Extract the package name from Cargo.toml (first occurrence)
+          set -euo pipefail
           PACKAGE_NAME=$(grep '^name\s*=' Cargo.toml | head -n 1 | cut -d'"' -f2)
-          # Extract the package version from Cargo.toml (first occurrence)
           PACKAGE_VERSION=$(grep '^version\s*=' Cargo.toml | head -n 1 | cut -d'"' -f2)
-          # Set the outputs for later steps
-          echo "package_name=${PACKAGE_NAME}" >> $GITHUB_OUTPUT
-          echo "package_version=${PACKAGE_VERSION}" >> $GITHUB_OUTPUT
-          # Set CARGO_VERSION for the Skaffold build
-          echo "CARGO_VERSION=${PACKAGE_VERSION}" >> $GITHUB_ENV
+          if [ -z "${PACKAGE_NAME}" ] || [ -z "${PACKAGE_VERSION}" ]; then
+            echo "::error::Could not extract name or version from Cargo.toml"
+            exit 1
+          fi
+          echo "package_name=${PACKAGE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "package_version=${PACKAGE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "CARGO_VERSION=${PACKAGE_VERSION}" >> "$GITHUB_ENV"
           echo "Extracted package: ${PACKAGE_NAME} version -> ${PACKAGE_VERSION}"
 
       - name: Verify Tag Equals Cargo Version
