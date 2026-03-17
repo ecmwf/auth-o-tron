@@ -1,0 +1,41 @@
+[book]
+title = "Auth-O-Tron"
+authors = ["ECMWF"]
+description = "Documentation for the Auth-O-Tron authentication gateway"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "ayu"
+smart-punctuation = true
+no-section-label = false
+git-repository-url = "https://github.com/ecmwf/auth-o-tron"
+edit-url-template = "https://github.com/ecmwf/auth-o-tron/edit/main/docs/{path}"
+additional-css = ["theme/custom.css"]
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true
+boost-title = 2
+expand = true
+heading-split-level = 3
+
+[output.html.print]
+enable = true
+page-break = true
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
