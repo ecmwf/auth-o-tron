@@ -1,10 +1,11 @@
 [package]
 name = "authotron"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "Authentication and authorization gateway for web APIs. Validates credentials from multiple providers, enriches users with roles, and issues signed JWTs."
 license = "Apache-2.0"
 repository = "https://github.com/ecmwf/auth-o-tron"
+documentation = "https://sites.ecmwf.int/docs/authotron/main/"
 readme = "README.md"
 keywords = ["authentication", "authorization", "gateway", "jwt", "nginx"]
 categories = ["authentication", "network-programming"]

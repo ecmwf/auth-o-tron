@@ -6,6 +6,7 @@
 [![License](https://img.shields.io/crates/l/authotron.svg)](https://github.com/ecmwf/auth-o-tron/blob/main/LICENSE.txt)
 [![ECMWF](https://github.com/ecmwf/codex/raw/refs/heads/main/ESEE/foundation_badge.svg)](https://github.com/ecmwf/codex/raw/refs/heads/main/ESEE)
 [![Maturity](https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity/emerging_badge.svg)](https://github.com/ecmwf/codex/raw/refs/heads/main/Project%20Maturity)
+[![Docs](https://img.shields.io/badge/docs-online-blue)](https://sites.ecmwf.int/docs/authotron/main/)
 
 </div>
 
@@ -78,7 +79,9 @@ docker pull eccr.ecmwf.int/auth-o-tron/auth-o-tron:latest
 
 ## Documentation
 
-Full documentation is available in the `docs/` directory. To build and view it locally:
+Full documentation is available at **[sites.ecmwf.int/docs/authotron](https://sites.ecmwf.int/docs/authotron/main/)**.
+
+To build and view it locally:
 
 ```bash
 cargo install mdbook mdbook-mermaid
