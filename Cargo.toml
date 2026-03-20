@@ -1,5 +1,6 @@
 [workspace]
 members = [
     "authotron",
+    "authotron-types",
 ]
 resolver = "3"
