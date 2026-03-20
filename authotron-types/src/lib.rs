@@ -6,22 +6,27 @@
 // granted to it by virtue of its status as an intergovernmental organisation nor
 // does it submit to any jurisdiction.
 
-//! Shared authentication DTOs for the auth-o-tron ecosystem.
+//! Shared authentication types for the auth-o-tron ecosystem.
 //!
-//! These types represent the stable wire format for authenticated user data
-//! that flows between auth-o-tron, polytope-server, and bits-broker.
+//! [`User`] is the canonical representation of an authenticated user that flows
+//! between auth-o-tron, polytope-server, and bits-broker.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Authenticated user context, the canonical DTO carried across service boundaries.
+fn default_version() -> i32 {
+    1
+}
+
+/// Authenticated user — the single canonical type used across all services.
 ///
-/// This struct represents the subset of user data that consumers need.
-/// It is intentionally smaller than the server-side `User` (which also has
-/// `version`, `to_jwt()`, and `FromRequestParts`).
+/// Carries identity, roles, attributes, and scopes. The `version` field exists
+/// for storage compatibility (MongoDB documents) and defaults to `1`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AuthUser {
+pub struct User {
+    #[serde(default = "default_version")]
+    pub version: i32,
     pub username: String,
     pub realm: String,
     pub roles: Vec<String>,
@@ -29,6 +34,43 @@ pub struct AuthUser {
     pub attributes: HashMap<String, String>,
     #[serde(default)]
     pub scopes: HashMap<String, Vec<String>>,
+}
+
+impl Default for User {
+    fn default() -> Self {
+        User {
+            version: 1,
+            username: String::new(),
+            realm: String::new(),
+            roles: Vec::new(),
+            attributes: HashMap::new(),
+            scopes: HashMap::new(),
+        }
+    }
+}
+
+impl User {
+    /// Construct a new User with optional roles, attributes, scopes.
+    ///
+    /// This preserves the original constructor signature so that existing
+    /// provider call-sites don't need to change.
+    pub fn new(
+        realm: String,
+        username: String,
+        roles: Option<Vec<String>>,
+        attributes: Option<HashMap<String, String>>,
+        scopes: Option<HashMap<String, Vec<String>>>,
+        version: Option<i32>,
+    ) -> Self {
+        User {
+            version: version.unwrap_or(1),
+            realm,
+            username,
+            roles: roles.unwrap_or_default(),
+            attributes: attributes.unwrap_or_default(),
+            scopes: scopes.unwrap_or_default(),
+        }
+    }
 }
 
 /// Authentication errors shared across the ecosystem.
@@ -64,8 +106,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_auth_user_serde_roundtrip() {
-        let user = AuthUser {
+    fn test_user_serde_roundtrip() {
+        let user = User {
+            version: 1,
             username: "testuser".to_string(),
             realm: "ecmwf".to_string(),
             roles: vec!["admin".to_string(), "default".to_string()],
@@ -77,46 +120,88 @@ mod tests {
         };
 
         let json = serde_json::to_string(&user).unwrap();
-        let deserialized: AuthUser = serde_json::from_str(&json).unwrap();
+        let deserialized: User = serde_json::from_str(&json).unwrap();
         assert_eq!(user, deserialized);
     }
 
     #[test]
-    fn test_auth_user_default_attributes() {
+    fn test_user_default_attributes() {
         let json = r#"{"username":"u","realm":"r","roles":[]}"#;
-        let user: AuthUser = serde_json::from_str(json).unwrap();
+        let user: User = serde_json::from_str(json).unwrap();
         assert!(user.attributes.is_empty());
         assert!(user.scopes.is_empty());
+        assert_eq!(user.version, 1);
     }
 
     #[test]
-    fn test_auth_user_default_scopes() {
+    fn test_user_default_scopes() {
         let json = r#"{"username":"u","realm":"r","roles":["a"],"attributes":{"k":"v"}}"#;
-        let user: AuthUser = serde_json::from_str(json).unwrap();
+        let user: User = serde_json::from_str(json).unwrap();
         assert_eq!(user.attributes.get("k").unwrap(), "v");
         assert!(user.scopes.is_empty());
     }
 
     #[test]
-    fn test_auth_user_missing_optional_fields_backward_compat() {
+    fn test_user_missing_optional_fields_backward_compat() {
         // Simulates a JWT or serialized user that predates the scopes field
         let json = r#"{"username":"alice","realm":"test","roles":["user"]}"#;
-        let user: AuthUser = serde_json::from_str(json).unwrap();
+        let user: User = serde_json::from_str(json).unwrap();
         assert_eq!(user.username, "alice");
         assert_eq!(user.realm, "test");
         assert_eq!(user.roles, vec!["user"]);
         assert!(user.attributes.is_empty());
         assert!(user.scopes.is_empty());
+        assert_eq!(user.version, 1);
     }
 
     #[test]
-    fn test_auth_user_ignores_unknown_fields() {
-        // Future-proofing: unknown fields should not break deserialization
+    fn test_user_ignores_unknown_fields() {
         let json =
-            r#"{"username":"u","realm":"r","roles":[],"version":1,"future_field":"whatever"}"#;
-        // This will fail because we don't have deny_unknown_fields — which is what we want
-        let result: Result<AuthUser, _> = serde_json::from_str(json);
+            r#"{"username":"u","realm":"r","roles":[],"version":2,"future_field":"whatever"}"#;
+        let result: Result<User, _> = serde_json::from_str(json);
         assert!(result.is_ok());
+        assert_eq!(result.unwrap().version, 2);
+    }
+
+    #[test]
+    fn test_user_new_constructor() {
+        let user = User::new(
+            "ecmwf".to_string(),
+            "alice".to_string(),
+            Some(vec!["admin".to_string()]),
+            None,
+            None,
+            Some(1),
+        );
+        assert_eq!(user.realm, "ecmwf");
+        assert_eq!(user.username, "alice");
+        assert_eq!(user.roles, vec!["admin"]);
+        assert!(user.attributes.is_empty());
+        assert!(user.scopes.is_empty());
+        assert_eq!(user.version, 1);
+    }
+
+    #[test]
+    fn test_user_new_defaults() {
+        let user = User::new(
+            "r".to_string(),
+            "u".to_string(),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(user.roles.is_empty());
+        assert!(user.attributes.is_empty());
+        assert!(user.scopes.is_empty());
+        assert_eq!(user.version, 1);
+    }
+
+    #[test]
+    fn test_user_default_impl() {
+        let user = User::default();
+        assert_eq!(user.version, 1);
+        assert!(user.username.is_empty());
     }
 
     #[test]

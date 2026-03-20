@@ -6,6 +6,12 @@
 // granted to it by virtue of its status as an intergovernmental organisation nor
 // does it submit to any jurisdiction.
 
+//! Server-side extensions for the shared [`User`] type.
+//!
+//! Re-exports [`authotron_types::User`] and adds:
+//! - [`UserJwtExt::to_jwt`] for signing a user into a JWT
+//! - [`FromRequestParts`] extractor for Axum handlers
+
 use std::collections::HashMap;
 
 use crate::config::JWTConfig;
@@ -16,49 +22,26 @@ use axum::http::StatusCode;
 use chrono::Utc;
 use http::request::Parts;
 use jsonwebtoken::{EncodingKey, Header, encode};
-use authotron_types::AuthUser;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::net::SocketAddr;
 use tracing::warn;
 
-/// The User struct represents an authenticated user in the system.
+// Re-export the canonical User type so existing `use crate::models::user::User`
+// imports continue to work throughout the codebase.
+pub use authotron_types::User;
+
+/// Extension trait that adds JWT signing to `User`.
 ///
-/// This is the server-side user with extra fields (`version`) and methods
-/// (`to_jwt`, `FromRequestParts`). For the canonical wire-format DTO shared
-/// across services, see [`authotron_types::AuthUser`].
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct User {
-    pub version: i32,
-    pub realm: String,
-    pub username: String,
-    pub roles: Vec<String>,
-    pub attributes: HashMap<String, String>,
-    /// A map of service -> scopes
-    pub scopes: Option<HashMap<String, Vec<String>>>,
+/// This is an extension trait rather than an inherent method because `User` is
+/// defined in `authotron-types`. The JWT signing logic depends on `JWTConfig`
+/// from the server crate and therefore cannot live in the types crate.
+pub trait UserJwtExt {
+    /// Convert a User into a signed JWT string, using the config from `JWTConfig`.
+    fn to_jwt(&self, jwtconfig: &JWTConfig) -> String;
 }
 
-impl User {
-    /// Construct a new User with optional roles, attributes, scopes.
-    pub fn new(
-        realm: String,
-        username: String,
-        roles: Option<Vec<String>>,
-        attributes: Option<HashMap<String, String>>,
-        scopes: Option<HashMap<String, Vec<String>>>,
-        version: Option<i32>,
-    ) -> Self {
-        User {
-            version: version.unwrap_or(1),
-            realm,
-            username,
-            roles: roles.unwrap_or_default(),
-            attributes: attributes.unwrap_or_default(),
-            scopes,
-        }
-    }
-
-    /// Convert a User into a signed JWT string, using the config from `JWTConfig`.
-    pub fn to_jwt(&self, jwtconfig: &JWTConfig) -> String {
+impl UserJwtExt for User {
+    fn to_jwt(&self, jwtconfig: &JWTConfig) -> String {
         #[derive(Serialize)]
         struct Claims<'a> {
             sub: &'a String,
@@ -68,7 +51,7 @@ impl User {
 
             roles: &'a Vec<String>,
             username: &'a String,
-            scopes: &'a Option<HashMap<String, Vec<String>>>,
+            scopes: &'a HashMap<String, Vec<String>>,
             realm: &'a String,
             attributes: &'a HashMap<String, String>,
         }
@@ -97,42 +80,6 @@ impl User {
 
         let encoding_key = EncodingKey::from_secret(jwtconfig.secret.as_ref());
         encode(&Header::default(), &claims, &encoding_key).expect("Failed to encode JWT")
-    }
-}
-
-/// Convert a server-side `User` into the shared `AuthUser` DTO.
-///
-/// Drops the `version` field and converts `scopes` from `Option` to a
-/// default-empty `HashMap`.
-impl From<User> for AuthUser {
-    fn from(user: User) -> Self {
-        AuthUser {
-            username: user.username,
-            realm: user.realm,
-            roles: user.roles,
-            attributes: user.attributes,
-            scopes: user.scopes.unwrap_or_default(),
-        }
-    }
-}
-
-/// Convert a shared `AuthUser` DTO into a server-side `User`.
-///
-/// Sets `version` to `1` and wraps `scopes` in `Some` (or `None` if empty).
-impl From<AuthUser> for User {
-    fn from(auth_user: AuthUser) -> Self {
-        User {
-            version: 1,
-            username: auth_user.username,
-            realm: auth_user.realm,
-            roles: auth_user.roles,
-            attributes: auth_user.attributes,
-            scopes: if auth_user.scopes.is_empty() {
-                None
-            } else {
-                Some(auth_user.scopes)
-            },
-        }
     }
 }
 
@@ -274,43 +221,5 @@ mod tests {
             .expect("exp claim should be an integer");
         // Assert that the exp claim matches the custom exp attribute.
         assert_eq!(exp_claim, custom_exp);
-    }
-
-    #[test]
-    fn test_user_to_auth_user_conversion() {
-        let user = User::new(
-            "ecmwf".to_string(),
-            "alice".to_string(),
-            Some(vec!["admin".to_string()]),
-            Some(HashMap::from([("org".to_string(), "ecmwf".to_string())])),
-            Some(HashMap::from([(
-                "data".to_string(),
-                vec!["read".to_string()],
-            )])),
-            Some(2),
-        );
-
-        let auth_user: AuthUser = user.into();
-        assert_eq!(auth_user.username, "alice");
-        assert_eq!(auth_user.realm, "ecmwf");
-        assert_eq!(auth_user.roles, vec!["admin"]);
-        assert_eq!(auth_user.attributes["org"], "ecmwf");
-        assert_eq!(auth_user.scopes["data"], vec!["read"]);
-    }
-
-    #[test]
-    fn test_auth_user_to_user_conversion() {
-        let auth_user = AuthUser {
-            username: "bob".to_string(),
-            realm: "test".to_string(),
-            roles: vec!["user".to_string()],
-            attributes: HashMap::new(),
-            scopes: HashMap::new(),
-        };
-
-        let user: User = auth_user.into();
-        assert_eq!(user.username, "bob");
-        assert_eq!(user.version, 1);
-        assert!(user.scopes.is_none(), "empty scopes should become None");
     }
 }

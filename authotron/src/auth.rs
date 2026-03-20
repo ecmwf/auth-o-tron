@@ -295,7 +295,7 @@ impl Auth {
             roles_count = user.roles.len(),
             roles = user.roles.join(","),
             attributes_count = user.attributes.len(),
-            scopes_services_count = user.scopes.as_ref().map_or(0, |m| m.len()),
+            scopes_services_count = user.scopes.len(),
             "authentication request succeeded"
         );
 
@@ -1181,12 +1181,11 @@ mod tests {
         async fn authenticate(&self, credentials: &str) -> Result<User, String> {
             if credentials == self.expected_credential {
                 Ok(User {
-                    version: 1,
                     realm: self.realm.clone().unwrap_or_default(),
                     username: "dummy".to_string(),
                     roles: vec![],
                     attributes: HashMap::new(),
-                    scopes: None,
+                    ..Default::default()
                 })
             } else {
                 Err("Invalid credentials".to_string())

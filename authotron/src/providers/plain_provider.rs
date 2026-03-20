@@ -462,7 +462,7 @@ mod tests {
         assert!(result.is_ok());
         let user = result.unwrap();
         assert!(user.attributes.is_empty());
-        assert!(user.scopes.is_none());
+        assert!(user.scopes.is_empty());
         assert_eq!(user.version, 1);
     }
 
