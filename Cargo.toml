@@ -2,5 +2,6 @@
 members = [
     "authotron",
     "authotron-types",
+    "authotron-client",
 ]
 resolver = "3"
