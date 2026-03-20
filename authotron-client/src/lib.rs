@@ -10,7 +10,7 @@
 //!
 //! This crate provides [`AuthClient`], which calls an auth-o-tron server's
 //! `/authenticate` endpoint, decodes the returned JWT, caches the result, and
-//! returns an [`AuthUser`].
+//! returns an [`User`].
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -23,7 +23,7 @@ use serde::Deserialize;
 
 // Re-exports for consumer convenience
 pub use authotron_types::AuthError;
-pub use authotron_types::AuthUser;
+pub use authotron_types::User;
 
 // ---------------------------------------------------------------------------
 // JWT decode
@@ -33,7 +33,7 @@ pub use authotron_types::AuthUser;
 ///
 /// `attributes` is `HashMap<String, serde_json::Value>` because auth-o-tron's
 /// JWT may contain non-string attribute values. The decode step converts them
-/// to `HashMap<String, String>` for the canonical `AuthUser`.
+/// to `HashMap<String, String>` for the canonical `User`.
 #[derive(Debug, Deserialize)]
 struct Claims {
     username: String,
@@ -48,13 +48,13 @@ struct Claims {
     exp: usize,
 }
 
-/// Decode a JWT token into an [`AuthUser`].
+/// Decode a JWT token into a [`User`].
 ///
 /// This is a JWT-decode detail: the `"default"` role is injected here so that
 /// every user decoded from a JWT always has it. Consumers deserializing
-/// `AuthUser` from JSON (e.g. from `job.user`) should NOT assume `"default"`
+/// `User` from JSON (e.g. from `job.user`) should NOT assume `"default"`
 /// is present — it is only guaranteed when the JWT decode path was used.
-pub fn decode_jwt(token: &str, secret: &[u8]) -> Result<AuthUser, AuthError> {
+pub fn decode_jwt(token: &str, secret: &[u8]) -> Result<User, AuthError> {
     let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
     validation.validate_aud = false;
 
@@ -89,7 +89,7 @@ pub fn decode_jwt(token: &str, secret: &[u8]) -> Result<AuthUser, AuthError> {
 
     let scopes = claims.scopes.unwrap_or_default();
 
-    Ok(AuthUser {
+    Ok(User {
         username: claims.username,
         realm: claims.realm,
         roles,
@@ -125,7 +125,7 @@ pub struct AuthClient {
     http: Client,
     url: String,
     secret: Vec<u8>,
-    cache: Cache<String, AuthUser>,
+    cache: Cache<String, User>,
 }
 
 impl AuthClient {
@@ -159,8 +159,8 @@ impl AuthClient {
     /// 2. Checks the TTL cache
     /// 3. On miss: calls auth-o-tron's `/authenticate` endpoint
     /// 4. Decodes the JWT from the response
-    /// 5. Caches and returns the [`AuthUser`]
-    pub async fn authenticate(&self, auth_header: &str) -> Result<AuthUser, AuthError> {
+    /// 5. Caches and returns the [`User`]
+    pub async fn authenticate(&self, auth_header: &str) -> Result<User, AuthError> {
         let converted = convert_email_key(auth_header);
 
         if let Some(user) = self.cache.get(&converted).await {

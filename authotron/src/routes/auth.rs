@@ -14,7 +14,7 @@ use axum::response::IntoResponse;
 use axum::{Router, routing::get};
 use http::HeaderValue;
 
-use crate::models::user::User;
+use crate::models::user::{User, UserJwtExt};
 use crate::state::AppState;
 use crate::utils::http_helpers::HTTPError;
 
