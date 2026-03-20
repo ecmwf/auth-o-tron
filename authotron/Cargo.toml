@@ -20,6 +20,9 @@ include = [
 ]
 
 [dependencies]
+# Shared types
+authotron-types = { path = "../authotron-types" }
+
 # Web framework
 aide = { version = "~0.15", features = ["axum", "axum-multipart"] }
 axum = "~0.8"
