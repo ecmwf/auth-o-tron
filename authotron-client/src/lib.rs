@@ -90,6 +90,7 @@ pub fn decode_jwt(token: &str, secret: &[u8]) -> Result<User, AuthError> {
     let scopes = claims.scopes.unwrap_or_default();
 
     Ok(User {
+        version: 1,
         username: claims.username,
         realm: claims.realm,
         roles,
@@ -190,20 +191,20 @@ impl AuthClient {
             });
         }
 
-        let raw_header: &HeaderValue = response
-            .headers()
-            .get(header::AUTHORIZATION)
-            .ok_or_else(|| AuthError::InvalidJwt {
-                message: "missing Authorization header in auth-o-tron response".to_string(),
-            })?;
+        let raw_header: &HeaderValue =
+            response
+                .headers()
+                .get(header::AUTHORIZATION)
+                .ok_or_else(|| AuthError::InvalidJwt {
+                    message: "missing Authorization header in auth-o-tron response".to_string(),
+                })?;
 
-        let auth_response_header =
-            raw_header
-                .to_str()
-                .map_err(|_| AuthError::InvalidJwt {
-                    message: "non-UTF-8 Authorization header in auth-o-tron response".to_string(),
-                })?
-                .to_string();
+        let auth_response_header = raw_header
+            .to_str()
+            .map_err(|_| AuthError::InvalidJwt {
+                message: "non-UTF-8 Authorization header in auth-o-tron response".to_string(),
+            })?
+            .to_string();
 
         let jwt_token = auth_response_header
             .strip_prefix("Bearer ")
