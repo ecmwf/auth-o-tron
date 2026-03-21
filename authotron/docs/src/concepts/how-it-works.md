@@ -78,3 +78,14 @@ The resulting JWT contains these standard and custom claims:
 - **attributes**: Key-value map of additional user properties from augmenters
 
 Downstream services validate this JWT using the shared secret and extract user context without needing to query Auth-O-Tron again.
+
+## Consumer contract notes
+
+If you consume JWTs through `authotron-client` (instead of decoding JWTs yourself), two normalization rules apply:
+
+- A synthetic `"default"` role is injected and deduplicated so every decoded user has at least one role.
+- `attributes` are normalized to `HashMap<String, String>`:
+  - JSON strings are passed through unchanged
+  - numbers/booleans/null/arrays/objects are stringified to JSON form
+
+For Polytope/BITS integration, the canonical downstream payload is stored under `job.user.auth` and currently uses `version: 1`.
