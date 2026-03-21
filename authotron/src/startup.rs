@@ -26,7 +26,9 @@ use crate::store::create_store;
 ///
 /// Returns the app router ready to be served with `axum::serve()`.
 /// The caller is responsible for binding a `TcpListener` and serving.
-pub async fn build_app(config: Arc<ConfigV2>) -> Result<(axum::Router, AppState), Box<dyn std::error::Error>> {
+pub async fn build_app(
+    config: Arc<ConfigV2>,
+) -> Result<(axum::Router, AppState), Box<dyn std::error::Error>> {
     let store = create_store(&config.store).await;
     let auth_config = config.auth.clone();
     let auth = Arc::new(Auth::new(

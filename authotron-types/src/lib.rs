@@ -183,14 +183,7 @@ mod tests {
 
     #[test]
     fn test_user_new_defaults() {
-        let user = User::new(
-            "r".to_string(),
-            "u".to_string(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let user = User::new("r".to_string(), "u".to_string(), None, None, None, None);
         assert!(user.roles.is_empty());
         assert!(user.attributes.is_empty());
         assert!(user.scopes.is_empty());
