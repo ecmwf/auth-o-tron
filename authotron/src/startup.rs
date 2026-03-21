@@ -22,7 +22,13 @@ use crate::routes;
 use crate::state::AppState;
 use crate::store::create_store;
 
-pub async fn run(config: Arc<ConfigV2>) -> Result<(), Box<dyn std::error::Error>> {
+/// Build the auth-o-tron application router and state from config.
+///
+/// Returns the app router ready to be served with `axum::serve()`.
+/// The caller is responsible for binding a `TcpListener` and serving.
+pub async fn build_app(
+    config: Arc<ConfigV2>,
+) -> Result<(axum::Router, AppState), Box<dyn std::error::Error>> {
     let store = create_store(&config.store).await;
     let auth_config = config.auth.clone();
     let auth = Arc::new(Auth::new(
@@ -41,6 +47,13 @@ pub async fn run(config: Arc<ConfigV2>) -> Result<(), Box<dyn std::error::Error>
         metrics,
     };
 
+    let app = routes::create_app_router(state.clone());
+    Ok((app, state))
+}
+
+pub async fn run(config: Arc<ConfigV2>) -> Result<(), Box<dyn std::error::Error>> {
+    let (app, state) = build_app(config.clone()).await?;
+
     if config.metrics.enabled && config.server.port == config.metrics.port {
         return Err(format!(
             "application port and metrics port are both {}, they must be different",
@@ -50,7 +63,6 @@ pub async fn run(config: Arc<ConfigV2>) -> Result<(), Box<dyn std::error::Error>
     }
 
     let host = config.server.host.as_str();
-    let app = routes::create_app_router(state.clone());
     let app_listener = TcpListener::bind((host, config.server.port))
         .await
         .map_err(|e| {

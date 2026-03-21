@@ -1,0 +1,30 @@
+[package]
+name = "authotron-client"
+version = "0.1.0"
+edition = "2024"
+description = "HTTP client for auth-o-tron: JWT decode, cache, and EmailKey conversion."
+license = "Apache-2.0"
+repository = "https://github.com/ecmwf/auth-o-tron"
+rust-version = "1.85"
+
+[dependencies]
+authotron-types = { path = "../authotron-types" }
+
+# HTTP & JWT
+reqwest = { version = "~0.13", features = ["json"] }
+jsonwebtoken = { version = "~10.3", features = ["rust_crypto"] }
+
+# Caching
+moka = { version = "~0.12", features = ["future"] }
+
+# Serialization
+serde = { version = "~1.0", features = ["derive"] }
+serde_json = "~1.0"
+
+# Utilities
+chrono = "~0.4"
+tracing = "~0.1"
+
+[dev-dependencies]
+mockito = "~1.7"
+tokio = { version = "~1.50", features = ["full"] }

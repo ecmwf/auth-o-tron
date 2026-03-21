@@ -85,10 +85,9 @@ To build and view it locally:
 
 ```bash
 cargo install mdbook mdbook-mermaid
-mdbook serve docs --open
+mdbook serve authotron/docs --open
 ```
 
 ## License
 
 Apache-2.0 — see [LICENSE.txt](LICENSE.txt).
-

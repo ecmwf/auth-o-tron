@@ -6,6 +6,12 @@
 // granted to it by virtue of its status as an intergovernmental organisation nor
 // does it submit to any jurisdiction.
 
+//! Server-side extensions for the shared [`User`] type.
+//!
+//! Re-exports [`authotron_types::User`] and adds:
+//! - [`UserJwtExt::to_jwt`] for signing a user into a JWT
+//! - [`FromRequestParts`] extractor for Axum handlers
+
 use std::collections::HashMap;
 
 use crate::config::JWTConfig;
@@ -16,44 +22,26 @@ use axum::http::StatusCode;
 use chrono::Utc;
 use http::request::Parts;
 use jsonwebtoken::{EncodingKey, Header, encode};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::net::SocketAddr;
 use tracing::warn;
 
-/// The User struct represents an authenticated user in the system.
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct User {
-    pub version: i32,
-    pub realm: String,
-    pub username: String,
-    pub roles: Vec<String>,
-    pub attributes: HashMap<String, String>,
-    /// A map of service -> scopes
-    pub scopes: Option<HashMap<String, Vec<String>>>,
+// Re-export the canonical User type so existing `use crate::models::user::User`
+// imports continue to work throughout the codebase.
+pub use authotron_types::User;
+
+/// Extension trait that adds JWT signing to `User`.
+///
+/// This is an extension trait rather than an inherent method because `User` is
+/// defined in `authotron-types`. The JWT signing logic depends on `JWTConfig`
+/// from the server crate and therefore cannot live in the types crate.
+pub trait UserJwtExt {
+    /// Convert a User into a signed JWT string, using the config from `JWTConfig`.
+    fn to_jwt(&self, jwtconfig: &JWTConfig) -> String;
 }
 
-impl User {
-    /// Construct a new User with optional roles, attributes, scopes.
-    pub fn new(
-        realm: String,
-        username: String,
-        roles: Option<Vec<String>>,
-        attributes: Option<HashMap<String, String>>,
-        scopes: Option<HashMap<String, Vec<String>>>,
-        version: Option<i32>,
-    ) -> Self {
-        User {
-            version: version.unwrap_or(1),
-            realm,
-            username,
-            roles: roles.unwrap_or_default(),
-            attributes: attributes.unwrap_or_default(),
-            scopes,
-        }
-    }
-
-    /// Convert a User into a signed JWT string, using the config from `JWTConfig`.
-    pub fn to_jwt(&self, jwtconfig: &JWTConfig) -> String {
+impl UserJwtExt for User {
+    fn to_jwt(&self, jwtconfig: &JWTConfig) -> String {
         #[derive(Serialize)]
         struct Claims<'a> {
             sub: &'a String,
@@ -63,7 +51,7 @@ impl User {
 
             roles: &'a Vec<String>,
             username: &'a String,
-            scopes: &'a Option<HashMap<String, Vec<String>>>,
+            scopes: &'a HashMap<String, Vec<String>>,
             realm: &'a String,
             attributes: &'a HashMap<String, String>,
         }

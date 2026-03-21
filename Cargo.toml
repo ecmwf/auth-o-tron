@@ -1,61 +1,7 @@
-[package]
-name = "authotron"
-version = "0.3.2"
-edition = "2024"
-description = "Authentication and authorization gateway for web APIs. Validates credentials from multiple providers, enriches users with roles, and issues signed JWTs."
-license = "Apache-2.0"
-repository = "https://github.com/ecmwf/auth-o-tron"
-documentation = "https://sites.ecmwf.int/docs/authotron/main/"
-readme = "README.md"
-keywords = ["authentication", "authorization", "gateway", "jwt", "nginx"]
-categories = ["authentication", "network-programming"]
-rust-version = "1.85"
-include = [
-    "src/**/*.rs",
-    "src/static/**",
-    "Cargo.toml",
-    "Cargo.lock",
-    "LICENSE.txt",
-    "README.md",
+[workspace]
+members = [
+    "authotron",
+    "authotron-types",
+    "authotron-client",
 ]
-
-[dependencies]
-# Web framework
-aide = { version = "~0.15", features = ["axum", "axum-multipart"] }
-axum = "~0.8"
-http = "~1.4"
-tokio = { version = "~1.50", features = ["full"] }
-
-# Authentication & crypto
-base64 = "~0.22"
-jsonwebtoken = { version = "~10.3", features = ["rust_crypto"] }
-ldap3 = "~0.12"
-
-# Data & serialization
-schemars = "~1.2"
-serde = { version = "~1.0", features = ["derive"] }
-serde_json = "~1.0"
-
-# Storage & caching
-cached = { version = "~0.58", features = ["async", "tokio"] }
-mongodb = "~3.5"
-
-# Configuration
-figment = { version = "~0.10", features = ["yaml", "env"] }
-
-# Observability
-prometheus = "~0.14"
-tracing = "~0.1"
-tracing-subscriber = { version = "~0.3", features = ["env-filter", "json"] }
-
-# Utilities
-async-trait = "~0.1"
-chrono = "~0.4"
-futures = "~0.3"
-reqwest = { version = "~0.13", features = ["form", "json"] }
-uuid = { version = "~1.22", features = ["v4"] }
-
-[dev-dependencies]
-mockito = "~1.7"
-tower = { version = "~0.5", features = ["util"] }
-tracing-test = "~0.2"
+resolver = "3"
