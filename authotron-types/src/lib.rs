@@ -74,7 +74,7 @@ impl User {
 }
 
 /// Authentication errors shared across the ecosystem.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AuthError {
     /// The token was rejected by the auth provider (HTTP 401).
     Unauthorized {
