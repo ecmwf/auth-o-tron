@@ -57,6 +57,7 @@ struct Claims {
 pub fn decode_jwt(token: &str, secret: &[u8]) -> Result<User, AuthError> {
     let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
     validation.validate_aud = false;
+    validation.leeway = 5;
 
     let token_data = decode::<Claims>(token, &DecodingKey::from_secret(secret), &validation)
         .map_err(|e| AuthError::InvalidJwt {
@@ -129,21 +130,25 @@ pub struct AuthClient {
     cache: Cache<String, User>,
 }
 
+const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(60);
+const DEFAULT_CACHE_CAPACITY: u64 = 10_000;
+
 impl AuthClient {
-    /// Create a new `AuthClient`.
-    ///
-    /// Accepts primitive params to decouple from any config struct.
-    /// The caller is responsible for resolving secrets (e.g. from env vars)
-    /// before passing them here.
-    pub fn new(url: &str, secret: &[u8], timeout: Duration) -> Self {
+    pub fn new(
+        url: &str,
+        secret: &[u8],
+        timeout: Duration,
+        cache_ttl: Option<Duration>,
+        cache_capacity: Option<u64>,
+    ) -> Self {
         let http = Client::builder()
             .timeout(timeout)
             .build()
             .expect("failed to build HTTP client");
 
         let cache = Cache::builder()
-            .max_capacity(10_000)
-            .time_to_live(Duration::from_secs(60))
+            .max_capacity(cache_capacity.unwrap_or(DEFAULT_CACHE_CAPACITY))
+            .time_to_live(cache_ttl.unwrap_or(DEFAULT_CACHE_TTL))
             .build();
 
         Self {
@@ -465,6 +470,12 @@ mod tests {
         assert_eq!(result, "Bearer xyz");
     }
 
+    #[test]
+    fn test_email_key_malformed_no_colon() {
+        let result = convert_email_key("EmailKey user@example.com");
+        assert_eq!(result, "EmailKey user@example.com", "malformed EmailKey without colon should pass through unchanged");
+    }
+
     // ── AuthClient tests ──────────────────────────────────────────────
 
     #[tokio::test]
@@ -479,7 +490,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5));
+        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5), None, None);
         let user = client.authenticate("Bearer sometoken").await.unwrap();
 
         assert_eq!(user.username, "testuser");
@@ -499,7 +510,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5));
+        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5), None, None);
         let result = client.authenticate("Bearer badtoken").await;
 
         match result {
@@ -525,7 +536,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5));
+        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5), None, None);
 
         let user1 = client.authenticate("Bearer cachedtoken").await.unwrap();
         let user2 = client.authenticate("Bearer cachedtoken").await.unwrap();
@@ -536,7 +547,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_service_unreachable() {
-        let client = AuthClient::new("http://127.0.0.1:1", b"testsecret", Duration::from_secs(1));
+        let client = AuthClient::new("http://127.0.0.1:1", b"testsecret", Duration::from_secs(1), None, None);
         let result = client.authenticate("Bearer token").await;
 
         assert!(matches!(result, Err(AuthError::ServiceUnavailable { .. })));
@@ -552,7 +563,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5));
+        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5), None, None);
         let result = client.authenticate("Bearer sometoken").await;
 
         match result {
@@ -578,7 +589,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5));
+        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5), None, None);
         let result = client.authenticate("Bearer sometoken").await;
 
         match result {
@@ -604,7 +615,7 @@ mod tests {
             .create_async()
             .await;
 
-        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5));
+        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5), None, None);
         let result = client.authenticate("Bearer sometoken").await;
 
         assert!(matches!(result, Err(AuthError::InvalidJwt { .. })));
