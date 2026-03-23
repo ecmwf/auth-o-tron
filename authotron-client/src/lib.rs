@@ -473,7 +473,10 @@ mod tests {
     #[test]
     fn test_email_key_malformed_no_colon() {
         let result = convert_email_key("EmailKey user@example.com");
-        assert_eq!(result, "EmailKey user@example.com", "malformed EmailKey without colon should pass through unchanged");
+        assert_eq!(
+            result, "EmailKey user@example.com",
+            "malformed EmailKey without colon should pass through unchanged"
+        );
     }
 
     // ── AuthClient tests ──────────────────────────────────────────────
@@ -490,7 +493,13 @@ mod tests {
             .create_async()
             .await;
 
-        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5), None, None);
+        let client = AuthClient::new(
+            &server.url(),
+            b"testsecret",
+            Duration::from_secs(5),
+            None,
+            None,
+        );
         let user = client.authenticate("Bearer sometoken").await.unwrap();
 
         assert_eq!(user.username, "testuser");
@@ -510,7 +519,13 @@ mod tests {
             .create_async()
             .await;
 
-        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5), None, None);
+        let client = AuthClient::new(
+            &server.url(),
+            b"testsecret",
+            Duration::from_secs(5),
+            None,
+            None,
+        );
         let result = client.authenticate("Bearer badtoken").await;
 
         match result {
@@ -536,7 +551,13 @@ mod tests {
             .create_async()
             .await;
 
-        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5), None, None);
+        let client = AuthClient::new(
+            &server.url(),
+            b"testsecret",
+            Duration::from_secs(5),
+            None,
+            None,
+        );
 
         let user1 = client.authenticate("Bearer cachedtoken").await.unwrap();
         let user2 = client.authenticate("Bearer cachedtoken").await.unwrap();
@@ -547,7 +568,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_auth_service_unreachable() {
-        let client = AuthClient::new("http://127.0.0.1:1", b"testsecret", Duration::from_secs(1), None, None);
+        let client = AuthClient::new(
+            "http://127.0.0.1:1",
+            b"testsecret",
+            Duration::from_secs(1),
+            None,
+            None,
+        );
         let result = client.authenticate("Bearer token").await;
 
         assert!(matches!(result, Err(AuthError::ServiceUnavailable { .. })));
@@ -563,7 +590,13 @@ mod tests {
             .create_async()
             .await;
 
-        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5), None, None);
+        let client = AuthClient::new(
+            &server.url(),
+            b"testsecret",
+            Duration::from_secs(5),
+            None,
+            None,
+        );
         let result = client.authenticate("Bearer sometoken").await;
 
         match result {
@@ -589,7 +622,13 @@ mod tests {
             .create_async()
             .await;
 
-        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5), None, None);
+        let client = AuthClient::new(
+            &server.url(),
+            b"testsecret",
+            Duration::from_secs(5),
+            None,
+            None,
+        );
         let result = client.authenticate("Bearer sometoken").await;
 
         match result {
@@ -615,7 +654,13 @@ mod tests {
             .create_async()
             .await;
 
-        let client = AuthClient::new(&server.url(), b"testsecret", Duration::from_secs(5), None, None);
+        let client = AuthClient::new(
+            &server.url(),
+            b"testsecret",
+            Duration::from_secs(5),
+            None,
+            None,
+        );
         let result = client.authenticate("Bearer sometoken").await;
 
         assert!(matches!(result, Err(AuthError::InvalidJwt { .. })));
