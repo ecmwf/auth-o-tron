@@ -123,6 +123,7 @@ pub fn convert_email_key(auth_header: &str) -> String {
 
 /// HTTP client that calls auth-o-tron's `/authenticate` endpoint, decodes the
 /// returned JWT, and caches the result.
+#[derive(Clone)]
 pub struct AuthClient {
     http: Client,
     url: String,
