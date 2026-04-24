@@ -10,12 +10,11 @@ use std::collections::HashMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::time::Duration;
 use tracing::{debug, info};
 
 use crate::utils::log_throttle::should_emit;
-use crate::{models::user::User, providers::Provider, utils::value::value_to_string};
+use crate::{models::user::User, providers::Provider};
 use cached::Return;
 #[allow(unused_imports)]
 use cached::proc_macro::cached;
@@ -39,8 +38,8 @@ struct EfasUserDetailsResponse {
     username: String,
     #[serde(default)]
     roles: Vec<String>,
-    #[serde(flatten)]
-    extra: HashMap<String, Value>,
+    #[serde(default)]
+    email: Option<String>,
 }
 
 impl EfasApiProvider {
@@ -135,11 +134,10 @@ async fn query(uri: String, token: String, realm: String) -> Result<Return<User>
 
         let username = user_info.username;
         let roles = user_info.roles;
-        let attributes = user_info
-            .extra
-            .into_iter()
-            .map(|(k, v)| (k, value_to_string(v)))
-            .collect();
+        let mut attributes = HashMap::new();
+        if let Some(email) = user_info.email {
+            attributes.insert("email".to_string(), email);
+        }
         Ok(Return::new(User::new(
             realm,
             username,
@@ -205,6 +203,7 @@ mod tests {
             user.attributes.get("email"),
             Some(&"user@example.com".to_string())
         );
+        assert_eq!(user.attributes.len(), 1);
     }
 
     /// Test that an invalid token (simulated with a 403 response) returns an error.
