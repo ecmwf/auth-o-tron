@@ -6,14 +6,6 @@ on:
       - '*'
   workflow_dispatch:
     inputs:
-      crate:
-        description: "Crate to publish or dry-run"
-        required: true
-        type: choice
-        options:
-          - authotron
-          - authotron-types
-        default: authotron
       dry_run:
         description: "Dry-run only (no actual publish)"
         required: false
@@ -61,7 +53,7 @@ jobs:
 
   publish-authotron-types:
     needs: verify-tag
-    if: ${{ always() && ((github.event_name == 'push' && needs.verify-tag.outputs.should_publish == 'true') || (github.event_name == 'workflow_dispatch' && inputs.crate == 'authotron-types')) }}
+    if: ${{ always() && ((github.event_name == 'push' && needs.verify-tag.outputs.should_publish == 'true') || github.event_name == 'workflow_dispatch') }}
     uses: ecmwf/reusable-workflows/.github/workflows/publish-rust-crate.yml@d48e754288c678873883a58bfbf26876d394094d
     with:
       manifest-path: authotron-types/Cargo.toml
@@ -71,7 +63,7 @@ jobs:
 
   publish-authotron:
     needs: [verify-tag, publish-authotron-types]
-    if: ${{ always() && ((github.event_name == 'push' && needs.verify-tag.outputs.should_publish == 'true' && needs.publish-authotron-types.result == 'success') || (github.event_name == 'workflow_dispatch' && inputs.crate == 'authotron')) }}
+    if: ${{ always() && ((github.event_name == 'push' && needs.verify-tag.outputs.should_publish == 'true' && needs.publish-authotron-types.result == 'success') || (github.event_name == 'workflow_dispatch' && needs.publish-authotron-types.result == 'success')) }}
     uses: ecmwf/reusable-workflows/.github/workflows/publish-rust-crate.yml@d48e754288c678873883a58bfbf26876d394094d
     with:
       manifest-path: authotron/Cargo.toml
