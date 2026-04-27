@@ -24,34 +24,43 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
         # This step fetches the repository code.
 
       - name: Extract package version and name
         id: get_version
         run: |
           set -euo pipefail
-          PACKAGE_NAME=$(grep '^name\s*=' Cargo.toml | head -n 1 | cut -d'"' -f2)
-          PACKAGE_VERSION=$(grep '^version\s*=' Cargo.toml | head -n 1 | cut -d'"' -f2)
+          readarray -t metadata < <(python3 - <<'PY'
+          import tomllib
+          with open('authotron/Cargo.toml', 'rb') as f:
+              authotron = tomllib.load(f)['package']
+          print(authotron['name'])
+          print(authotron['version'])
+          PY
+          )
+          PACKAGE_NAME="${metadata[0]:-}"
+          PACKAGE_VERSION="${metadata[1]:-}"
           if [ -z "${PACKAGE_NAME}" ] || [ -z "${PACKAGE_VERSION}" ]; then
-            echo "::error::Could not extract name or version from Cargo.toml"
+            echo "::error::Could not extract package metadata from authotron manifest"
             exit 1
           fi
           echo "package_name=${PACKAGE_NAME}" >> "$GITHUB_OUTPUT"
           echo "package_version=${PACKAGE_VERSION}" >> "$GITHUB_OUTPUT"
-          echo "CARGO_VERSION=${PACKAGE_VERSION}" >> "$GITHUB_ENV"
           echo "Extracted package: ${PACKAGE_NAME} version -> ${PACKAGE_VERSION}"
 
-      - name: Verify Tag Equals Cargo Version
+      - name: Verify tag matches authotron version
         id: verify_tag
         run: |
-          # Compare the pushed tag (github.ref_name) with the version from Cargo.toml
+          # Compare the pushed tag (github.ref_name) with the authotron version.
           echo "Pushed Tag: ${{ github.ref_name }}"
-          echo "Cargo Version: ${{ steps.get_version.outputs.package_version }}"
+          echo "Authotron Version: ${{ steps.get_version.outputs.package_version }}"
           if [ "${{ github.ref_name }}" = "${{ steps.get_version.outputs.package_version }}" ]; then
             echo "should_release=true" >> $GITHUB_OUTPUT
           else
             echo "should_release=false" >> $GITHUB_OUTPUT
-            echo "Tag does not match Cargo version. Skipping release steps."
+            echo "Tag does not match authotron version. Skipping release steps."
           fi
 
   #################################################################
@@ -73,13 +82,13 @@ jobs:
     env:
       # Repository to push images.
       SKAFFOLD_DEFAULT_REPO: eccr.ecmwf.int/auth-o-tron
-      # Set the CARGO_VERSION based on Cargo.toml
-      CARGO_VERSION: ${{ needs.release-setup.outputs.package_version }}
       # Disable default attestations to allow cross-platform manifests.
       BUILDX_NO_DEFAULT_ATTESTATIONS: "1"
     steps:
       - name: Check out code
         uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
         # Ensures the latest code is available for the build.
 
       - name: Docker login
@@ -109,10 +118,10 @@ jobs:
 
       - name: Build and push Docker image for ${{ matrix.arch }}
         env:
-          # Set TARGETARCH to ensure the tag becomes "<CARGO_VERSION>-<TARGETARCH>"
+          # Set TARGETARCH to ensure the tag becomes "<git-tag>-<TARGETARCH>"
           TARGETARCH: ${{ matrix.arch }}
         run: |
-          # Run the Skaffold build, which uses TARGETARCH to generate an architecture-specific tag.
+          # Run the Skaffold build, which uses git tags plus TARGETARCH for an architecture-specific tag.
           skaffold build
 
   #################################################################

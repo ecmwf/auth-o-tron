@@ -1,6 +1,6 @@
 [package]
 name = "authotron"
-version = "0.3.2"
+version = "0.3.3-dev.1"
 edition = "2024"
 description = "Authentication and authorization gateway for web APIs. Validates credentials from multiple providers, enriches users with roles, and issues signed JWTs."
 license = "Apache-2.0"
@@ -20,7 +20,7 @@ include = [
 
 [dependencies]
 # Shared types
-authotron-types = { path = "../authotron-types" }
+authotron-types = { path = "../authotron-types", version = "0.1.0-dev.1" }
 
 # Web framework
 aide = { version = "~0.15", features = ["axum", "axum-multipart"] }
