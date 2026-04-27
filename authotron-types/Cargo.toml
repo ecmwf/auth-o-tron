@@ -1,6 +1,6 @@
 [package]
 name = "authotron-types"
-version = "0.1.0-dev.1"
+version = "0.1.0"
 edition = "2024"
 description = "Shared authentication DTOs for the auth-o-tron ecosystem."
 license = "Apache-2.0"
