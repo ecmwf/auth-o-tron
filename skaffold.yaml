@@ -9,16 +9,14 @@ build:
 
   tagPolicy:
     customTemplate:
-      # Use the CARGO_VERSION and TARGETARCH environment variables to tag the image
-      # We will build multi-arch images, so we need to tag them with the target architecture
-      template: "{{.CARGO_VERSION}}-{{.TARGETARCH}}"
+      template: "{{.GIT_TAG}}{{if ne .TARGETARCH \"\"}}-{{.TARGETARCH}}{{end}}"
       components:
-        - name: CARGO_VERSION
-          envTemplate:
-            template: '{{.CARGO_VERSION}}'
+        - name: GIT_TAG
+          gitCommit:
+            variant: Tags
         - name: TARGETARCH
           envTemplate:
-            template: '{{.TARGETARCH}}'
+            template: '{{ default "" .TARGETARCH }}'
 
   artifacts:
     - image: "auth-o-tron"

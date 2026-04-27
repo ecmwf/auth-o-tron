@@ -6,6 +6,14 @@ on:
       - '*'
   workflow_dispatch:
     inputs:
+      crate:
+        description: "Crate to publish or dry-run"
+        required: true
+        type: choice
+        options:
+          - authotron
+          - authotron-types
+        default: authotron
       dry_run:
         description: "Dry-run only (no actual publish)"
         required: false
@@ -18,30 +26,55 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_publish: ${{ steps.check.outputs.should_publish }}
+      authotron_version: ${{ steps.check.outputs.authotron_version }}
+      authotron_types_version: ${{ steps.check.outputs.authotron_types_version }}
     steps:
       - uses: actions/checkout@v4
-      - name: Verify tag matches Cargo.toml version
+      - name: Verify tag matches authotron release version
         id: check
         run: |
           set -euo pipefail
-          cargo_version=$(grep '^version\s*=' Cargo.toml | head -1 | cut -d'"' -f2)
-          if [ -z "${cargo_version}" ]; then
-            echo "::error::Could not extract version from Cargo.toml"
+          readarray -t versions < <(python3 - <<'PY'
+          import tomllib
+          with open('authotron/Cargo.toml', 'rb') as f:
+              authotron = tomllib.load(f)['package']['version']
+          with open('authotron-types/Cargo.toml', 'rb') as f:
+              types_pkg = tomllib.load(f)['package']['version']
+          print(authotron)
+          print(types_pkg)
+          PY
+          )
+          authotron_version="${versions[0]:-}"
+          authotron_types_version="${versions[1]:-}"
+          if [ -z "${authotron_version}" ] || [ -z "${authotron_types_version}" ]; then
+            echo "::error::Could not extract publishable crate versions"
             exit 1
           fi
-          if [ "${{ github.ref_name }}" = "${cargo_version}" ]; then
+          echo "authotron_version=${authotron_version}" >> "$GITHUB_OUTPUT"
+          echo "authotron_types_version=${authotron_types_version}" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.ref_name }}" = "${authotron_version}" ]; then
             echo "should_publish=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Tag ${{ github.ref_name }} does not match Cargo.toml version ${cargo_version}, skipping."
+            echo "Tag ${{ github.ref_name }} does not match authotron release version ${authotron_version}, skipping."
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
           fi
 
-  publish:
+  publish-authotron-types:
     needs: verify-tag
-    if: ${{ always() && (needs.verify-tag.outputs.should_publish == 'true' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ always() && ((github.event_name == 'push' && needs.verify-tag.outputs.should_publish == 'true') || (github.event_name == 'workflow_dispatch' && inputs.crate == 'authotron-types')) }}
     uses: ecmwf/reusable-workflows/.github/workflows/publish-rust-crate.yml@d48e754288c678873883a58bfbf26876d394094d
     with:
+      manifest-path: authotron-types/Cargo.toml
       dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
-      run-checks: false
+    secrets:
+      cargo_registry_token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  publish-authotron:
+    needs: [verify-tag, publish-authotron-types]
+    if: ${{ always() && ((github.event_name == 'push' && needs.verify-tag.outputs.should_publish == 'true' && needs.publish-authotron-types.result == 'success') || (github.event_name == 'workflow_dispatch' && inputs.crate == 'authotron')) }}
+    uses: ecmwf/reusable-workflows/.github/workflows/publish-rust-crate.yml@d48e754288c678873883a58bfbf26876d394094d
+    with:
+      manifest-path: authotron/Cargo.toml
+      dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
     secrets:
       cargo_registry_token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
