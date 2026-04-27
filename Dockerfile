@@ -36,7 +36,7 @@ COPY . .
 COPY --from=cacher /app/target target
 COPY --from=cacher /usr/local/cargo /usr/local/cargo
 # Build the application in release mode
-RUN cargo build --release
+RUN cargo build --release -p authotron
 
 ###############################
 # Stage 4: Production Release Image
@@ -69,4 +69,3 @@ COPY --from=builder /app/target/release/authotron /app/authotron
 # Do not comment out the line below, we will mount the config file using a configmap
 # COPY ./src/config.yaml /app/src/config.yaml
 ENTRYPOINT ["/app/authotron"]
-

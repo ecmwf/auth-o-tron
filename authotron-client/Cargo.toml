@@ -1,14 +1,15 @@
 [package]
 name = "authotron-client"
-version = "0.1.0"
+version = "0.1.0-dev.1"
 edition = "2024"
 description = "HTTP client for auth-o-tron: JWT decode, cache, and EmailKey conversion."
 license = "Apache-2.0"
 repository = "https://github.com/ecmwf/auth-o-tron"
 rust-version = "1.85"
+publish = false
 
 [dependencies]
-authotron-types = { path = "../authotron-types" }
+authotron-types = { path = "../authotron-types", version = "0.1.0-dev.1" }
 
 # HTTP & JWT
 reqwest = { version = "~0.13", features = ["json"] }
