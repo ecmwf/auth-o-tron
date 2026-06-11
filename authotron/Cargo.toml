@@ -46,7 +46,7 @@ mongodb = "~3.5"
 figment = { version = "~0.10", features = ["yaml", "env"] }
 
 # Observability
-prometheus = "~0.14"
+prometheus = { version = "~0.14", features = ["process"] }
 tracing = "~0.1"
 tracing-subscriber = { version = "~0.3", features = ["env-filter", "json"] }
 

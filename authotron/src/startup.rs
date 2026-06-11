@@ -40,6 +40,32 @@ pub async fn build_app(
 
     let metrics = Metrics::new();
 
+    // Pre-initialise per-provider/augmenter/realm series at zero from the
+    // configured set so alert rules evaluate against existing series.
+    let provider_desc: Vec<(String, String, String)> = auth
+        .providers
+        .iter()
+        .map(|p| {
+            (
+                p.get_name().to_string(),
+                p.get_type().to_string(),
+                p.get_realm().unwrap_or("unknown").to_string(),
+            )
+        })
+        .collect();
+    let augmenter_desc: Vec<(String, String, String)> = auth
+        .augmenters
+        .iter()
+        .map(|a| {
+            (
+                a.get_name().to_string(),
+                a.get_type().to_string(),
+                a.get_realm().to_string(),
+            )
+        })
+        .collect();
+    metrics.preinit_series(&provider_desc, &augmenter_desc);
+
     let state = AppState {
         config: config.clone(),
         auth,
