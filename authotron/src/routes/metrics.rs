@@ -22,11 +22,25 @@ pub fn routes() -> Router<AppState> {
 /// This endpoint should be restricted via Ingress to prevent public access
 /// when/if auth-o-tron is exposed through an ingress
 async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let metrics_text = state.metrics.render();
-
-    (
-        StatusCode::OK,
-        [("Content-Type", "text/plain; version=0.0.4; charset=utf-8")],
-        metrics_text,
-    )
+    match state.metrics.render() {
+        Ok(body) => (
+            StatusCode::OK,
+            [("Content-Type", "text/plain; version=0.0.4; charset=utf-8")],
+            body,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(
+                event_name = "metrics.render.failed",
+                event_domain = "metrics",
+                error = %e,
+                "failed to encode metrics for scrape"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to render metrics\n",
+            )
+                .into_response()
+        }
+    }
 }
