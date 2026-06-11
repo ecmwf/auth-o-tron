@@ -102,7 +102,14 @@ impl Metrics {
         #[cfg(target_os = "linux")]
         {
             let collector = prometheus::process_collector::ProcessCollector::for_self();
-            let _ = registry.register(Box::new(collector));
+            if let Err(e) = registry.register(Box::new(collector)) {
+                tracing::warn!(
+                    event_name = "metrics.process_collector.registration_failed",
+                    event_domain = "metrics",
+                    error = %e,
+                    "failed to register process metrics collector; process metrics will be absent"
+                );
+            }
         }
 
         // Authentication metrics
