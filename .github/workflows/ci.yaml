@@ -29,3 +29,25 @@ jobs:
         run: |
           unset HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy
           cargo test -- --test-threads=1
+
+  # Compile with the SAME toolchain and profile the release image uses
+  # (Dockerfile pins rust:1.90), so a compiler-version- or release-specific
+  # error fails the PR instead of the release pipeline. The 0.3.4 image build
+  # failed on an E0308 that debug `cargo test` on newer stable Rust did not
+  # surface (older rustc resolves a mixed &String/&str array differently).
+  # Keep the container tag in sync with the Dockerfile's rust:<version>.
+  release-build:
+    runs-on: ubuntu-latest
+    container: rust:1.90-slim-bookworm
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Install build tools (match Dockerfile)
+        run: apt-get update && apt-get install -y libssl-dev pkg-config build-essential && rm -rf /var/lib/apt/lists/*
+
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Release build (matches the Docker release image)
+        run: cargo build --release -p authotron
