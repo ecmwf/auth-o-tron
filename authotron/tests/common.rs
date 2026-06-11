@@ -26,6 +26,12 @@ pub struct Claims {
 }
 
 pub async fn build_app(config: ConfigV2) -> (Router, Arc<ConfigV2>) {
+    let (app, config, _state) = build_app_with_state(config).await;
+    (app, config)
+}
+
+#[allow(dead_code)]
+pub async fn build_app_with_state(config: ConfigV2) -> (Router, Arc<ConfigV2>, AppState) {
     let config = Arc::new(config);
     let store = create_store(&config.store).await;
     let auth = Arc::new(Auth::new(
@@ -45,7 +51,7 @@ pub async fn build_app(config: ConfigV2) -> (Router, Arc<ConfigV2>) {
         metrics,
     };
 
-    (create_app_router(state), config)
+    (create_app_router(state.clone()), config, state)
 }
 
 #[allow(dead_code)]

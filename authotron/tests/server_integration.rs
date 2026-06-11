@@ -97,6 +97,54 @@ async fn homepage_returns_html_with_version() {
 }
 
 #[tokio::test]
+async fn http_metrics_record_matched_route_and_status() {
+    let config = base_config(0, false, 0);
+    let (app, _, state) = common::build_app_with_state(config).await;
+
+    let response = app
+        .oneshot(Request::get("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let output = state.metrics.render().expect("render ok");
+    assert!(
+        output.contains(
+            r#"authotron_http_requests_total{method="GET",route="/",status_code="200"} 1"#
+        ),
+        "expected the homepage request counted under its matched route:\n{output}"
+    );
+    assert!(
+        output.contains(r#"authotron_http_request_duration_seconds_count{method="GET",route="/"}"#),
+        "expected a duration observation for the matched route:\n{output}"
+    );
+    assert!(
+        output.contains(r#"authotron_http_requests_in_flight{method="GET"} 0"#),
+        "in-flight gauge must return to zero after the request completes:\n{output}"
+    );
+}
+
+#[tokio::test]
+async fn http_metrics_collapse_unrouted_requests() {
+    let config = base_config(0, false, 0);
+    let (app, _, state) = common::build_app_with_state(config).await;
+
+    let response = app
+        .oneshot(Request::get("/does-not-exist").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let output = state.metrics.render().expect("render ok");
+    assert!(
+        output.contains(
+            r#"authotron_http_requests_total{method="GET",route="unmatched",status_code="404"} 1"#
+        ),
+        "unrouted requests must collapse into route=\"unmatched\":\n{output}"
+    );
+}
+
+#[tokio::test]
 async fn logo_returns_png() {
     let config = base_config(0, false, 0);
     let (app, _) = common::build_app(config).await;
