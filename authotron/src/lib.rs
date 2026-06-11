@@ -18,6 +18,7 @@ pub mod augmenters;
 pub mod auth;
 pub mod config;
 pub mod metrics;
+pub mod middleware;
 pub mod models;
 pub mod providers;
 pub mod routes;

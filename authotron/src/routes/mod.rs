@@ -20,6 +20,7 @@ mod metrics;
 mod providers;
 mod tokens;
 
+use crate::middleware::record_http_metrics;
 use crate::state::AppState;
 use axum::Router;
 
@@ -31,6 +32,10 @@ pub fn create_app_router(state: AppState) -> Router {
         .merge(providers::routes())
         .merge(augmenters::routes())
         .merge(health::routes())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            record_http_metrics,
+        ))
         .with_state(state)
 }
 
