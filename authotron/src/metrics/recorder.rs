@@ -11,7 +11,9 @@
 use prometheus::{
     CounterVec, Encoder, HistogramVec, Opts, Registry, TextEncoder,
     register_counter_vec_with_registry, register_histogram_vec_with_registry,
+    register_int_gauge_vec_with_registry,
 };
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Trait for recording application metrics.
@@ -75,6 +77,33 @@ impl Metrics {
     /// Creates a new metrics instance with a Prometheus registry.
     pub fn new() -> Self {
         let registry = Arc::new(Registry::new());
+
+        // Build info: constant-1 gauge carrying the crate version as a label,
+        // for deploy annotations on dashboards (standard `*_build_info`
+        // convention). Prefixed `authotron_` to avoid colliding with other
+        // services' `build_info` series in a shared Prometheus. Not stored on
+        // the struct: the registry holds the registered clone, and the value
+        // is set once here and never changes.
+        let build_info = register_int_gauge_vec_with_registry!(
+            Opts::new(
+                "authotron_build_info",
+                "Build information; constant 1 with the crate version as a label"
+            ),
+            &["version"],
+            registry.clone()
+        )
+        .expect("Failed to register authotron_build_info");
+        build_info
+            .with_label_values(&[env!("CARGO_PKG_VERSION")])
+            .set(1);
+
+        // Process metrics (CPU, memory, open FDs) on the service's own
+        // registry. Linux-only: the collector reads /proc.
+        #[cfg(target_os = "linux")]
+        {
+            let collector = prometheus::process_collector::ProcessCollector::for_self();
+            let _ = registry.register(Box::new(collector));
+        }
 
         // Authentication metrics
         let auth_requests_total = register_counter_vec_with_registry!(
@@ -149,14 +178,81 @@ impl Metrics {
     }
 
     /// Renders all metrics in Prometheus text format.
-    pub fn render(&self) -> String {
+    ///
+    /// Returns an error if encoding fails so the scrape handler can surface a
+    /// 500 instead of panicking the process. The UTF-8 step is lossy and
+    /// cannot fail (Prometheus text exposition is ASCII).
+    pub fn render(&self) -> Result<String, prometheus::Error> {
         let encoder = TextEncoder::new();
         let metric_families = self.registry.gather();
         let mut buffer = Vec::new();
-        encoder
-            .encode(&metric_families, &mut buffer)
-            .expect("Failed to encode metrics");
-        String::from_utf8(buffer).expect("Metrics encoding produced invalid UTF-8")
+        encoder.encode(&metric_families, &mut buffer)?;
+        Ok(String::from_utf8_lossy(&buffer).into_owned())
+    }
+
+    /// Pre-initialise bounded label series to zero at startup so
+    /// `rate(...{result="error"}[5m]) > 0` alert rules evaluate against an
+    /// existing zero baseline instead of a missing series. Only label
+    /// combinations the code can actually emit are created: provider/augmenter
+    /// series from the configured set, auth failures only with
+    /// `realm="unknown"`, and auth successes with each configured realm.
+    ///
+    /// `providers` and `augmenters` are `(name, type, realm)` descriptors.
+    pub fn preinit_series(
+        &self,
+        providers: &[(String, String, String)],
+        augmenters: &[(String, String, String)],
+    ) {
+        for (name, provider_type, realm) in providers {
+            for result in ["success", "error", "timeout"] {
+                self.provider_attempts_total.with_label_values(&[
+                    name,
+                    provider_type,
+                    realm,
+                    result,
+                ]);
+            }
+            self.provider_duration_seconds
+                .with_label_values(&[name, provider_type, realm]);
+        }
+
+        for (name, augmenter_type, realm) in augmenters {
+            for result in ["success", "error"] {
+                self.augmenter_attempts_total.with_label_values(&[
+                    name,
+                    augmenter_type,
+                    realm,
+                    result,
+                ]);
+            }
+            self.augmenter_duration_seconds
+                .with_label_values(&[augmenter_type, realm]);
+        }
+
+        // Pre-resolution auth failures are only ever recorded with realm="unknown".
+        for result in ["no_auth_header", "invalid_header", "all_failed"] {
+            self.auth_requests_total
+                .with_label_values(&[result, "unknown"]);
+            self.auth_duration_seconds
+                .with_label_values(&[result, "unknown"]);
+        }
+
+        // Successful auth carries the resolved realm; pre-init each configured
+        // realm plus "unknown" (a provider without a realm resolves to "unknown").
+        // Best-effort: a provider whose issued realm differs from its filter
+        // realm (get_realm) only gets its success series created at first
+        // success. Failure series above are exact, which is what alerts watch.
+        let mut realms: BTreeSet<&str> = BTreeSet::new();
+        realms.insert("unknown");
+        for (_, _, realm) in providers.iter().chain(augmenters) {
+            realms.insert(realm.as_str());
+        }
+        for realm in realms {
+            self.auth_requests_total
+                .with_label_values(&["success", realm]);
+            self.auth_duration_seconds
+                .with_label_values(&["success", realm]);
+        }
     }
 }
 
@@ -219,5 +315,82 @@ impl MetricsRecorder for Metrics {
         self.augmenter_duration_seconds
             .with_label_values(&[augmenter_type, realm])
             .observe(duration_secs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_is_fallible_and_succeeds() {
+        let metrics = Metrics::new();
+        assert!(metrics.render().is_ok());
+    }
+
+    #[test]
+    fn build_info_is_exposed_with_crate_version() {
+        let metrics = Metrics::new();
+        let output = metrics.render().expect("render ok");
+        assert!(
+            output.contains(&format!(
+                "authotron_build_info{{version=\"{}\"}} 1",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "build_info should carry the crate version:\n{output}"
+        );
+    }
+
+    #[test]
+    fn preinit_series_creates_zero_baseline_for_reachable_labels() {
+        let metrics = Metrics::new();
+        let providers = vec![(
+            "plain1".to_string(),
+            "plain".to_string(),
+            "realm1".to_string(),
+        )];
+        let augmenters = vec![(
+            "aug1".to_string(),
+            "plain".to_string(),
+            "realm1".to_string(),
+        )];
+        metrics.preinit_series(&providers, &augmenters);
+
+        let output = metrics.render().expect("render ok");
+        for series in [
+            // provider error/timeout pre-initialised at zero
+            r#"auth_provider_attempts_total{provider_name="plain1",provider_type="plain",realm="realm1",result="error"} 0"#,
+            r#"auth_provider_attempts_total{provider_name="plain1",provider_type="plain",realm="realm1",result="timeout"} 0"#,
+            // augmenter error pre-initialised at zero
+            r#"augmenter_attempts_total{augmenter_name="aug1",augmenter_type="plain",realm="realm1",result="error"} 0"#,
+            // auth failure recorded only with realm="unknown"
+            r#"auth_requests_total{realm="unknown",result="all_failed"} 0"#,
+            // auth success with the configured realm
+            r#"auth_requests_total{realm="realm1",result="success"} 0"#,
+        ] {
+            assert!(
+                output.contains(series),
+                "expected pre-initialised series: {series}\n{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn preinit_does_not_create_failure_series_for_configured_realms() {
+        // Failures only ever carry realm="unknown"; pre-init must not invent
+        // e.g. all_failed for a configured realm.
+        let metrics = Metrics::new();
+        let providers = vec![(
+            "plain1".to_string(),
+            "plain".to_string(),
+            "realm1".to_string(),
+        )];
+        metrics.preinit_series(&providers, &[]);
+
+        let output = metrics.render().expect("render ok");
+        assert!(
+            !output.contains(r#"auth_requests_total{realm="realm1",result="all_failed"}"#),
+            "must not pre-init failure×configured-realm combos:\n{output}"
+        );
     }
 }
