@@ -8,10 +8,11 @@
 
 //! Metrics recording implementation using Prometheus.
 
+use prometheus::IntCounterVec;
 use prometheus::{
-    CounterVec, Encoder, HistogramVec, Opts, Registry, TextEncoder,
+    CounterVec, Encoder, HistogramVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
     register_counter_vec_with_registry, register_histogram_vec_with_registry,
-    register_int_gauge_vec_with_registry,
+    register_int_counter_vec_with_registry, register_int_gauge_vec_with_registry,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -53,6 +54,26 @@ pub trait MetricsRecorder: Clone + Send + Sync + 'static {
 
     /// Records the duration of an augmenter execution.
     fn record_augmenter_duration(&self, augmenter_type: &str, realm: &str, duration_secs: f64);
+
+    /// Records a completed HTTP request: count by route/method/status and
+    /// duration by route/method.
+    fn record_http_request(&self, route: &str, method: &str, status_code: &str, duration_secs: f64);
+
+    /// Increments the in-flight gauge for `method` and returns a guard that
+    /// decrements it on drop, so the gauge cannot leak on cancellation.
+    fn http_in_flight_guard(&self, method: &str) -> HttpInFlightGuard;
+}
+
+/// Decrements the in-flight gauge when dropped (request completion, client
+/// disconnect, or cancellation), so the gauge cannot leak.
+pub struct HttpInFlightGuard(Option<IntGauge>);
+
+impl Drop for HttpInFlightGuard {
+    fn drop(&mut self) {
+        if let Some(gauge) = self.0.take() {
+            gauge.dec();
+        }
+    }
 }
 
 /// Prometheus metrics collector.
@@ -71,6 +92,11 @@ pub struct Metrics {
     // Augmenter metrics
     augmenter_attempts_total: CounterVec,
     augmenter_duration_seconds: HistogramVec,
+
+    // HTTP-layer metrics
+    http_requests_total: IntCounterVec,
+    http_request_duration_seconds: HistogramVec,
+    http_requests_in_flight: IntGaugeVec,
 }
 
 impl Metrics {
@@ -173,6 +199,37 @@ impl Metrics {
         )
         .expect("Failed to register augmenter_duration_seconds");
 
+        let http_requests_total = register_int_counter_vec_with_registry!(
+            Opts::new(
+                "authotron_http_requests_total",
+                "HTTP requests by matched route pattern, method, and status code. Unrouted requests collapse into route=\"unmatched\" to bound label cardinality under path scans. The label is named `route` (not `endpoint`) to avoid colliding with the Prometheus Operator target label `endpoint`."
+            ),
+            &["route", "method", "status_code"],
+            registry.clone()
+        )
+        .expect("Failed to register authotron_http_requests_total");
+
+        let http_request_duration_seconds = register_histogram_vec_with_registry!(
+            "authotron_http_request_duration_seconds",
+            "HTTP request duration in seconds by matched route pattern and method, measured until the response is produced.",
+            &["route", "method"],
+            vec![
+                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0
+            ],
+            registry.clone()
+        )
+        .expect("Failed to register authotron_http_request_duration_seconds");
+
+        let http_requests_in_flight = register_int_gauge_vec_with_registry!(
+            Opts::new(
+                "authotron_http_requests_in_flight",
+                "HTTP requests currently being processed, by method. Labelled by method only: the matched route pattern is not known until routing completes, by which point the request is already in flight."
+            ),
+            &["method"],
+            registry.clone()
+        )
+        .expect("Failed to register authotron_http_requests_in_flight");
+
         Metrics {
             registry,
             auth_requests_total,
@@ -181,6 +238,9 @@ impl Metrics {
             provider_duration_seconds,
             augmenter_attempts_total,
             augmenter_duration_seconds,
+            http_requests_total,
+            http_request_duration_seconds,
+            http_requests_in_flight,
         }
     }
 
@@ -326,6 +386,27 @@ impl MetricsRecorder for Metrics {
             .with_label_values(&[augmenter_type, realm])
             .observe(duration_secs);
     }
+
+    fn record_http_request(
+        &self,
+        route: &str,
+        method: &str,
+        status_code: &str,
+        duration_secs: f64,
+    ) {
+        self.http_requests_total
+            .with_label_values(&[route, method, status_code])
+            .inc();
+        self.http_request_duration_seconds
+            .with_label_values(&[route, method])
+            .observe(duration_secs);
+    }
+
+    fn http_in_flight_guard(&self, method: &str) -> HttpInFlightGuard {
+        let gauge = self.http_requests_in_flight.with_label_values(&[method]);
+        gauge.inc();
+        HttpInFlightGuard(Some(gauge))
+    }
 }
 
 #[cfg(test)]
@@ -383,6 +464,56 @@ mod tests {
                 "expected pre-initialised series: {series}\n{output}"
             );
         }
+    }
+
+    #[test]
+    fn http_request_records_count_and_duration() {
+        let metrics = Metrics::new();
+        metrics.record_http_request("/authenticate", "GET", "200", 0.01);
+        metrics.record_http_request("/authenticate", "GET", "200", 0.02);
+        metrics.record_http_request("/authenticate", "GET", "401", 0.01);
+
+        let output = metrics.render().expect("render ok");
+        assert!(
+            output.contains(
+                r#"authotron_http_requests_total{method="GET",route="/authenticate",status_code="200"} 2"#
+            ),
+            "expected 2 successful requests:\n{output}"
+        );
+        assert!(
+            output.contains(
+                r#"authotron_http_requests_total{method="GET",route="/authenticate",status_code="401"} 1"#
+            ),
+            "expected 1 unauthorized request:\n{output}"
+        );
+        assert!(
+            output.contains(
+                r#"authotron_http_request_duration_seconds_count{method="GET",route="/authenticate"} 3"#
+            ),
+            "expected 3 duration observations:\n{output}"
+        );
+    }
+
+    #[test]
+    fn http_in_flight_guard_rises_then_falls_on_drop() {
+        let metrics = Metrics::new();
+        {
+            let _g = metrics.http_in_flight_guard("GET");
+            assert!(
+                metrics
+                    .render()
+                    .expect("render ok")
+                    .contains(r#"authotron_http_requests_in_flight{method="GET"} 1"#),
+                "gauge should read 1 while the guard is held"
+            );
+        }
+        assert!(
+            metrics
+                .render()
+                .expect("render ok")
+                .contains(r#"authotron_http_requests_in_flight{method="GET"} 0"#),
+            "gauge should return to 0 after the guard drops"
+        );
     }
 
     #[test]
