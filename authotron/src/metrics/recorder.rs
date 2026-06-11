@@ -213,27 +213,30 @@ impl Metrics {
         for (name, provider_type, realm) in providers {
             for result in ["success", "error", "timeout"] {
                 self.provider_attempts_total.with_label_values(&[
-                    name,
-                    provider_type,
-                    realm,
+                    name.as_str(),
+                    provider_type.as_str(),
+                    realm.as_str(),
                     result,
                 ]);
             }
-            self.provider_duration_seconds
-                .with_label_values(&[name, provider_type, realm]);
+            self.provider_duration_seconds.with_label_values(&[
+                name.as_str(),
+                provider_type.as_str(),
+                realm.as_str(),
+            ]);
         }
 
         for (name, augmenter_type, realm) in augmenters {
             for result in ["success", "error"] {
                 self.augmenter_attempts_total.with_label_values(&[
-                    name,
-                    augmenter_type,
-                    realm,
+                    name.as_str(),
+                    augmenter_type.as_str(),
+                    realm.as_str(),
                     result,
                 ]);
             }
             self.augmenter_duration_seconds
-                .with_label_values(&[augmenter_type, realm]);
+                .with_label_values(&[augmenter_type.as_str(), realm.as_str()]);
         }
 
         // Pre-resolution auth failures are only ever recorded with realm="unknown".
