@@ -170,10 +170,29 @@ impl AuthClient {
     pub async fn authenticate(&self, auth_header: &str) -> Result<User, AuthError> {
         let converted = convert_email_key(auth_header);
 
-        if let Some(user) = self.cache.get(&converted).await {
-            return Ok(user);
-        }
+        // Single-flight cache fill. When many requests carrying the *same*
+        // credential arrive concurrently against a cold cache, moka runs the
+        // loader exactly once and every caller awaits that single result. This
+        // collapses what would otherwise be a thundering herd of identical
+        // `/authenticate` calls (one per request) into one upstream call per
+        // key. Without it, a burst of N requests stampedes the auth provider on
+        // a cold cache, exhausting it past the auth timeout and yielding 503s.
+        //
+        // Successful results are cached for the TTL. Errors are deliberately
+        // not cached (no negative caching / poisoning), but the concurrent
+        // batch still shares the single in-flight attempt, so even a failing
+        // burst makes only one upstream call.
+        self.cache
+            .try_get_with(converted.clone(), self.fetch_user(converted))
+            .await
+            .map_err(|err| (*err).clone())
+    }
 
+    /// Call auth-o-tron's `/authenticate` endpoint and decode the returned JWT.
+    ///
+    /// This is the cache loader for [`Self::authenticate`]; moka guarantees it
+    /// runs at most once per key across concurrently-waiting callers.
+    async fn fetch_user(&self, converted: String) -> Result<User, AuthError> {
         let response = self
             .http
             .get(format!("{}/authenticate", self.url.trim_end_matches('/')))
@@ -218,11 +237,7 @@ impl AuthClient {
                 message: "Authorization header is not Bearer scheme".to_string(),
             })?;
 
-        let user = decode_jwt(jwt_token, &self.secret)?;
-
-        self.cache.insert(converted, user.clone()).await;
-
-        Ok(user)
+        decode_jwt(jwt_token, &self.secret)
     }
 }
 
@@ -507,6 +522,48 @@ mod tests {
         assert_eq!(user.realm, "testrealm");
         assert!(user.roles.contains(&"admin".to_string()));
         assert!(user.roles.contains(&"default".to_string()));
+    }
+
+    /// A burst of concurrent authentications for the same cold credential must
+    /// collapse into a SINGLE upstream `/authenticate` call (single-flight),
+    /// not one call per request. `expect(1)` fails if the herd is not coalesced.
+    #[tokio::test]
+    async fn test_concurrent_auth_is_single_flight() {
+        let mut server = mockito::Server::new_async().await;
+        let jwt = make_test_jwt("testsecret");
+
+        let mock = server
+            .mock("GET", "/authenticate")
+            .with_status(200)
+            .with_header("Authorization", &format!("Bearer {}", jwt))
+            .expect(1)
+            .create_async()
+            .await;
+
+        let client = AuthClient::new(
+            &server.url(),
+            b"testsecret",
+            Duration::from_secs(5),
+            None,
+            None,
+        );
+
+        // Fire many concurrent authentications for the SAME (cold) credential.
+        const N: usize = 64;
+        let mut handles = Vec::with_capacity(N);
+        for _ in 0..N {
+            let client = client.clone();
+            handles.push(tokio::spawn(async move {
+                client.authenticate("Bearer sometoken").await
+            }));
+        }
+        for h in handles {
+            let user = h.await.unwrap().expect("auth should succeed");
+            assert_eq!(user.username, "testuser");
+        }
+
+        // Coalesced: the whole herd produced exactly one upstream call.
+        mock.assert_async().await;
     }
 
     #[tokio::test]
