@@ -170,28 +170,17 @@ impl AuthClient {
     pub async fn authenticate(&self, auth_header: &str) -> Result<User, AuthError> {
         let converted = convert_email_key(auth_header);
 
-        // Single-flight cache fill. When many requests carrying the *same*
-        // credential arrive concurrently against a cold cache, moka runs the
-        // loader exactly once and every caller awaits that single result. This
-        // collapses what would otherwise be a thundering herd of identical
-        // `/authenticate` calls (one per request) into one upstream call per
-        // key. Without it, a burst of N requests stampedes the auth provider on
-        // a cold cache, exhausting it past the auth timeout and yielding 503s.
-        //
-        // Successful results are cached for the TTL. Errors are deliberately
-        // not cached (no negative caching / poisoning), but the concurrent
-        // batch still shares the single in-flight attempt, so even a failing
-        // burst makes only one upstream call.
+        // Single-flight fill: moka runs the loader once per key, so concurrent
+        // misses for the same credential share one upstream call instead of
+        // stampeding the provider. Errors are not cached (no negative caching).
         self.cache
             .try_get_with(converted.clone(), self.fetch_user(converted))
             .await
             .map_err(|err| (*err).clone())
     }
 
-    /// Call auth-o-tron's `/authenticate` endpoint and decode the returned JWT.
-    ///
-    /// This is the cache loader for [`Self::authenticate`]; moka guarantees it
-    /// runs at most once per key across concurrently-waiting callers.
+    /// Cache loader for [`Self::authenticate`]: calls `/authenticate` and
+    /// decodes the JWT. moka runs it at most once per key across concurrent callers.
     async fn fetch_user(&self, converted: String) -> Result<User, AuthError> {
         let response = self
             .http

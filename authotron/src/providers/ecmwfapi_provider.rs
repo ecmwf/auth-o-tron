@@ -7,6 +7,7 @@
 // does it submit to any jurisdiction.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,11 @@ use cached::Return;
 use cached::proc_macro::cached;
 use reqwest;
 const CACHE_HIT_LOG_WINDOW: Duration = Duration::from_secs(30);
+
+/// Shared client for who-am-i calls. Reusing one client (and its connection
+/// pool) avoids a fresh TCP+TLS handshake on every cache-miss, which under load
+/// churned connections and amplified pressure on the upstream ECMWF API.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
 /// The config needed for the ECMWF API provider (who-am-i endpoint).
 #[derive(Deserialize, Serialize, Debug, JsonSchema, Clone)]
@@ -102,7 +108,6 @@ impl Provider for EcmwfApiProvider {
     )
 )]
 async fn query(uri: String, token: String, realm: String) -> Result<Return<User>, String> {
-    let client = reqwest::Client::new();
     let url = format!("{}/who-am-i?token={}", uri, token);
 
     debug!(
@@ -112,7 +117,7 @@ async fn query(uri: String, token: String, realm: String) -> Result<Return<User>
         realm = realm.as_str(),
         "sending ECMWF who-am-i request"
     );
-    let response = match client.get(&url).send().await {
+    let response = match HTTP_CLIENT.get(&url).send().await {
         Ok(r) => r,
         Err(e) => return Err(format!("Error sending request: {}", e)),
     };
