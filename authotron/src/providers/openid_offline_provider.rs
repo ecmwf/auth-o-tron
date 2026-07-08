@@ -12,6 +12,7 @@ use cached::proc_macro::cached;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::LazyLock;
 use std::time::Duration;
 use tracing::{debug, info};
 
@@ -20,6 +21,12 @@ use crate::models::user::User;
 use crate::providers::Provider;
 use crate::utils::log_throttle::should_emit;
 const CACHE_HIT_LOG_WINDOW: Duration = Duration::from_secs(30);
+
+/// Shared client for DESP IAM calls (offline-token introspection and refresh
+/// exchange). Reusing one client (and its connection pool) avoids a fresh
+/// TCP+TLS handshake on every cache-miss, which under load churned connections
+/// and amplified pressure on the upstream DESP identity provider.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
 /// Config for an OpenID provider that also supports offline tokens.
 #[derive(Deserialize, Debug, Serialize, JsonSchema, Hash, Clone, PartialEq, Eq)]
@@ -91,9 +98,7 @@ async fn check_offline_access_token(
         "{}/realms/{}/protocol/openid-connect/token/introspect",
         config.iam_url, config.realm
     );
-    let client = reqwest::Client::new();
-
-    let resp = client
+    let resp = HTTP_CLIENT
         .post(&introspection_url)
         .basic_auth(config.private_client_id, Some(config.private_client_secret))
         .form(&[("token", token)])
@@ -142,8 +147,7 @@ async fn get_access_token(
         config.iam_url, config.realm
     );
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = HTTP_CLIENT
         .post(&token_endpoint)
         .basic_auth(config.private_client_id, Some(config.private_client_secret))
         .form(&refresh_data)

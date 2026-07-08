@@ -15,12 +15,18 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::time::Duration;
 use tracing::{debug, info};
 
 use crate::utils::log_throttle::should_emit;
 use crate::{models::user::User, providers::Provider, utils::value::value_to_string};
 const CACHE_HIT_LOG_WINDOW: Duration = Duration::from_secs(30);
+
+/// Shared client for JWKS fetches. Reusing one client (and its connection pool)
+/// avoids a fresh TCP+TLS handshake on every cache-miss, which under load churned
+/// connections and amplified pressure on the upstream identity provider.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
 /// JWT config structure for external usage
 #[derive(Deserialize, Serialize, JsonSchema, Debug, Clone)]
@@ -226,7 +232,9 @@ pub async fn get_certs(cert_uri: String) -> Result<Return<String>, String> {
         cert_uri = cert_uri.as_str(),
         "fetching JWK set from certificate URI"
     );
-    let res = reqwest::get(&cert_uri)
+    let res = HTTP_CLIENT
+        .get(&cert_uri)
+        .send()
         .await
         .map_err(|e| format!("Failed to download certificates: {}", e))?;
 
