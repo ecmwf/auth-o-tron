@@ -139,10 +139,18 @@ async fn integration_whoami_returns_identity() {
 
     assert_eq!(user["username"], "adam");
     assert_eq!(user["realm"], "ecmwf");
-    let roles = user["roles"].as_array().expect("roles should be an array");
-    assert_eq!(roles.len(), 2);
-    assert!(roles.iter().any(|r| r == "user"));
-    assert!(roles.iter().any(|r| r == "admin"));
+    let mut roles: Vec<&str> = user["roles"]
+        .as_array()
+        .expect("roles should be an array")
+        .iter()
+        .map(|r| r.as_str().expect("roles should be strings"))
+        .collect();
+    roles.sort_unstable();
+    assert_eq!(
+        roles,
+        ["admin", "user"],
+        "expected the exact role set granted by the provider and augmenter"
+    );
 }
 
 #[tokio::test]
