@@ -8,7 +8,7 @@
 
 //! Authenticated identity introspection endpoint.
 
-use axum::{Json, Router, routing::get};
+use axum::{Json, Router, http::header, response::IntoResponse, routing::get};
 
 use crate::models::user::User;
 use crate::state::AppState;
@@ -25,6 +25,9 @@ pub fn routes() -> Router<AppState> {
 /// (username, realm, roles, attributes, scopes) that would be embedded in
 /// a JWT issued by `/authenticate`. This lets callers inspect their
 /// effective identity without decoding a JWT.
-async fn whoami(user: User) -> Json<User> {
-    Json(user)
+///
+/// The response carries `Cache-Control: no-store` so identity data is never
+/// retained by browser or intermediary caches.
+async fn whoami(user: User) -> impl IntoResponse {
+    ([(header::CACHE_CONTROL, "no-store")], Json(user))
 }
