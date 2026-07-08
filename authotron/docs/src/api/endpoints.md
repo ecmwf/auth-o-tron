@@ -22,6 +22,36 @@ curl -H "Authorization: Basic $(echo -n 'user:pass' | base64)" \
   http://localhost:8080/authenticate
 ```
 
+### GET /whoami
+
+Returns the authenticated user's identity as JSON. The response reflects the same identity (after provider validation and augmenter enrichment) that would be embedded in a JWT issued by `/authenticate`, so callers can inspect their effective identity without decoding a JWT.
+
+| Aspect | Details |
+|--------|---------|
+| **Request headers** | `Authorization: Basic <base64>` or `Authorization: Bearer <token>`. Optional: `X-Auth-Realm: <realm>` |
+| **Success (200)** | JSON body with the authenticated user |
+| **Failure (401)** | `WWW-Authenticate` challenge header listing available schemes |
+
+**Example:**
+
+```bash
+curl -H "Authorization: Basic $(echo -n 'user:pass' | base64)" \
+  http://localhost:8080/whoami
+```
+
+**Response:**
+
+```json
+{
+  "version": 1,
+  "username": "user",
+  "realm": "localrealm",
+  "roles": ["admin"],
+  "attributes": {},
+  "scopes": {}
+}
+```
+
 ### GET /token
 
 Creates an opaque token for the authenticated user. Requires the token store to be enabled.
@@ -122,6 +152,7 @@ auth_duration_seconds_bucket{result="success",realm="internal",le="0.1"} 35
 | Method | Path | Port | Auth | Purpose |
 |--------|------|------|------|---------|
 | GET | /authenticate | 8080 | Credentials | Main auth, returns JWT |
+| GET | /whoami | 8080 | Credentials | Authenticated identity as JSON |
 | GET | /token | 8080 | JWT | Create opaque token |
 | GET | /tokens | 8080 | JWT | List tokens |
 | DELETE | /token/{token} | 8080 | JWT | Delete token |
