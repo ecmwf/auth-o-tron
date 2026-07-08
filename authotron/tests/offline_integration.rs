@@ -122,6 +122,15 @@ async fn integration_whoami_returns_identity() {
         .expect("request should succeed");
 
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .expect("Cache-Control header missing")
+            .to_str()
+            .expect("Cache-Control header not valid UTF-8"),
+        "no-store"
+    );
 
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
