@@ -20,6 +20,7 @@ jobs:
       should_publish: ${{ steps.check.outputs.should_publish }}
       authotron_version: ${{ steps.check.outputs.authotron_version }}
       authotron_types_version: ${{ steps.check.outputs.authotron_types_version }}
+      should_publish_types: ${{ steps.check.outputs.should_publish_types }}
     steps:
       - uses: actions/checkout@v4
       - name: Verify tag matches authotron release version
@@ -44,6 +45,31 @@ jobs:
           fi
           echo "authotron_version=${authotron_version}" >> "$GITHUB_OUTPUT"
           echo "authotron_types_version=${authotron_types_version}" >> "$GITHUB_OUTPUT"
+
+          should_publish_types=$(python3 - "${authotron_types_version}" <<'PY'
+          import json
+          import sys
+          import urllib.request
+
+          version = sys.argv[1]
+          try:
+              with urllib.request.urlopen(
+                  "https://crates.io/api/v1/crates/authotron-types",
+                  timeout=20,
+              ) as response:
+                  data = json.load(response)
+          except Exception as exc:
+              print(f"::warning::Could not check crates.io for authotron-types {version}: {exc}; assuming publish is needed", file=sys.stderr)
+              print("true")
+              raise SystemExit(0)
+
+          exists = any(item.get("num") == version for item in data.get("versions", []))
+          print("false" if exists else "true")
+          PY
+          )
+          echo "should_publish_types=${should_publish_types}" >> "$GITHUB_OUTPUT"
+          echo "authotron-types ${authotron_types_version} publish needed: ${should_publish_types}"
+
           if [ "${{ github.ref_name }}" = "${authotron_version}" ]; then
             echo "should_publish=true" >> "$GITHUB_OUTPUT"
           else
@@ -53,7 +79,7 @@ jobs:
 
   publish-authotron-types:
     needs: verify-tag
-    if: ${{ always() && ((github.event_name == 'push' && needs.verify-tag.outputs.should_publish == 'true') || github.event_name == 'workflow_dispatch') }}
+    if: ${{ always() && ((github.event_name == 'push' && needs.verify-tag.outputs.should_publish == 'true' && needs.verify-tag.outputs.should_publish_types == 'true') || github.event_name == 'workflow_dispatch') }}
     uses: ecmwf/reusable-workflows/.github/workflows/publish-rust-crate.yml@d48e754288c678873883a58bfbf26876d394094d
     with:
       manifest-path: authotron-types/Cargo.toml
@@ -63,7 +89,7 @@ jobs:
 
   publish-authotron:
     needs: [verify-tag, publish-authotron-types]
-    if: ${{ always() && ((github.event_name == 'push' && needs.verify-tag.outputs.should_publish == 'true' && needs.publish-authotron-types.result == 'success') || (github.event_name == 'workflow_dispatch' && needs.publish-authotron-types.result == 'success')) }}
+    if: ${{ always() && ((github.event_name == 'push' && needs.verify-tag.outputs.should_publish == 'true' && (needs.verify-tag.outputs.should_publish_types != 'true' || needs.publish-authotron-types.result == 'success')) || (github.event_name == 'workflow_dispatch' && needs.publish-authotron-types.result == 'success')) }}
     uses: ecmwf/reusable-workflows/.github/workflows/publish-rust-crate.yml@d48e754288c678873883a58bfbf26876d394094d
     with:
       manifest-path: authotron/Cargo.toml
