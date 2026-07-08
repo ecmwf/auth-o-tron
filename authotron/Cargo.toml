@@ -9,7 +9,7 @@ documentation = "https://sites.ecmwf.int/docs/authotron/main/"
 readme = "README.md"
 keywords = ["authentication", "authorization", "gateway", "jwt", "nginx"]
 categories = ["authentication", "network-programming"]
-rust-version = "1.85"
+rust-version = "1.88"
 include = [
     "src/**/*.rs",
     "src/static/**",
@@ -40,7 +40,7 @@ serde_json = "~1.0"
 
 # Storage & caching
 cached = { version = "~0.58", features = ["async", "tokio"] }
-mongodb = "~3.5"
+mongodb = "~3.7"
 
 # Configuration
 figment = { version = "~0.10", features = ["yaml", "env"] }
