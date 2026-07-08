@@ -112,6 +112,48 @@ async fn integration_plain_auth_flow() {
 }
 
 #[tokio::test]
+async fn integration_whoami_returns_identity() {
+    let (app, _config) = build_app(load_test_config()).await;
+
+    let response = app
+        .clone()
+        .oneshot(request_with_basic("/whoami", "adam:admin", Method::GET))
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body should be readable");
+    let user: serde_json::Value = serde_json::from_slice(&body).expect("body should be valid JSON");
+
+    assert_eq!(user["username"], "adam");
+    assert_eq!(user["realm"], "ecmwf");
+    let roles = user["roles"].as_array().expect("roles should be an array");
+    assert_eq!(roles.len(), 2);
+    assert!(roles.iter().any(|r| r == "user"));
+    assert!(roles.iter().any(|r| r == "admin"));
+}
+
+#[tokio::test]
+async fn integration_whoami_requires_authentication() {
+    let (app, _config) = build_app(load_test_config()).await;
+
+    let response = app
+        .clone()
+        .oneshot(request_with_basic(
+            "/whoami",
+            "adam:wrongpassword",
+            Method::GET,
+        ))
+        .await
+        .expect("request should complete");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn integration_plain_auth_failure() {
     let (app, _config) = build_app(load_test_config()).await;
 
