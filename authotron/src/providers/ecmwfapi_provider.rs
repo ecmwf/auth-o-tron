@@ -190,8 +190,12 @@ mod tests {
         assert_eq!(user.username, "user_ecmwf");
         assert_eq!(user.realm, realm);
         assert!(
+            !user.attributes.contains_key("ecmwf-apikey"),
+            "the ecmwf-apikey attribute must not be present"
+        );
+        assert!(
             user.attributes.values().all(|v| !v.contains(token)),
-            "the raw API key must not appear in user attributes"
+            "the raw API key must not appear in any attribute value"
         );
     }
 
