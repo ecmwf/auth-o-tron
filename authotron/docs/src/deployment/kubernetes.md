@@ -134,5 +134,6 @@ config:
       realm: default
       users:
         - username: admin
-          password: changeme
+          # Hash of changeme for this example only; replace before deployment.
+          password_hash: "$argon2id$v=19$m=19456,t=2,p=1$YXV0aG90cm9uLWRvYy0wNA$kqv1lupkwH+Kg9ogq2mlMH8rdj9aPMGQ3bBhLbqswUU"
 ```

@@ -15,7 +15,8 @@ providers:
     realm: "default"
     users:
       - username: "test_user"
-        password: "secret123"
+        # Hash of secret123 for this example only.
+        password_hash: "$argon2id$v=19$m=19456,t=2,p=1$YXV0aG90cm9uLWRvYy0wMA$nIbsJAh7Dy4U3lp30gdyZp5xIvGEixDw6egf5H1ckpQ"
 
 augmenters: []
 
@@ -38,6 +39,8 @@ server:
 metrics:
   enabled: false
 ```
+
+The example credentials are `test_user:secret123`. Generate a new Argon2id hash with a unique random salt before using the configuration outside this quick start.
 
 ## Generate a Test Key and Run the Server
 

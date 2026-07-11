@@ -13,9 +13,11 @@ providers:
     realm: "localrealm"
     users:
       - username: "test_user"
-        password: "secret123"
+        # Hash of secret123 for this example only.
+        password_hash: "$argon2id$v=19$m=19456,t=2,p=1$YXV0aG90cm9uLWRvYy0wMA$nIbsJAh7Dy4U3lp30gdyZp5xIvGEixDw6egf5H1ckpQ"
       - username: "test_user2"
-        password: "p@ssw0rd"
+        # Hash of p@ssw0rd for this example only.
+        password_hash: "$argon2id$v=19$m=19456,t=2,p=1$YXV0aG90cm9uLWRvYy0wMQ$9SHjr4wGPrTaxgJJ+ELNof/S/JXH7gN6LYGAwVo4qL4"
   - name: "ECMWF API Provider"
     type: "ecmwf-api"
     uri: https://api.ecmwf.int/v1
