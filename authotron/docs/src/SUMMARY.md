@@ -21,6 +21,7 @@
 - [Augmenters](configuration/augmenters.md)
 - [Token Store](configuration/store.md)
 - [JWT Signing](configuration/jwt.md)
+- [Migrating from HMAC JWTs](migration/rs256.md)
 - [Logging](configuration/logging.md)
 
 # API Reference

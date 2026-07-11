@@ -26,8 +26,10 @@ services: []
 
 jwt:
   iss: "auth-o-tron"
+  aud: "local-example"
   exp: 3600
-  secret: "your-secret-key-for-local-testing-only"
+  kid: "local-2026-01"
+  private_key: "set-via-AOT_JWT__PRIVATE_KEY"
 
 logging:
   level: "info"
@@ -41,9 +43,12 @@ metrics:
   enabled: false
 ```
 
-## Run the Server
+## Generate a Test Key and Run the Server
 
 ```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out jwt-private.pem
+openssl pkey -in jwt-private.pem -pubout -out jwt-public.pem
+export AOT_JWT__PRIVATE_KEY="$(cat jwt-private.pem)"
 AOT_CONFIG_PATH=config.yaml ./target/release/authotron
 ```
 
@@ -77,4 +82,4 @@ You will see the user identity, roles, and other attributes encoded in the paylo
 
 ## Next Steps
 
-For a complete NGINX integration example with docker-compose, see `examples/nginx-auth` in the repository. This demonstrates how to protect backend services using Auth-O-Tron as an authentication sub-request handler.
+For a complete NGINX integration example with docker-compose, see `authotron/examples/nginx-auth` in the repository. This demonstrates how to protect backend services using Auth-O-Tron as an authentication sub-request handler.
