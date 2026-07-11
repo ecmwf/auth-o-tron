@@ -126,13 +126,12 @@ impl Auth {
     ///    - Logs a warning if the header is missing or improperly formatted.
     ///
     /// 2. **Credential Parsing:**
-    ///    - Splits the header on commas to allow multiple credentials.
-    ///    - For each segment, splits the segment on whitespace into a scheme (e.g. "Bearer", "Plain", "Basic")
-    ///      and a credential.
+    ///    - Splits the header into at most three comma-separated credentials, each containing a scheme
+    ///      (e.g. "Bearer", "Plain", "Basic") and a credential.
     ///    - Maps the case-insensitive `Plain` compatibility alias to the `Basic` provider type.
     ///      Other scheme spelling is preserved and matched to provider types case-insensitively.
-    ///    - Uses a `HashMap` to ensure only one credential per scheme is provided; if multiple credentials for the same
-    ///      case-insensitive scheme are detected, it returns `None`.
+    ///    - Rejects the entire header if a normalized scheme occurs more than once. This includes
+    ///      byte-identical parts, casing variants, and `Plain`/`Basic` alias collisions.
     ///
     /// 3. **Provider Filtering & Authentication:**
     ///    - For each (scheme, credential) pair, the function filters the available providers by comparing the provider's
@@ -195,26 +194,16 @@ impl Auth {
             "auth request received"
         );
 
-        // Use a HashMap with owned Strings for credentials.
+        // Store credentials by provider scheme while tracking normalized schemes separately.
         let mut creds_map: HashMap<String, String> = HashMap::new();
-        let mut seen_trimmed = std::collections::HashSet::new();
         let mut seen_schemes = std::collections::HashSet::new();
-        let mut unique_count = 0;
+        let mut credential_count = 0;
 
         // Split the header on commas to allow multiple auth credentials.
         for part in auth_header.split(',') {
             let trimmed = part.trim();
-            // Discard duplicate trimmed parts
-            if !seen_trimmed.insert(trimmed.to_string()) {
-                debug!(
-                    event_name = "auth.header.duplicate_part_discarded",
-                    event_domain = "auth",
-                    "duplicate authorization header part detected and discarded"
-                );
-                continue;
-            }
-            unique_count += 1;
-            if unique_count > 3 {
+            credential_count += 1;
+            if credential_count > 3 {
                 if let Some(suppressed_count) = should_emit(
                     "auth.header.too_many_credentials",
                     AUTH_LOG_SUPPRESSION_WINDOW,
@@ -225,7 +214,7 @@ impl Auth {
                         reason = "too_many_credentials",
                         suppressed_count,
                         max_credentials = 3,
-                        "too many unique authorization credentials"
+                        "too many authorization credentials"
                     );
                 }
                 metrics.record_auth_attempt("invalid_header", "unknown");
@@ -1306,7 +1295,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_authentication_scheme_matching_is_case_insensitive() {
+    async fn test_authentication_scheme_matching_and_plain_alias() {
         let auth = Auth {
             providers: vec![Box::new(DummyProvider {
                 name: "TestBasic".to_string(),
@@ -1318,17 +1307,14 @@ mod tests {
             config: AuthConfig { timeout_in_ms: 5 },
             token_store: Arc::new(DummyStore),
         };
+        let metrics = Metrics::new();
 
-        let user = auth
-            .authenticate(
-                "bAsIc credential",
-                "127.0.0.1",
-                Some("localrealm"),
-                &Metrics::new(),
-            )
-            .await;
-
-        assert!(user.is_some());
+        for header in ["bAsIc credential", "pLaIn credential"] {
+            let user = auth
+                .authenticate(header, "127.0.0.1", Some("localrealm"), &metrics)
+                .await;
+            assert!(user.is_some(), "scheme was not matched for {header:?}");
+        }
     }
 
     #[tokio::test]
@@ -1435,31 +1421,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_identical_header_parts_are_checked_once() {
-        let provider = Box::new(DummyProvider {
-            name: "TestBasic".to_string(),
-            provider_type: "Basic".to_string(),
-            realm: Some("localrealm".to_string()),
-            expected_credential: "ZHVtbXk6ZHVtbXk=".to_string(),
-        });
-        let auth = Auth {
-            providers: vec![provider],
-            augmenters: vec![],
-            config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
-        };
-        let metrics = Metrics::new();
-
-        let header = "Basic ZHVtbXk6ZHVtbXk=, Basic ZHVtbXk6ZHVtbXk=";
-        let user = auth
-            .authenticate(header, "127.0.0.1", Some("localrealm"), &metrics)
-            .await;
-
-        assert!(user.is_some());
-    }
-
-    #[tokio::test]
-    async fn test_duplicate_schemes_are_rejected_case_insensitively() {
+    async fn test_identical_duplicate_header_parts_are_rejected() {
         let auth = Auth {
             providers: vec![Box::new(DummyProvider {
                 name: "TestBasic".to_string(),
@@ -1473,11 +1435,49 @@ mod tests {
         };
         let metrics = Metrics::new();
 
-        for header in ["Basic wrong, Basic correct", "Basic wrong, bAsIc correct"] {
+        let user = auth
+            .authenticate(
+                "Basic correct, Basic correct",
+                "127.0.0.1",
+                Some("localrealm"),
+                &metrics,
+            )
+            .await;
+
+        assert!(
+            user.is_none(),
+            "byte-identical duplicate parts were accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_normalized_schemes_are_rejected() {
+        let auth = Auth {
+            providers: vec![Box::new(DummyProvider {
+                name: "TestBasic".to_string(),
+                provider_type: "Basic".to_string(),
+                realm: Some("localrealm".to_string()),
+                expected_credential: "correct".to_string(),
+            })],
+            augmenters: vec![],
+            config: AuthConfig { timeout_in_ms: 5 },
+            token_store: Arc::new(DummyStore),
+        };
+        let metrics = Metrics::new();
+
+        for header in [
+            "Basic wrong, Basic correct",
+            "Basic wrong, bAsIc correct",
+            "Plain wrong, Basic correct",
+            "pLaIn wrong, basic correct",
+        ] {
             let user = auth
                 .authenticate(header, "127.0.0.1", Some("localrealm"), &metrics)
                 .await;
-            assert!(user.is_none(), "duplicate scheme accepted in {header:?}");
+            assert!(
+                user.is_none(),
+                "duplicate normalized scheme accepted in {header:?}"
+            );
         }
     }
 
