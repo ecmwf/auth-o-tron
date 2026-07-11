@@ -37,7 +37,7 @@ A realm is a named authentication boundary. Every provider and augmenter belongs
 
 Usernames must be unique within a realm. The JWT `sub` claim is formatted as `{realm}-{username}`, so `internal-alice` and `external-alice` are distinct identities.
 
-Clients can target a specific realm by sending the `X-Auth-Realm` header. Without it, all providers are eligible regardless of realm.
+Clients can target a specific realm by sending the `X-Auth-Realm` header. Realm names are matched exactly and case-sensitively by providers and augmenters. Without the header, all providers are eligible regardless of realm.
 
 ## Provider Chain
 
