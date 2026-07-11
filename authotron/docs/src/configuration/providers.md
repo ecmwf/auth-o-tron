@@ -32,6 +32,10 @@ Each user object has:
 
 Each user must contain exactly one of `password_hash` or `password`. Generate hashes with an Argon2id implementation using a unique random salt and parameters appropriate for your deployment.
 
+Argon2 verification is globally limited to at most two concurrent jobs (and no more than the available CPU parallelism). Excess attempts wait within the normal authentication timeout; work already running remains counted until its blocking operation finishes.
+
+Every well-formed Basic authentication attempt performs one Argon2id verification. Unknown usernames and deprecated plaintext entries use a fixed dummy hash with the example/default parameters (`m=19456,t=2,p=1`); plaintext passwords are then checked via constant-time comparison of fixed-size SHA-256 digests. Plaintext remains a migration-only compatibility path. Use consistent Argon2id parameters for all configured hashes, because deliberately different PHC cost parameters necessarily have different runtimes.
+
 **Example:**
 
 ```yaml
