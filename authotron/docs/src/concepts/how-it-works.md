@@ -27,7 +27,7 @@ sequenceDiagram
         Augmenter-->>AOT: Add roles / attributes
     end
 
-    AOT->>AOT: Generate JWT (HS256)
+    AOT->>AOT: Generate JWT (RS256)
     AOT-->>Client: 200 OK<br/>Authorization: Bearer <jwt>
 ```
 
@@ -37,7 +37,7 @@ A realm is a named authentication boundary. Every provider and augmenter belongs
 
 Usernames must be unique within a realm. The JWT `sub` claim is formatted as `{realm}-{username}`, so `internal-alice` and `external-alice` are distinct identities.
 
-Clients can target a specific realm by sending the `X-Auth-Realm` header. Without it, all providers are eligible regardless of realm.
+Clients can target a specific realm by sending the `X-Auth-Realm` header. Realm names are matched exactly and case-sensitively by providers and augmenters. Without the header, all providers are eligible regardless of realm.
 
 ## Provider Chain
 
@@ -50,6 +50,8 @@ Auth-O-Tron can run multiple authentication providers side by side. You might ha
 Each provider targets a specific realm. When a client sends `X-Auth-Realm: internal`, only providers matching that realm will attempt authentication. Without the header, all providers are eligible.
 
 The provider chain uses a "first match wins" strategy. All eligible providers run in parallel with a configurable timeout. The first successful result is used. If all fail, the client receives a 401 response with `WWW-Authenticate` challenges listing the available schemes.
+
+An `Authorization` header may contain up to three comma-separated credentials with distinct schemes. Scheme names are matched case-insensitively, and `Plain` is treated as an alias for `Basic`. If the same normalized scheme occurs more than once, Auth-O-Tron rejects the entire header, including when the repeated parts are byte-identical; a later credential never overrides an earlier one.
 
 ## Augmenters
 
@@ -69,6 +71,7 @@ The resulting JWT contains these standard and custom claims:
 
 - **sub**: Subject, formatted as `{realm}-{username}`
 - **iss**: Configured issuer (your organization)
+- **aud**: Configured audience (the intended consumer)
 - **exp**: Expiration time (configurable, respects user attribute `exp` if present)
 - **iat**: When the token was issued
 - **roles**: Array of role strings from augmenters
@@ -77,7 +80,7 @@ The resulting JWT contains these standard and custom claims:
 - **scopes**: Permissions or scopes if provided by the auth source
 - **attributes**: Key-value map of additional user properties from augmenters
 
-Downstream services validate this JWT using the shared secret and extract user context without needing to query Auth-O-Tron again.
+The JWT header carries a required signing-key identifier (`kid`). Downstream services select the matching key from an overlapping public RSA keyset, pin RS256, and require exact issuer and audience matches. Only Auth-O-Tron holds the active private signing key.
 
 ## Consumer contract notes
 

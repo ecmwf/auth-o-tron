@@ -1,10 +1,10 @@
 use authotron::config::{Config, ConfigV2};
 use axum::http::{Method, StatusCode};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use figment::{
     Figment,
     providers::{Format, Yaml},
 };
+use jsonwebtoken::jwk::Jwk;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use mockito::{Matcher, Server};
 use serde_json::{Value, json};
@@ -38,13 +38,12 @@ providers:
     token_generator_url: "{generator_url}"
     realm: "ecmwf"
 augmenters: []
-store:
-  enabled: false
-services: []
 jwt:
   exp: 3600
   iss: authotron-test
-  secret: test-secret
+  aud: authotron-consumer
+  kid: test-key
+  private_key: test-key-injected-by-test
 server:
   host: "{TEST_HOST}"
   port: {TEST_PORT}
@@ -58,30 +57,35 @@ metrics:
         .extract()
         .expect("Failed to parse integration test config");
 
-    let Config::ConfigV2(cfg) = config else {
+    let Config::ConfigV2(mut cfg) = config else {
         panic!("expected ConfigV2");
     };
+    cfg.jwt.private_key = include_str!("fixtures/test-rsa-private.pem").to_string();
     cfg
 }
 
-fn build_jwks(kid: &str, secret: &[u8]) -> String {
-    json!({
-        "keys": [
-            {
-                "kty": "oct",
-                "k": URL_SAFE_NO_PAD.encode(secret),
-                "alg": "HS512",
-                "kid": kid,
-            }
-        ]
-    })
-    .to_string()
+fn rsa_encoding_key() -> EncodingKey {
+    EncodingKey::from_rsa_pem(include_bytes!("fixtures/rsa-private-key.pem"))
+        .expect("test RSA key should parse")
+}
+
+fn build_jwks(kid: &str, encoding_key: &EncodingKey) -> String {
+    let mut jwk = Jwk::from_encoding_key(encoding_key, Algorithm::RS256)
+        .expect("public JWK should be derived");
+    jwk.common.key_id = Some(kid.to_string());
+    json!({ "keys": [jwk] }).to_string()
 }
 
 fn encode_hs512_token(claims: Value, kid: &str, secret: &[u8]) -> String {
     let mut header = Header::new(Algorithm::HS512);
     header.kid = Some(kid.to_string());
     encode(&header, &claims, &EncodingKey::from_secret(secret)).expect("Failed to encode JWT")
+}
+
+fn encode_rs256_token(claims: Value, kid: &str, encoding_key: &EncodingKey) -> String {
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(kid.to_string());
+    encode(&header, &claims, encoding_key).expect("Failed to encode JWT")
 }
 
 fn example_claims(scope: &str) -> Value {
@@ -106,8 +110,8 @@ fn example_claims(scope: &str) -> Value {
 async fn integration_ecmwf_token_generator_exchanges_refresh_token() {
     let mut server = Server::new_async().await;
     let kid = "access-key";
-    let signing_secret = b"super-secret-signing-key";
-    let jwks_body = build_jwks(kid, signing_secret);
+    let signing_key = rsa_encoding_key();
+    let jwks_body = build_jwks(kid, &signing_key);
 
     // Mock JWKS (certs) endpoint
     let jwks_mock = server
@@ -139,7 +143,7 @@ async fn integration_ecmwf_token_generator_exchanges_refresh_token() {
 
     // Mock token exchange endpoint
     let exchanged_claims = example_claims("offline_access email profile");
-    let exchanged_access_token = encode_hs512_token(exchanged_claims, kid, signing_secret);
+    let exchanged_access_token = encode_rs256_token(exchanged_claims, kid, &signing_key);
     let exchange_mock = server
         .mock("POST", "/admin/refresh-access-token")
         .match_header("content-type", "application/json")
@@ -189,7 +193,7 @@ async fn integration_ecmwf_token_generator_exchanges_refresh_token() {
         .strip_prefix("Bearer ")
         .expect("Authorization header missing Bearer prefix");
 
-    let claims = decode_claims(token, &config.jwt.secret);
+    let claims = decode_claims(token, &config.jwt);
     assert_eq!(claims.claims.realm.as_deref(), Some("ecmwf"));
     assert!(claims.claims.roles.contains(&"user".to_string()));
 

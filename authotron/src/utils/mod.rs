@@ -8,6 +8,8 @@
 
 //! Shared utilities: logging, HTTP helpers, and value conversion.
 
+pub mod cache;
+pub mod http_client;
 pub mod http_helpers;
 pub mod log_throttle;
 pub mod logger;

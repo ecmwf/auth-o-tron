@@ -141,16 +141,16 @@ impl Metrics {
         // Authentication metrics
         let auth_requests_total = register_counter_vec_with_registry!(
             Opts::new(
-                "auth_requests_total",
+                "authotron_auth_requests_total",
                 "Total number of authentication attempts"
             ),
             &["result", "realm"],
             registry.clone()
         )
-        .expect("Failed to register auth_requests_total");
+        .expect("Failed to register authotron_auth_requests_total");
 
         let auth_duration_seconds = register_histogram_vec_with_registry!(
-            "auth_duration_seconds",
+            "authotron_auth_duration_seconds",
             "Authentication request duration in seconds",
             &["result", "realm"],
             vec![
@@ -158,21 +158,21 @@ impl Metrics {
             ],
             registry.clone()
         )
-        .expect("Failed to register auth_duration_seconds");
+        .expect("Failed to register authotron_auth_duration_seconds");
 
         // Provider metrics
         let provider_attempts_total = register_counter_vec_with_registry!(
             Opts::new(
-                "auth_provider_attempts_total",
+                "authotron_auth_provider_attempts_total",
                 "Total authentication attempts per provider"
             ),
             &["provider_name", "provider_type", "realm", "result"],
             registry.clone()
         )
-        .expect("Failed to register provider_attempts_total");
+        .expect("Failed to register authotron_auth_provider_attempts_total");
 
         let provider_duration_seconds = register_histogram_vec_with_registry!(
-            "auth_provider_duration_seconds",
+            "authotron_auth_provider_duration_seconds",
             "Provider authentication duration in seconds",
             &["provider_name", "provider_type", "realm"],
             vec![
@@ -180,24 +180,27 @@ impl Metrics {
             ],
             registry.clone()
         )
-        .expect("Failed to register provider_duration_seconds");
+        .expect("Failed to register authotron_auth_provider_duration_seconds");
 
         // Augmenter metrics
         let augmenter_attempts_total = register_counter_vec_with_registry!(
-            Opts::new("augmenter_attempts_total", "Total augmenter executions"),
+            Opts::new(
+                "authotron_augmenter_attempts_total",
+                "Total augmenter executions"
+            ),
             &["augmenter_name", "augmenter_type", "realm", "result"],
             registry.clone()
         )
-        .expect("Failed to register augmenter_attempts_total");
+        .expect("Failed to register authotron_augmenter_attempts_total");
 
         let augmenter_duration_seconds = register_histogram_vec_with_registry!(
-            "augmenter_duration_seconds",
+            "authotron_augmenter_duration_seconds",
             "Augmenter execution duration in seconds",
             &["augmenter_type", "realm"],
             vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5],
             registry.clone()
         )
-        .expect("Failed to register augmenter_duration_seconds");
+        .expect("Failed to register authotron_augmenter_duration_seconds");
 
         let http_requests_total = register_int_counter_vec_with_registry!(
             Opts::new(
@@ -433,6 +436,47 @@ mod tests {
     }
 
     #[test]
+    fn auth_domain_metrics_use_authotron_prefix() {
+        let metrics = Metrics::new();
+        metrics.preinit_series(
+            &[("provider".into(), "plain".into(), "realm".into())],
+            &[("augmenter".into(), "plain".into(), "realm".into())],
+        );
+
+        let names: BTreeSet<_> = metrics
+            .registry
+            .gather()
+            .into_iter()
+            .map(|family| family.name().to_owned())
+            .collect();
+        let expected = [
+            "authotron_auth_requests_total",
+            "authotron_auth_duration_seconds",
+            "authotron_auth_provider_attempts_total",
+            "authotron_auth_provider_duration_seconds",
+            "authotron_augmenter_attempts_total",
+            "authotron_augmenter_duration_seconds",
+        ];
+
+        for name in expected {
+            assert!(names.contains(name), "missing prefixed metric {name}");
+        }
+        for old_name in [
+            "auth_requests_total",
+            "auth_duration_seconds",
+            "auth_provider_attempts_total",
+            "auth_provider_duration_seconds",
+            "augmenter_attempts_total",
+            "augmenter_duration_seconds",
+        ] {
+            assert!(
+                !names.contains(old_name),
+                "legacy metric still exposed: {old_name}"
+            );
+        }
+    }
+
+    #[test]
     fn preinit_series_creates_zero_baseline_for_reachable_labels() {
         let metrics = Metrics::new();
         let providers = vec![(
@@ -450,14 +494,14 @@ mod tests {
         let output = metrics.render().expect("render ok");
         for series in [
             // provider error/timeout pre-initialised at zero
-            r#"auth_provider_attempts_total{provider_name="plain1",provider_type="plain",realm="realm1",result="error"} 0"#,
-            r#"auth_provider_attempts_total{provider_name="plain1",provider_type="plain",realm="realm1",result="timeout"} 0"#,
+            r#"authotron_auth_provider_attempts_total{provider_name="plain1",provider_type="plain",realm="realm1",result="error"} 0"#,
+            r#"authotron_auth_provider_attempts_total{provider_name="plain1",provider_type="plain",realm="realm1",result="timeout"} 0"#,
             // augmenter error pre-initialised at zero
-            r#"augmenter_attempts_total{augmenter_name="aug1",augmenter_type="plain",realm="realm1",result="error"} 0"#,
+            r#"authotron_augmenter_attempts_total{augmenter_name="aug1",augmenter_type="plain",realm="realm1",result="error"} 0"#,
             // auth failure recorded only with realm="unknown"
-            r#"auth_requests_total{realm="unknown",result="all_failed"} 0"#,
+            r#"authotron_auth_requests_total{realm="unknown",result="all_failed"} 0"#,
             // auth success with the configured realm
-            r#"auth_requests_total{realm="realm1",result="success"} 0"#,
+            r#"authotron_auth_requests_total{realm="realm1",result="success"} 0"#,
         ] {
             assert!(
                 output.contains(series),
@@ -530,7 +574,8 @@ mod tests {
 
         let output = metrics.render().expect("render ok");
         assert!(
-            !output.contains(r#"auth_requests_total{realm="realm1",result="all_failed"}"#),
+            !output
+                .contains(r#"authotron_auth_requests_total{realm="realm1",result="all_failed"}"#),
             "must not pre-init failure×configured-realm combos:\n{output}"
         );
     }

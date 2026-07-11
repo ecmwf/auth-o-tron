@@ -51,6 +51,7 @@ pub trait Provider: Send + Sync {
     fn get_name(&self) -> &str;
     fn get_type(&self) -> &str;
     /// Providers that support realm-based filtering should override this.
+    /// Realm identifiers are matched exactly and case-sensitively, as they are for augmenters.
     fn get_realm(&self) -> Option<&str> {
         None
     }
