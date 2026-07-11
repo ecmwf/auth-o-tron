@@ -215,16 +215,7 @@ impl Provider for JWTProvider {
 }
 
 /// Retrieves the certificates (JWKS) from a remote URI. Cached for 600s to avoid repeated fetches.
-#[cfg_attr(
-    not(test),
-    cached(
-        time = 600,
-        size = 100_000,
-        result = true,
-        with_cached_flag = true,
-        sync_writes = "default"
-    )
-)]
+#[cached(time = 600, size = 100_000, result = true, with_cached_flag = true)]
 pub async fn get_certs(cert_uri: String) -> Result<Return<JwkSet>, String> {
     debug!(
         event_name = "providers.jwt.jwks.fetch.started",
@@ -252,9 +243,12 @@ pub async fn get_certs(cert_uri: String) -> Result<Return<JwkSet>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cached::Cached;
     use mockito::Server;
     use serde_json::json;
     use tokio;
+
+    use crate::utils::cache::ATTACKER_KEYED_CACHE_SIZE;
 
     /// Test that `get_certs` returns the expected JSON when the endpoint is successful.
     #[tokio::test]
@@ -339,26 +333,29 @@ mod tests {
         assert!(error.contains("Unsupported JWT algorithm: HS512"));
     }
 
-    #[tokio::test]
-    async fn test_rs256_token_without_scope_authenticates_with_empty_scope() {
+    async fn authenticate_rsa_token(
+        token_algorithm: Algorithm,
+        jwk_algorithm: Algorithm,
+    ) -> Result<User, String> {
         const PRIVATE_KEY: &str = include_str!("../../tests/fixtures/rsa-private-key.pem");
 
         let encoding_key = jsonwebtoken::EncodingKey::from_rsa_pem(PRIVATE_KEY.as_bytes())
             .expect("test RSA key should parse");
-        let mut jwk = jsonwebtoken::jwk::Jwk::from_encoding_key(&encoding_key, Algorithm::RS256)
+        let mut jwk = jsonwebtoken::jwk::Jwk::from_encoding_key(&encoding_key, jwk_algorithm)
             .expect("public JWK should be derived");
-        jwk.common.key_id = Some("rs256-test".to_string());
+        jwk.common.key_id = Some("rsa-test".to_string());
 
         let mut server = Server::new_async().await;
+        let jwks_path = format!("/jwks/{token_algorithm:?}/{jwk_algorithm:?}");
         let mock = server
-            .mock("GET", "/")
+            .mock("GET", jwks_path.as_str())
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(json!({"keys": [jwk]}).to_string())
             .create_async()
             .await;
         let provider = JWTProvider::new(&JWTAuthConfig {
-            cert_uri: server.url(),
+            cert_uri: format!("{}{jwks_path}", server.url()),
             realm: "test".to_string(),
             name: "TestJWT".to_string(),
             iam_realm: "test".to_string(),
@@ -369,23 +366,47 @@ mod tests {
             "custom": "preserved",
             "exp": 4102444800usize,
         });
-        let mut header = jsonwebtoken::Header::new(Algorithm::RS256);
-        header.kid = Some("rs256-test".to_string());
-        let token = jsonwebtoken::encode(&header, &claims, &encoding_key)
-            .expect("RS256 token should encode");
+        let mut header = jsonwebtoken::Header::new(token_algorithm);
+        header.kid = Some("rsa-test".to_string());
+        let token =
+            jsonwebtoken::encode(&header, &claims, &encoding_key).expect("RSA token should encode");
 
-        let user = provider
-            .authenticate(&token)
-            .await
-            .expect("RS256 token without scope should authenticate");
-
+        let result = provider.authenticate(&token).await;
         mock.assert_async().await;
+        result
+    }
+
+    fn assert_user_has_empty_scope(user: &User) {
         assert_eq!(user.username, "alice");
         assert_eq!(user.scopes.get("TestJWT"), Some(&Vec::<String>::new()));
         assert_eq!(
             user.attributes.get("custom"),
             Some(&"preserved".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn test_rs256_token_without_scope_authenticates_with_empty_scope() {
+        let user = authenticate_rsa_token(Algorithm::RS256, Algorithm::RS256)
+            .await
+            .expect("RS256 token without scope should authenticate");
+        assert_user_has_empty_scope(&user);
+    }
+
+    #[tokio::test]
+    async fn test_rs512_token_authenticates() {
+        let user = authenticate_rsa_token(Algorithm::RS512, Algorithm::RS512)
+            .await
+            .expect("RS512 token should authenticate");
+        assert_user_has_empty_scope(&user);
+    }
+
+    #[tokio::test]
+    async fn test_jwk_algorithm_must_match_token_algorithm() {
+        let error = authenticate_rsa_token(Algorithm::RS256, Algorithm::RS512)
+            .await
+            .expect_err("mismatched JWK algorithm must be rejected");
+        assert!(error.contains("must explicitly match RS256"));
     }
 
     #[test]
@@ -397,5 +418,13 @@ mod tests {
         .expect("scope should be optional");
 
         assert!(claims.scope.is_empty());
+    }
+
+    #[tokio::test]
+    async fn jwks_cache_capacity_matches_shared_limit() {
+        assert_eq!(
+            GET_CERTS.lock().await.cache_capacity(),
+            Some(ATTACKER_KEYED_CACHE_SIZE)
+        );
     }
 }

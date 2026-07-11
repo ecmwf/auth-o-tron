@@ -90,16 +90,7 @@ impl Provider for EcmwfApiProvider {
 }
 
 /// Queries the ECMWF who-am-i endpoint with the provided token, returning a User on success.
-#[cfg_attr(
-    not(test),
-    cached(
-        time = 60,
-        size = 100_000,
-        result = true,
-        with_cached_flag = true,
-        sync_writes = "default"
-    )
-)]
+#[cached(time = 60, size = 100_000, result = true, with_cached_flag = true)]
 async fn query(uri: String, token: String, realm: String) -> Result<Return<User>, String> {
     let url = format!("{}/who-am-i", uri);
 
@@ -156,8 +147,13 @@ async fn query(uri: String, token: String, realm: String) -> Result<Return<User>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cached::Cached;
     use mockito::Server;
+    use std::sync::mpsc;
+    use std::time::Duration;
     use tokio;
+
+    use crate::utils::cache::ATTACKER_KEYED_CACHE_SIZE;
 
     /// Test that a valid token returns a User with the expected UID.
     #[tokio::test]
@@ -240,5 +236,81 @@ mod tests {
             mock.assert_async().await;
             assert_eq!(result.unwrap().username, "encoded-user");
         }
+    }
+
+    #[tokio::test]
+    async fn unrelated_cache_misses_do_not_serialize_upstream_requests() {
+        let (slow_started_tx, slow_started_rx) = mpsc::channel();
+        let mut slow_server = Server::new_async().await;
+        let slow_mock = slow_server
+            .mock("GET", "/who-am-i")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "token".to_string(),
+                "slow-token".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_chunked_body(move |writer| {
+                slow_started_tx.send(()).map_err(std::io::Error::other)?;
+                std::thread::sleep(Duration::from_millis(750));
+                writer.write_all(br#"{"uid":"slow-user"}"#)
+            })
+            .create_async()
+            .await;
+
+        let slow_request = tokio::spawn(query(
+            slow_server.url(),
+            "slow-token".to_string(),
+            "test".to_string(),
+        ));
+        tokio::task::spawn_blocking(move || {
+            slow_started_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("slow upstream request should start")
+        })
+        .await
+        .expect("start notification task should finish");
+
+        let mut fast_server = Server::new_async().await;
+        let fast_mock = fast_server
+            .mock("GET", "/who-am-i")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "token".to_string(),
+                "fast-token".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"uid":"fast-user"}"#)
+            .create_async()
+            .await;
+
+        let fast_result = tokio::time::timeout(
+            Duration::from_millis(250),
+            query(
+                fast_server.url(),
+                "fast-token".to_string(),
+                "test".to_string(),
+            ),
+        )
+        .await
+        .expect("an unrelated cache miss must not wait for the slow request")
+        .expect("fast upstream request should succeed");
+
+        assert_eq!(fast_result.username, "fast-user");
+        fast_mock.assert_async().await;
+        let slow_result = slow_request
+            .await
+            .expect("slow request task should finish")
+            .expect("slow upstream request should succeed");
+        assert_eq!(slow_result.username, "slow-user");
+        slow_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn query_cache_capacity_matches_shared_limit() {
+        assert_eq!(
+            QUERY.lock().await.cache_capacity(),
+            Some(ATTACKER_KEYED_CACHE_SIZE)
+        );
     }
 }

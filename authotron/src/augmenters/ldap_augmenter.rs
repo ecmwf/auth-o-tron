@@ -198,13 +198,7 @@ fn validate_filters(filters: &Option<Vec<String>>) -> Result<(), String> {
 /// With `filters` configured, we parse each filter as a DN fragment; when it matches part of the
 /// user's DN we emit the path of attribute values from that match down to the CN. Legacy single
 /// `filter` keeps returning just the CN when matched.
-#[cached(
-    time = 120,
-    size = 100_000,
-    result = true,
-    with_cached_flag = true,
-    sync_writes = "default"
-)]
+#[cached(time = 120, size = 100_000, result = true, with_cached_flag = true)]
 async fn retrieve_ldap_user_roles(
     config: LDAPAugmenterConfig,
     uid: String,
@@ -369,6 +363,9 @@ impl Augmenter for LDAPAugmenter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cached::Cached;
+
+    use crate::utils::cache::ATTACKER_KEYED_CACHE_SIZE;
 
     #[test]
     fn test_escape_filter_value_metacharacters_and_controls() {
@@ -506,5 +503,13 @@ mod tests {
         );
 
         assert!(roles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ldap_cache_capacity_matches_shared_limit() {
+        assert_eq!(
+            RETRIEVE_LDAP_USER_ROLES.lock().await.cache_capacity(),
+            Some(ATTACKER_KEYED_CACHE_SIZE)
+        );
     }
 }

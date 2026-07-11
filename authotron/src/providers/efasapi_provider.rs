@@ -98,16 +98,7 @@ impl Provider for EfasApiProvider {
 }
 
 /// Queries the EFAS auth url
-#[cfg_attr(
-    not(test),
-    cached(
-        time = 60,
-        size = 100_000,
-        result = true,
-        with_cached_flag = true,
-        sync_writes = "default"
-    )
-)]
+#[cached(time = 60, size = 100_000, result = true, with_cached_flag = true)]
 async fn query(uri: String, token: String, realm: String) -> Result<Return<User>, String> {
     let url = uri.clone();
 
@@ -160,8 +151,11 @@ async fn query(uri: String, token: String, realm: String) -> Result<Return<User>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cached::Cached;
     use mockito::Server;
     use tokio;
+
+    use crate::utils::cache::ATTACKER_KEYED_CACHE_SIZE;
     use tracing_test::traced_test;
 
     /// Test that a valid token returns a User with the expected UID.
@@ -253,5 +247,13 @@ mod tests {
             mock.assert_async().await;
             assert_eq!(result.unwrap().username, "encoded-user");
         }
+    }
+
+    #[tokio::test]
+    async fn query_cache_capacity_matches_shared_limit() {
+        assert_eq!(
+            QUERY.lock().await.cache_capacity(),
+            Some(ATTACKER_KEYED_CACHE_SIZE)
+        );
     }
 }

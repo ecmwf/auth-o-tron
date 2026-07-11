@@ -11,6 +11,12 @@ use std::time::Duration;
 use super::log_throttle::should_emit;
 
 /// Upper bound for caches keyed by credentials or usernames supplied by callers.
+/// The cache macros require a literal size; provider tests compare every generated
+/// cache's capacity with this constant so declarations cannot silently drift.
+///
+/// Provider cache macros intentionally omit `sync_writes`: cache lookups and inserts
+/// remain locked briefly, but upstream awaits run unlocked. `sync_writes = "by_key"`
+/// is also avoided because cached 0.58 retains an unbounded map of per-key locks.
 pub const ATTACKER_KEYED_CACHE_SIZE: usize = 100_000;
 
 const CACHE_HIT_LOG_WINDOW: Duration = Duration::from_secs(30);

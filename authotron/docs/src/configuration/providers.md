@@ -10,7 +10,7 @@ All providers share these common fields:
 | name | string | yes | A unique identifier for this provider instance |
 | realm | string | yes | The authentication realm this provider handles (see [Realms](../concepts/how-it-works.md#realms)) |
 
-HTTP-based providers share a pooled client. Connections must be established within 2 seconds and each complete request is limited to 4 seconds. Credential-keyed caches are capped at 100,000 entries; failed and inactive-token results are not cached.
+HTTP-based providers share a pooled client. Connections must be established within 2 seconds and each complete request is limited to 4 seconds. Credential-keyed caches are capped at 100,000 entries; failed and inactive-token results are not cached. Cache misses for different credentials may fill concurrently, so a slow upstream request does not block unrelated authentication; duplicate concurrent fills for the same credential are allowed.
 
 ## Provider Types
 

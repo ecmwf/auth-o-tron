@@ -67,13 +67,7 @@ impl EcmwfTokenGeneratorProvider {
 /// Validates a token using the ECMWF Token Generator validate-token endpoint.
 /// Valid results are cached for 240 seconds; inactive results are errors and
 /// therefore are never inserted into the cache.
-#[cached(
-    time = 240,
-    size = 100_000,
-    result = true,
-    with_cached_flag = true,
-    sync_writes = "default"
-)]
+#[cached(time = 240, size = 100_000, result = true, with_cached_flag = true)]
 async fn validate_token_with_generator(
     config: EcmwfTokenGeneratorProviderConfig,
     token: String,
@@ -121,16 +115,7 @@ async fn validate_token_with_generator(
 
 /// Exchanges an offline/refresh token for an access token using the ECMWF Token Generator API.
 /// Caches results for 240 seconds (tokens valid for 300) to reduce load on the token generator.
-#[cfg_attr(
-    not(test),
-    cached(
-        time = 240,
-        size = 100_000,
-        result = true,
-        with_cached_flag = true,
-        sync_writes = "default"
-    )
-)]
+#[cached(time = 240, size = 100_000, result = true, with_cached_flag = true)]
 async fn get_access_token_from_generator(
     config: EcmwfTokenGeneratorProviderConfig,
     refresh_token: String,
@@ -245,7 +230,10 @@ impl Provider for EcmwfTokenGeneratorProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cached::Cached;
     use mockito::Server;
+
+    use crate::utils::cache::ATTACKER_KEYED_CACHE_SIZE;
 
     /// Helper to create test config with custom URL
     fn create_test_config(url: String) -> EcmwfTokenGeneratorProviderConfig {
@@ -395,6 +383,21 @@ mod tests {
                 .unwrap_err()
                 .contains("not valid according to ECMWF Token Generator"),
             "Error should indicate validation failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn token_caches_match_shared_capacity_limit() {
+        assert_eq!(
+            VALIDATE_TOKEN_WITH_GENERATOR.lock().await.cache_capacity(),
+            Some(ATTACKER_KEYED_CACHE_SIZE)
+        );
+        assert_eq!(
+            GET_ACCESS_TOKEN_FROM_GENERATOR
+                .lock()
+                .await
+                .cache_capacity(),
+            Some(ATTACKER_KEYED_CACHE_SIZE)
         );
     }
 }

@@ -67,13 +67,7 @@ impl OpenIDOfflineProvider {
 
 /// Checks if the given token has the exact `offline_access` scope. Only valid
 /// results are cached, so random inactive tokens cannot consume cache entries.
-#[cached(
-    time = 120,
-    size = 100_000,
-    result = true,
-    with_cached_flag = true,
-    sync_writes = "default"
-)]
+#[cached(time = 120, size = 100_000, result = true, with_cached_flag = true)]
 async fn check_offline_access_token(
     config: OpenIDOfflineProviderConfig,
     token: String,
@@ -115,16 +109,7 @@ async fn check_offline_access_token(
 }
 
 /// Exchanges the offline token for a regular access token using a refresh call.
-#[cfg_attr(
-    not(test),
-    cached(
-        time = 10,
-        size = 100_000,
-        result = true,
-        with_cached_flag = true,
-        sync_writes = "default"
-    )
-)]
+#[cached(time = 10, size = 100_000, result = true, with_cached_flag = true)]
 async fn get_access_token(
     config: OpenIDOfflineProviderConfig,
     refresh_token: String,
@@ -230,8 +215,11 @@ impl Provider for OpenIDOfflineProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cached::Cached;
     use mockito::Server;
     use tokio;
+
+    use crate::utils::cache::ATTACKER_KEYED_CACHE_SIZE;
 
     /// Test that check_offline_access_token returns true
     /// when the introspection endpoint indicates a valid offline token.
@@ -397,5 +385,17 @@ mod tests {
         m.assert_async().await;
         assert!(result.is_ok());
         assert_eq!(*result.unwrap(), "new_access_token".to_string());
+    }
+
+    #[tokio::test]
+    async fn token_caches_match_shared_capacity_limit() {
+        assert_eq!(
+            CHECK_OFFLINE_ACCESS_TOKEN.lock().await.cache_capacity(),
+            Some(ATTACKER_KEYED_CACHE_SIZE)
+        );
+        assert_eq!(
+            GET_ACCESS_TOKEN.lock().await.cache_capacity(),
+            Some(ATTACKER_KEYED_CACHE_SIZE)
+        );
     }
 }
