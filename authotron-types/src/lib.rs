@@ -83,6 +83,8 @@ pub enum AuthError {
     },
     /// The JWT could not be decoded or validated.
     InvalidJwt { message: String },
+    /// The configured RSA public key could not be parsed.
+    InvalidPublicKey { message: String },
     /// The auth service is unreachable or timed out.
     ServiceUnavailable { message: String },
 }
@@ -92,6 +94,9 @@ impl std::fmt::Display for AuthError {
         match self {
             AuthError::Unauthorized { message, .. } => write!(f, "unauthorized: {}", message),
             AuthError::InvalidJwt { message } => write!(f, "invalid JWT: {}", message),
+            AuthError::InvalidPublicKey { message } => {
+                write!(f, "invalid JWT public key: {}", message)
+            }
             AuthError::ServiceUnavailable { message } => {
                 write!(f, "auth service unavailable: {}", message)
             }
@@ -209,6 +214,11 @@ mod tests {
             message: "expired".to_string(),
         };
         assert_eq!(format!("{}", err), "invalid JWT: expired");
+
+        let err = AuthError::InvalidPublicKey {
+            message: "malformed PEM".to_string(),
+        };
+        assert_eq!(format!("{}", err), "invalid JWT public key: malformed PEM");
 
         let err = AuthError::ServiceUnavailable {
             message: "timeout".to_string(),

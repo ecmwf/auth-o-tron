@@ -69,18 +69,25 @@ metrics:
     enabled: true
 ```
 
-### Secrets via Environment Variables
+### RSA Private Key via a Kubernetes Secret
 
-Use `extraEnv` to inject sensitive values from Kubernetes secrets:
+Store the complete multiline RSA private PEM in a Secret and inject it directly as an environment variable:
+
+```bash
+kubectl create secret generic auth-o-tron-jwt \
+  --from-file=private-key=jwt-private.pem
+```
 
 ```yaml
 extraEnv:
-  - name: AOT_JWT__SECRET
+  - name: AOT_JWT__PRIVATE_KEY
     valueFrom:
       secretKeyRef:
-        name: auth-o-tron-secrets
-        key: jwt-secret
+        name: auth-o-tron-jwt
+        key: private-key
 ```
+
+The Kubernetes environment preserves newlines in the Secret value. Mount or distribute only the corresponding public PEM to consuming services.
 
 ### Pod Annotations
 
@@ -117,8 +124,9 @@ config:
     port: 8080
   jwt:
     iss: my-org
+    aud: my-service
     exp: 3600
-    secret: changeme
+    private_key: set-via-AOT_JWT__PRIVATE_KEY
   providers:
     - type: plain
       name: default

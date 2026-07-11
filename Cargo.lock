@@ -119,6 +119,7 @@ version = "0.3.7"
 dependencies = [
  "aide",
  "async-trait",
+ "authotron-client",
  "authotron-types",
  "axum",
  "base64",

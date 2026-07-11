@@ -11,11 +11,16 @@ A minimal example showing how to deploy Auth-o-tron as a standalone service behi
   ```
 
 ### Usage
-## 1. Start the stack
+## 1. Generate a test signing key and start the stack
 ```bash
-cd examples/nginx
+cd examples/nginx-auth
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out jwt-private.pem
+openssl rsa -pubout -in jwt-private.pem -out jwt-public.pem
+export AOT_JWT__PRIVATE_KEY="$(cat jwt-private.pem)"
 docker-compose up -d
 ```
+
+Give consuming applications `jwt-public.pem`; do not give them the private key.
 This brings up three services:
 - auth-o-tron on port 8080 (internal)
 - nginx-proxy on port 80

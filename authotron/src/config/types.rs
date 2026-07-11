@@ -164,10 +164,13 @@ pub fn print_schema() {
 /// A simple definition for JWT usage in tokens.
 #[derive(Deserialize, Serialize, Debug, JsonSchema)]
 pub struct JWTConfig {
+    /// Exact issuer claim included in every issued token.
     pub iss: String,
-    pub aud: Option<String>,
+    /// Exact audience claim included in every issued token.
+    pub aud: String,
     pub exp: i64,
-    pub secret: String,
+    /// RSA private key in PEM format. Prefer injecting this from a secret.
+    pub private_key: String,
 }
 
 /// A declaration of services we might need (e.g., to store scopes).
@@ -240,8 +243,9 @@ server:
   port: 3000
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
@@ -258,7 +262,42 @@ services: []
         assert_eq!(c.metrics.port, 9090);
         assert_eq!(c.logging.level, "info");
         assert_eq!(c.jwt.iss, "issuer");
+        assert_eq!(c.jwt.aud, "audience");
         assert_eq!(c.auth.timeout_in_ms, 5000);
+    }
+
+    #[test]
+    fn test_jwt_contract_fields_are_required() {
+        let base = r#"
+version: "2.0.0"
+store:
+  enabled: false
+providers: []
+augmenters: []
+server:
+  port: 3000
+jwt:
+  iss: "issuer"
+  aud: "audience"
+  exp: 3600
+  private_key: "test-only-key"
+logging:
+  level: "info"
+  format: "console"
+services: []
+"#;
+
+        for field in ["iss", "aud", "private_key"] {
+            let yaml = base
+                .lines()
+                .filter(|line| !line.trim_start().starts_with(&format!("{field}:")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let result = Figment::new()
+                .merge(Yaml::string(&yaml))
+                .extract::<Config>();
+            assert!(result.is_err(), "jwt.{field} must be required");
+        }
     }
 
     #[test]
@@ -271,8 +310,9 @@ providers: []
 augmenters: []
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
@@ -298,8 +338,9 @@ server:
   port: 3000
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
@@ -327,8 +368,9 @@ server:
   port: 3000
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
@@ -354,8 +396,9 @@ server:
   port: 3000
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
@@ -385,8 +428,9 @@ metrics:
   enabled: false
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
@@ -414,8 +458,9 @@ metrics:
   port: 9999
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
@@ -441,8 +486,9 @@ augmenters: []
 bind_address: "127.0.0.1:8080"
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
@@ -472,8 +518,9 @@ augmenters: []
 bind_address: "[::1]:3000"
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
@@ -536,8 +583,9 @@ server:
   port: 3000
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"

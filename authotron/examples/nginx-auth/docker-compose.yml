@@ -10,6 +10,7 @@ services:
       - ./config/auth-o-tron.yml:/etc/auth-o-tron/config.yml:ro
     environment:
       - AOT_CONFIG_PATH=/etc/auth-o-tron/config.yml
+      - AOT_JWT__PRIVATE_KEY=${AOT_JWT__PRIVATE_KEY:?set AOT_JWT__PRIVATE_KEY to an RSA private PEM}
     networks:
       - authnet
 

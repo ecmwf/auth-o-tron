@@ -25,7 +25,8 @@ For nested sections, add more double underscores: `AOT_<SECTION>__<SUBSECTION>__
 | `AOT_METRICS__ENABLED` | metrics.enabled | `true` |
 | `AOT_METRICS__PORT` | metrics.port | `9090` |
 | `AOT_JWT__ISS` | jwt.iss | `my-issuer` |
-| `AOT_JWT__SECRET` | jwt.secret | `my-secret` |
+| `AOT_JWT__AUD` | jwt.aud | `my-service` |
+| `AOT_JWT__PRIVATE_KEY` | jwt.private_key | Multiline RSA private PEM |
 | `AOT_JWT__EXP` | jwt.exp | `3600` |
 | `AOT_LOGGING__LEVEL` | logging.level | `info` |
 | `AOT_LOGGING__FORMAT` | logging.format | `json` |
@@ -48,7 +49,7 @@ This means you can maintain a base configuration file and selectively override s
 ```bash
 export AOT_CONFIG_PATH=/etc/auth-o-tron/config.yaml
 export AOT_SERVER__PORT=8080
-export AOT_JWT__SECRET=$(cat /run/secrets/jwt_secret)
+export AOT_JWT__PRIVATE_KEY="$(cat /run/secrets/jwt-private.pem)"
 export AOT_METRICS__ENABLED=true
 
 ./authotron

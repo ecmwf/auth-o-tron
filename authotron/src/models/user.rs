@@ -21,7 +21,7 @@ use axum::extract::{ConnectInfo, FromRequestParts};
 use axum::http::StatusCode;
 use chrono::Utc;
 use http::request::Parts;
-use jsonwebtoken::{EncodingKey, Header, encode};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::Serialize;
 use std::net::SocketAddr;
 use tracing::warn;
@@ -30,22 +30,62 @@ use tracing::warn;
 // imports continue to work throughout the codebase.
 pub use authotron_types::User;
 
+/// A parsed RS256 private key used to sign issued JWTs.
+pub struct JwtSigner {
+    encoding_key: EncodingKey,
+}
+
+/// Errors produced while configuring or using the JWT signer.
+#[derive(Debug)]
+pub enum JwtSigningError {
+    InvalidPrivateKey(jsonwebtoken::errors::Error),
+    Signing(jsonwebtoken::errors::Error),
+}
+
+impl std::fmt::Display for JwtSigningError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPrivateKey(error) => write!(f, "invalid JWT RSA private key: {error}"),
+            Self::Signing(error) => write!(f, "failed to sign JWT: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for JwtSigningError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::InvalidPrivateKey(error) | Self::Signing(error) => Some(error),
+        }
+    }
+}
+
+impl JwtSigner {
+    /// Parse an RSA private key from PEM. Call this once during startup.
+    pub fn from_private_pem(pem: &[u8]) -> Result<Self, JwtSigningError> {
+        let encoding_key =
+            EncodingKey::from_rsa_pem(pem).map_err(JwtSigningError::InvalidPrivateKey)?;
+        Ok(Self { encoding_key })
+    }
+}
+
 /// Extension trait that adds JWT signing to `User`.
-///
-/// This is an extension trait rather than an inherent method because `User` is
-/// defined in `authotron-types`. The JWT signing logic depends on `JWTConfig`
-/// from the server crate and therefore cannot live in the types crate.
 pub trait UserJwtExt {
-    /// Convert a User into a signed JWT string, using the config from `JWTConfig`.
-    fn to_jwt(&self, jwtconfig: &JWTConfig) -> String;
+    /// Convert a user into an RS256-signed JWT.
+    fn to_jwt(&self, jwt_config: &JWTConfig, signer: &JwtSigner)
+    -> Result<String, JwtSigningError>;
 }
 
 impl UserJwtExt for User {
-    fn to_jwt(&self, jwtconfig: &JWTConfig) -> String {
+    fn to_jwt(
+        &self,
+        jwt_config: &JWTConfig,
+        signer: &JwtSigner,
+    ) -> Result<String, JwtSigningError> {
         #[derive(Serialize)]
         struct Claims<'a> {
             sub: &'a String,
             iss: &'a String,
+            aud: &'a String,
             exp: i64,
             iat: i64,
 
@@ -59,16 +99,16 @@ impl UserJwtExt for User {
         let now = Utc::now().timestamp();
         let sub = format!("{}-{}", self.realm, self.username);
 
-        let mut expiry = now + jwtconfig.exp;
+        let mut expiry = now + jwt_config.exp;
         if let Some(attr_exp) = self.attributes.get("exp")
             && let Ok(attr_exp) = attr_exp.parse::<i64>()
         {
-            // Set expiry to the minimum of the two values
             expiry = std::cmp::min(expiry, attr_exp);
         }
         let claims = Claims {
             sub: &sub,
-            iss: &jwtconfig.iss,
+            iss: &jwt_config.iss,
+            aud: &jwt_config.aud,
             exp: expiry,
             iat: now,
             roles: &self.roles,
@@ -78,8 +118,12 @@ impl UserJwtExt for User {
             attributes: &self.attributes,
         };
 
-        let encoding_key = EncodingKey::from_secret(jwtconfig.secret.as_ref());
-        encode(&Header::default(), &claims, &encoding_key).expect("Failed to encode JWT")
+        encode(
+            &Header::new(Algorithm::RS256),
+            &claims,
+            &signer.encoding_key,
+        )
+        .map_err(JwtSigningError::Signing)
     }
 }
 
@@ -145,39 +189,36 @@ impl FromRequestParts<AppState> for User {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::JWTConfig;
-    use jsonwebtoken::{DecodingKey, Validation, decode};
+    use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 
-    /// Test that converting a User to a JWT and then decoding it yields the expected claims.
-    ///
-    /// Note: We disable audience validation in this test (as in production code)
-    /// by setting `validation.validate_aud = false`. This prevents the decoder from
-    /// failing with an "InvalidAudience" error.
+    const PRIVATE_KEY: &[u8] = include_bytes!("../../tests/fixtures/test-rsa-private.pem");
+    const PUBLIC_KEY: &[u8] = include_bytes!("../../tests/fixtures/test-rsa-public.pem");
+
     fn decode_claims(token: &str, jwt_config: &JWTConfig) -> serde_json::Value {
-        let mut validation = Validation::default();
-        validation.validate_aud = false;
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_issuer(&[&jwt_config.iss]);
+        validation.set_audience(&[&jwt_config.aud]);
 
         decode::<serde_json::Value>(
             token,
-            &DecodingKey::from_secret(jwt_config.secret.as_ref()),
+            &DecodingKey::from_rsa_pem(PUBLIC_KEY).expect("valid test public key"),
             &validation,
         )
-        .expect("Failed to decode JWT")
+        .expect("JWT should decode")
         .claims
     }
 
     fn default_jwt_config() -> JWTConfig {
         JWTConfig {
             iss: "test_issuer".to_string(),
-            aud: None,
+            aud: "test_audience".to_string(),
             exp: 3600,
-            secret: "secretkey".to_string(),
+            private_key: String::from_utf8(PRIVATE_KEY.to_vec()).expect("PEM is UTF-8"),
         }
     }
 
     #[test]
     fn test_to_jwt_and_decode() {
-        // Create a user with test data.
         let user = User::new(
             "test".to_string(),
             "user1".to_string(),
@@ -186,24 +227,22 @@ mod tests {
             None,
             Some(1),
         );
-        // Create a JWT configuration with an audience.
         let jwt_config = default_jwt_config();
-        // Convert the user into a JWT.
-        let token = user.to_jwt(&jwt_config);
+        let signer = JwtSigner::from_private_pem(jwt_config.private_key.as_bytes()).unwrap();
+        let token = user.to_jwt(&jwt_config, &signer).unwrap();
 
-        // Decode the token using the secret from jwt_config.
+        let header = jsonwebtoken::decode_header(&token).unwrap();
+        assert_eq!(header.alg, Algorithm::RS256);
         let claims = decode_claims(&token, &jwt_config);
-        // Assert that the issuer claim matches.
         assert_eq!(claims["iss"], jwt_config.iss);
-        // Assert that the username claim matches.
+        assert_eq!(claims["aud"], jwt_config.aud);
         assert_eq!(claims["username"], user.username);
     }
 
-    // Test that if the exp attribute is set in User attributes, it affects the JWT expiry.
     #[test]
     fn test_to_jwt_with_exp_attribute() {
         let mut attributes = HashMap::new();
-        let custom_exp = Utc::now().timestamp() + 1800; // 30 minutes from now
+        let custom_exp = Utc::now().timestamp() + 1800;
         attributes.insert("exp".to_string(), custom_exp.to_string());
         let user = User::new(
             "test".to_string(),
@@ -214,12 +253,15 @@ mod tests {
             Some(1),
         );
         let jwt_config = default_jwt_config();
-        let token = user.to_jwt(&jwt_config);
+        let signer = JwtSigner::from_private_pem(jwt_config.private_key.as_bytes()).unwrap();
+        let token = user.to_jwt(&jwt_config, &signer).unwrap();
         let claims = decode_claims(&token, &jwt_config);
-        let exp_claim = claims["exp"]
-            .as_i64()
-            .expect("exp claim should be an integer");
-        // Assert that the exp claim matches the custom exp attribute.
-        assert_eq!(exp_claim, custom_exp);
+        assert_eq!(claims["exp"].as_i64(), Some(custom_exp));
+    }
+
+    #[test]
+    fn malformed_private_key_is_typed_error() {
+        let result = JwtSigner::from_private_pem(b"not a PEM key");
+        assert!(matches!(result, Err(JwtSigningError::InvalidPrivateKey(_))));
     }
 }

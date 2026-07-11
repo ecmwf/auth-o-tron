@@ -23,8 +23,9 @@ server:
   port: 0
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  private_key: "test-key-injected-by-test"
 logging:
   level: "warn"
   format: "console"
@@ -49,6 +50,7 @@ services: []
         port: metrics_port,
     };
 
+    cfg.jwt.private_key = include_str!("fixtures/test-rsa-private.pem").to_string();
     cfg
 }
 
@@ -62,6 +64,21 @@ async fn startup_rejects_port_collision() {
     assert!(
         err.contains("must be different"),
         "expected port collision error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn startup_rejects_malformed_rsa_private_key() {
+    let mut config = base_config(0, false, 0);
+    config.jwt.private_key = "not a PEM key".to_string();
+
+    let error = match startup::build_app(Arc::new(config)).await {
+        Ok(_) => panic!("malformed private key must fail startup"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("invalid JWT RSA private key"),
+        "unexpected error: {error}"
     );
 }
 

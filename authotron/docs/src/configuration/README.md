@@ -90,7 +90,7 @@ jwt:
   iss: auth-o-tron.example.com
   aud: my-application
   exp: 3600
-  secret: your-secret-key-here
+  private_key: set-via-AOT_JWT__PRIVATE_KEY
 
 store:
   enabled: true

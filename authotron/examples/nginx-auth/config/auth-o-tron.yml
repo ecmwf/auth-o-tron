@@ -32,8 +32,9 @@ services: []
 jwt:
   exp: 3600
   iss: authotron-test
-  secret: some-secret-key
   aud: authotron-test
+  # Inject a complete RSA private PEM with AOT_JWT__PRIVATE_KEY.
+  private_key: set-via-AOT_JWT__PRIVATE_KEY
 
 server:
   host: "0.0.0.0"

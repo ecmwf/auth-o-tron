@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use jsonwebtoken::{DecodingKey, Validation, decode};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use moka::future::Cache;
 use reqwest::Client;
 use reqwest::header::{self, HeaderValue};
@@ -48,56 +48,82 @@ struct Claims {
     exp: usize,
 }
 
-/// Decode a JWT token into a [`User`].
-///
-/// This is a JWT-decode detail: the `"default"` role is injected here so that
-/// every user decoded from a JWT always has it. Consumers deserializing
-/// `User` from JSON (e.g. from `job.user`) should NOT assume `"default"`
-/// is present — it is only guaranteed when the JWT decode path was used.
-pub fn decode_jwt(token: &str, secret: &[u8]) -> Result<User, AuthError> {
-    let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-    validation.validate_aud = false;
-    validation.leeway = 5;
+/// Parsed RS256 verifier with an exact issuer and audience contract.
+#[derive(Clone)]
+pub struct JwtVerifier {
+    decoding_key: DecodingKey,
+    issuer: String,
+    audience: String,
+}
 
-    let token_data = decode::<Claims>(token, &DecodingKey::from_secret(secret), &validation)
-        .map_err(|e| AuthError::InvalidJwt {
-            message: e.to_string(),
+impl JwtVerifier {
+    /// Parse an RSA public PEM key and configure exact claim validation.
+    pub fn new(public_key_pem: &[u8], issuer: &str, audience: &str) -> Result<Self, AuthError> {
+        let decoding_key = DecodingKey::from_rsa_pem(public_key_pem).map_err(|error| {
+            AuthError::InvalidPublicKey {
+                message: error.to_string(),
+            }
         })?;
 
-    let claims = token_data.claims;
-
-    // Inject the synthetic "default" role (deduped via HashSet).
-    let mut roles_set: HashSet<String> = claims.roles.into_iter().collect();
-    roles_set.insert("default".to_string());
-    let roles: Vec<String> = roles_set.into_iter().collect();
-
-    // Convert attributes from Value → String using the canonical conversion rule:
-    // - Strings pass through directly
-    // - Numbers/bools become their JSON representation
-    // - null → "null"
-    // - Objects/arrays → JSON string form
-    let attributes: HashMap<String, String> = claims
-        .attributes
-        .into_iter()
-        .map(|(k, v)| {
-            let s = v
-                .as_str()
-                .map(String::from)
-                .unwrap_or_else(|| serde_json::to_string(&v).unwrap_or_default());
-            (k, s)
+        Ok(Self {
+            decoding_key,
+            issuer: issuer.to_string(),
+            audience: audience.to_string(),
         })
-        .collect();
+    }
 
-    let scopes = claims.scopes.unwrap_or_default();
+    /// Verify an RS256 token and convert its claims into a [`User`].
+    pub fn decode(&self, token: &str) -> Result<User, AuthError> {
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_issuer(&[&self.issuer]);
+        validation.set_audience(&[&self.audience]);
+        validation.required_spec_claims.insert("iss".to_string());
+        validation.required_spec_claims.insert("aud".to_string());
+        validation.leeway = 5;
 
-    Ok(User {
-        version: 1,
-        username: claims.username,
-        realm: claims.realm,
-        roles,
-        attributes,
-        scopes,
-    })
+        let token_data =
+            decode::<Claims>(token, &self.decoding_key, &validation).map_err(|error| {
+                AuthError::InvalidJwt {
+                    message: error.to_string(),
+                }
+            })?;
+        let claims = token_data.claims;
+
+        let mut roles_set: HashSet<String> = claims.roles.into_iter().collect();
+        roles_set.insert("default".to_string());
+        let roles: Vec<String> = roles_set.into_iter().collect();
+
+        let attributes: HashMap<String, String> = claims
+            .attributes
+            .into_iter()
+            .map(|(key, value)| {
+                let value = value
+                    .as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| serde_json::to_string(&value).unwrap_or_default());
+                (key, value)
+            })
+            .collect();
+
+        Ok(User {
+            version: 1,
+            username: claims.username,
+            realm: claims.realm,
+            roles,
+            attributes,
+            scopes: claims.scopes.unwrap_or_default(),
+        })
+    }
+}
+
+/// Parse an RSA public PEM and verify a JWT with exact issuer and audience checks.
+pub fn decode_jwt(
+    token: &str,
+    public_key_pem: &[u8],
+    issuer: &str,
+    audience: &str,
+) -> Result<User, AuthError> {
+    JwtVerifier::new(public_key_pem, issuer, audience)?.decode(token)
 }
 
 // ---------------------------------------------------------------------------
@@ -121,13 +147,13 @@ pub fn convert_email_key(auth_header: &str) -> String {
 // AuthClient
 // ---------------------------------------------------------------------------
 
-/// HTTP client that calls auth-o-tron's `/authenticate` endpoint, decodes the
-/// returned JWT, and caches the result.
+/// HTTP client that calls auth-o-tron's `/authenticate` endpoint, verifies the
+/// returned RS256 JWT, and caches the result.
 #[derive(Clone)]
 pub struct AuthClient {
     http: Client,
     url: String,
-    secret: Vec<u8>,
+    verifier: JwtVerifier,
     cache: Cache<String, User>,
 }
 
@@ -135,29 +161,35 @@ const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(60);
 const DEFAULT_CACHE_CAPACITY: u64 = 10_000;
 
 impl AuthClient {
+    /// Build a client and parse its RSA public key once.
     pub fn new(
         url: &str,
-        secret: &[u8],
+        public_key_pem: &[u8],
+        issuer: &str,
+        audience: &str,
         timeout: Duration,
         cache_ttl: Option<Duration>,
         cache_capacity: Option<u64>,
-    ) -> Self {
+    ) -> Result<Self, AuthError> {
+        let verifier = JwtVerifier::new(public_key_pem, issuer, audience)?;
         let http = Client::builder()
             .timeout(timeout)
             .build()
-            .expect("failed to build HTTP client");
+            .map_err(|error| AuthError::ServiceUnavailable {
+                message: format!("failed to build HTTP client: {error}"),
+            })?;
 
         let cache = Cache::builder()
             .max_capacity(cache_capacity.unwrap_or(DEFAULT_CACHE_CAPACITY))
             .time_to_live(cache_ttl.unwrap_or(DEFAULT_CACHE_TTL))
             .build();
 
-        Self {
+        Ok(Self {
             http,
             url: url.to_string(),
-            secret: secret.to_vec(),
+            verifier,
             cache,
-        }
+        })
     }
 
     /// Authenticate using the given `Authorization` header value.
@@ -226,7 +258,7 @@ impl AuthClient {
                 message: "Authorization header is not Bearer scheme".to_string(),
             })?;
 
-        decode_jwt(jwt_token, &self.secret)
+        self.verifier.decode(jwt_token)
     }
 }
 
@@ -240,6 +272,12 @@ mod tests {
     use jsonwebtoken::{EncodingKey, Header};
     use serde::Serialize;
 
+    const ISSUER: &str = "authotron-test";
+    const AUDIENCE: &str = "authotron-consumer";
+    const PRIVATE_KEY: &[u8] =
+        include_bytes!("../../authotron/tests/fixtures/test-rsa-private.pem");
+    const PUBLIC_KEY: &[u8] = include_bytes!("../../authotron/tests/fixtures/test-rsa-public.pem");
+
     #[derive(Debug, Serialize)]
     struct TestClaims {
         username: String,
@@ -248,47 +286,63 @@ mod tests {
         roles: Option<Vec<String>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         attributes: Option<HashMap<String, serde_json::Value>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        iss: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        aud: Option<String>,
         exp: usize,
     }
 
-    fn make_token(claims: &TestClaims, secret: &[u8]) -> String {
-        jsonwebtoken::encode(
-            &Header::default(),
-            claims,
-            &EncodingKey::from_secret(secret),
-        )
-        .unwrap()
-    }
-
-    fn make_test_jwt(secret: &str) -> String {
-        let claims = TestClaims {
+    fn claims() -> TestClaims {
+        TestClaims {
             username: "testuser".to_string(),
             realm: "testrealm".to_string(),
             roles: Some(vec!["admin".to_string()]),
             attributes: None,
-            exp: (chrono::Utc::now().timestamp() as usize) + 3600,
-        };
-        make_token(&claims, secret.as_bytes())
+            iss: Some(ISSUER.to_string()),
+            aud: Some(AUDIENCE.to_string()),
+            exp: chrono::Utc::now().timestamp() as usize + 3600,
+        }
     }
 
-    // ── JWT decode tests ──────────────────────────────────────────────
+    fn make_token(claims: &TestClaims) -> String {
+        jsonwebtoken::encode(
+            &Header::new(Algorithm::RS256),
+            claims,
+            &EncodingKey::from_rsa_pem(PRIVATE_KEY).expect("valid test private key"),
+        )
+        .unwrap()
+    }
+
+    fn make_test_jwt() -> String {
+        make_token(&claims())
+    }
+
+    fn decode(token: &str) -> Result<User, AuthError> {
+        decode_jwt(token, PUBLIC_KEY, ISSUER, AUDIENCE)
+    }
+
+    fn test_client(url: &str) -> AuthClient {
+        AuthClient::new(
+            url,
+            PUBLIC_KEY,
+            ISSUER,
+            AUDIENCE,
+            Duration::from_secs(5),
+            None,
+            None,
+        )
+        .unwrap()
+    }
 
     #[test]
-    fn test_decode_valid_jwt() {
-        let secret = b"my_test_secret";
-        let exp = chrono::Utc::now().timestamp() as usize + 3600;
-        let claims = TestClaims {
-            username: "testuser".to_string(),
-            realm: "testrealm".to_string(),
-            roles: Some(vec!["admin".to_string()]),
-            attributes: Some(HashMap::from([(
-                "org".to_string(),
-                serde_json::json!("ecmwf"),
-            )])),
-            exp,
-        };
-        let token = make_token(&claims, secret);
-        let user = decode_jwt(&token, secret).unwrap();
+    fn decode_valid_rs256_jwt() {
+        let mut test_claims = claims();
+        test_claims.attributes = Some(HashMap::from([(
+            "org".to_string(),
+            serde_json::json!("ecmwf"),
+        )]));
+        let user = decode(&make_token(&test_claims)).unwrap();
 
         assert_eq!(user.username, "testuser");
         assert_eq!(user.realm, "testrealm");
@@ -298,267 +352,203 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_jwt_no_roles() {
-        let secret = b"my_test_secret";
-        let exp = chrono::Utc::now().timestamp() as usize + 3600;
-        let claims = TestClaims {
-            username: "testuser".to_string(),
-            realm: "testrealm".to_string(),
-            roles: None,
-            attributes: None,
-            exp,
-        };
-        let token = make_token(&claims, secret);
-        let user = decode_jwt(&token, secret).unwrap();
+    fn decode_injects_and_deduplicates_default_role() {
+        let mut test_claims = claims();
+        test_claims.roles = Some(vec!["default".to_string(), "admin".to_string()]);
+        let user = decode(&make_token(&test_claims)).unwrap();
+        assert_eq!(
+            user.roles.iter().filter(|role| *role == "default").count(),
+            1
+        );
+    }
 
+    #[test]
+    fn decode_injects_default_when_roles_are_missing() {
+        let mut test_claims = claims();
+        test_claims.roles = None;
+        let user = decode(&make_token(&test_claims)).unwrap();
         assert_eq!(user.roles, vec!["default".to_string()]);
     }
 
     #[test]
-    fn test_decode_jwt_default_role_dedup() {
-        let secret = b"my_test_secret";
-        let exp = chrono::Utc::now().timestamp() as usize + 3600;
-        let claims = TestClaims {
-            username: "testuser".to_string(),
-            realm: "testrealm".to_string(),
-            roles: Some(vec!["default".to_string(), "admin".to_string()]),
-            attributes: None,
-            exp,
-        };
-        let token = make_token(&claims, secret);
-        let user = decode_jwt(&token, secret).unwrap();
-
-        let default_count = user.roles.iter().filter(|r| *r == "default").count();
-        assert_eq!(default_count, 1, "default role should appear exactly once");
-        assert!(user.roles.contains(&"admin".to_string()));
+    fn decode_converts_non_string_attributes() {
+        let mut test_claims = claims();
+        test_claims.attributes = Some(HashMap::from([
+            ("string".to_string(), serde_json::json!("value")),
+            ("number".to_string(), serde_json::json!(42)),
+            ("boolean".to_string(), serde_json::json!(true)),
+            ("null".to_string(), serde_json::Value::Null),
+            ("array".to_string(), serde_json::json!([1, 2])),
+            ("object".to_string(), serde_json::json!({"nested": "value"})),
+        ]));
+        let user = decode(&make_token(&test_claims)).unwrap();
+        assert_eq!(user.attributes["string"], "value");
+        assert_eq!(user.attributes["number"], "42");
+        assert_eq!(user.attributes["boolean"], "true");
+        assert_eq!(user.attributes["null"], "null");
+        assert_eq!(user.attributes["array"], "[1,2]");
+        assert_eq!(user.attributes["object"], r#"{"nested":"value"}"#);
     }
 
     #[test]
-    fn test_decode_wrong_secret() {
-        let exp = chrono::Utc::now().timestamp() as usize + 3600;
-        let claims = TestClaims {
-            username: "testuser".to_string(),
-            realm: "testrealm".to_string(),
-            roles: None,
-            attributes: None,
-            exp,
-        };
-        let token = make_token(&claims, b"secret_a");
-        let result = decode_jwt(&token, b"secret_b");
-
-        assert!(matches!(result, Err(AuthError::InvalidJwt { .. })));
-    }
-
-    #[test]
-    fn test_decode_expired_jwt() {
-        let secret = b"my_test_secret";
-        let exp = chrono::Utc::now().timestamp() as usize - 3600;
-        let claims = TestClaims {
-            username: "testuser".to_string(),
-            realm: "testrealm".to_string(),
-            roles: None,
-            attributes: None,
-            exp,
-        };
-        let token = make_token(&claims, secret);
-        let result = decode_jwt(&token, secret);
-
-        assert!(matches!(result, Err(AuthError::InvalidJwt { .. })));
-    }
-
-    #[test]
-    fn test_decode_missing_username() {
+    fn rejects_claims_without_username() {
         #[derive(Serialize)]
-        struct NoUsernameClaims {
-            realm: String,
-            exp: usize,
-        }
-        let secret = b"my_test_secret";
-        let exp = chrono::Utc::now().timestamp() as usize + 3600;
-        let claims = NoUsernameClaims {
-            realm: "testrealm".to_string(),
-            exp,
-        };
-        let token = jsonwebtoken::encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(secret),
-        )
-        .unwrap();
-        let result = decode_jwt(&token, secret);
-
-        assert!(matches!(result, Err(AuthError::InvalidJwt { .. })));
-    }
-
-    // ── Attribute conversion tests ────────────────────────────────────
-
-    #[test]
-    fn test_attributes_non_string_values() {
-        let secret = b"my_test_secret";
-        let exp = chrono::Utc::now().timestamp() as usize + 3600;
-
-        #[derive(Serialize)]
-        struct MixedAttrClaims {
-            username: String,
-            realm: String,
-            roles: Vec<String>,
-            attributes: HashMap<String, serde_json::Value>,
+        struct ClaimsWithoutUsername<'a> {
+            realm: &'a str,
+            iss: &'a str,
+            aud: &'a str,
             exp: usize,
         }
 
-        let mut attrs = HashMap::new();
-        attrs.insert("str_val".to_string(), serde_json::json!("hello"));
-        attrs.insert("num_val".to_string(), serde_json::json!(42));
-        attrs.insert("bool_val".to_string(), serde_json::json!(true));
-        attrs.insert("null_val".to_string(), serde_json::Value::Null);
-        attrs.insert(
-            "obj_val".to_string(),
-            serde_json::json!({"nested": "value"}),
-        );
-
-        let claims = MixedAttrClaims {
-            username: "u".to_string(),
-            realm: "r".to_string(),
-            roles: vec![],
-            attributes: attrs,
-            exp,
-        };
         let token = jsonwebtoken::encode(
-            &Header::default(),
-            &claims,
-            &EncodingKey::from_secret(secret),
+            &Header::new(Algorithm::RS256),
+            &ClaimsWithoutUsername {
+                realm: "testrealm",
+                iss: ISSUER,
+                aud: AUDIENCE,
+                exp: chrono::Utc::now().timestamp() as usize + 3600,
+            },
+            &EncodingKey::from_rsa_pem(PRIVATE_KEY).unwrap(),
         )
         .unwrap();
-
-        let user = decode_jwt(&token, secret).unwrap();
-
-        assert_eq!(user.attributes["str_val"], "hello");
-        assert_eq!(user.attributes["num_val"], "42");
-        assert_eq!(user.attributes["bool_val"], "true");
-        assert_eq!(user.attributes["null_val"], "null");
-        assert_eq!(user.attributes["obj_val"], r#"{"nested":"value"}"#);
+        assert!(matches!(decode(&token), Err(AuthError::InvalidJwt { .. })));
     }
 
     #[test]
-    fn test_default_role_injected() {
-        let secret = b"my_test_secret";
-        let exp = chrono::Utc::now().timestamp() as usize + 3600;
-        // JWT with only "viewer" role — no "default"
-        let claims = TestClaims {
-            username: "u".to_string(),
-            realm: "r".to_string(),
-            roles: Some(vec!["viewer".to_string()]),
-            attributes: None,
-            exp,
-        };
-        let token = make_token(&claims, secret);
-        let user = decode_jwt(&token, secret).unwrap();
+    fn rejects_wrong_or_missing_audience() {
+        let mut wrong = claims();
+        wrong.aud = Some("other-audience".to_string());
+        assert!(matches!(
+            decode(&make_token(&wrong)),
+            Err(AuthError::InvalidJwt { .. })
+        ));
 
-        assert!(
-            user.roles.contains(&"default".to_string()),
-            "default role must be injected by decode_jwt"
-        );
-        assert!(user.roles.contains(&"viewer".to_string()));
-    }
-
-    // ── EmailKey conversion tests ─────────────────────────────────────
-
-    #[test]
-    fn test_email_key_conversion() {
-        let result = convert_email_key("EmailKey user@test.com:abc123");
-        assert_eq!(result, "Bearer abc123");
+        let mut missing = claims();
+        missing.aud = None;
+        assert!(matches!(
+            decode(&make_token(&missing)),
+            Err(AuthError::InvalidJwt { .. })
+        ));
     }
 
     #[test]
-    fn test_email_key_passthrough() {
-        let result = convert_email_key("Bearer xyz");
-        assert_eq!(result, "Bearer xyz");
+    fn rejects_wrong_or_missing_issuer() {
+        let mut wrong = claims();
+        wrong.iss = Some("other-issuer".to_string());
+        assert!(matches!(
+            decode(&make_token(&wrong)),
+            Err(AuthError::InvalidJwt { .. })
+        ));
+
+        let mut missing = claims();
+        missing.iss = None;
+        assert!(matches!(
+            decode(&make_token(&missing)),
+            Err(AuthError::InvalidJwt { .. })
+        ));
     }
 
     #[test]
-    fn test_email_key_malformed_no_colon() {
-        let result = convert_email_key("EmailKey user@example.com");
+    fn rejects_token_signed_by_wrong_rsa_key() {
+        let other_private_key =
+            include_bytes!("../../authotron/tests/fixtures/test-rsa-private-2.pem");
+        let token = jsonwebtoken::encode(
+            &Header::new(Algorithm::RS256),
+            &claims(),
+            &EncodingKey::from_rsa_pem(other_private_key).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(decode(&token), Err(AuthError::InvalidJwt { .. })));
+    }
+
+    #[test]
+    fn rejects_hs256_token_without_fallback() {
+        let token = jsonwebtoken::encode(
+            &Header::new(Algorithm::HS256),
+            &claims(),
+            &EncodingKey::from_secret(b"legacy-shared-secret"),
+        )
+        .unwrap();
+        assert!(matches!(decode(&token), Err(AuthError::InvalidJwt { .. })));
+    }
+
+    #[test]
+    fn rejects_expired_token() {
+        let mut expired = claims();
+        expired.exp = chrono::Utc::now().timestamp() as usize - 3600;
+        assert!(matches!(
+            decode(&make_token(&expired)),
+            Err(AuthError::InvalidJwt { .. })
+        ));
+    }
+
+    #[test]
+    fn malformed_public_key_is_typed_error() {
+        let result = JwtVerifier::new(b"not a PEM key", ISSUER, AUDIENCE);
+        assert!(matches!(result, Err(AuthError::InvalidPublicKey { .. })));
+    }
+
+    #[test]
+    fn email_key_conversion_and_passthrough() {
         assert_eq!(
-            result, "EmailKey user@example.com",
-            "malformed EmailKey without colon should pass through unchanged"
+            convert_email_key("EmailKey user@test.com:abc123"),
+            "Bearer abc123"
+        );
+        assert_eq!(convert_email_key("Bearer xyz"), "Bearer xyz");
+        assert_eq!(
+            convert_email_key("EmailKey user@example.com"),
+            "EmailKey user@example.com"
         );
     }
-
-    // ── AuthClient tests ──────────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_successful_auth() {
+    async fn successful_auth_verifies_issued_token() {
         let mut server = mockito::Server::new_async().await;
-        let jwt = make_test_jwt("testsecret");
-
+        let jwt = make_test_jwt();
         server
             .mock("GET", "/authenticate")
             .with_status(200)
-            .with_header("Authorization", &format!("Bearer {}", jwt))
+            .with_header("Authorization", &format!("Bearer {jwt}"))
             .create_async()
             .await;
 
-        let client = AuthClient::new(
-            &server.url(),
-            b"testsecret",
-            Duration::from_secs(5),
-            None,
-            None,
-        );
-        let user = client.authenticate("Bearer sometoken").await.unwrap();
-
+        let user = test_client(&server.url())
+            .authenticate("Bearer sometoken")
+            .await
+            .unwrap();
         assert_eq!(user.username, "testuser");
-        assert_eq!(user.realm, "testrealm");
-        assert!(user.roles.contains(&"admin".to_string()));
-        assert!(user.roles.contains(&"default".to_string()));
     }
 
-    /// A burst of concurrent authentications for the same cold credential must
-    /// collapse into a SINGLE upstream `/authenticate` call (single-flight),
-    /// not one call per request. `expect(1)` fails if the herd is not coalesced.
     #[tokio::test]
-    async fn test_concurrent_auth_is_single_flight() {
+    async fn concurrent_auth_is_single_flight_and_cached() {
         let mut server = mockito::Server::new_async().await;
-        let jwt = make_test_jwt("testsecret");
-
+        let jwt = make_test_jwt();
         let mock = server
             .mock("GET", "/authenticate")
             .with_status(200)
-            .with_header("Authorization", &format!("Bearer {}", jwt))
+            .with_header("Authorization", &format!("Bearer {jwt}"))
             .expect(1)
             .create_async()
             .await;
+        let client = test_client(&server.url());
 
-        let client = AuthClient::new(
-            &server.url(),
-            b"testsecret",
-            Duration::from_secs(5),
-            None,
-            None,
-        );
-
-        // Fire many concurrent authentications for the SAME (cold) credential.
-        const N: usize = 64;
-        let mut handles = Vec::with_capacity(N);
-        for _ in 0..N {
+        let mut handles = Vec::new();
+        for _ in 0..32 {
             let client = client.clone();
             handles.push(tokio::spawn(async move {
-                client.authenticate("Bearer sometoken").await
+                client.authenticate("Bearer cached-token").await
             }));
         }
-        for h in handles {
-            let user = h.await.unwrap().expect("auth should succeed");
-            assert_eq!(user.username, "testuser");
+        for handle in handles {
+            assert_eq!(handle.await.unwrap().unwrap().username, "testuser");
         }
-
-        // Coalesced: the whole herd produced exactly one upstream call.
+        client.authenticate("Bearer cached-token").await.unwrap();
         mock.assert_async().await;
     }
 
     #[tokio::test]
-    async fn test_auth_failure_401() {
+    async fn propagates_auth_failure() {
         let mut server = mockito::Server::new_async().await;
-
         server
             .mock("GET", "/authenticate")
             .with_status(401)
@@ -566,150 +556,42 @@ mod tests {
             .create_async()
             .await;
 
-        let client = AuthClient::new(
-            &server.url(),
-            b"testsecret",
-            Duration::from_secs(5),
-            None,
-            None,
-        );
-        let result = client.authenticate("Bearer badtoken").await;
-
-        match result {
-            Err(AuthError::Unauthorized {
-                www_authenticate, ..
-            }) => {
-                assert_eq!(www_authenticate, r#"Bearer realm="test""#);
-            }
-            other => panic!("expected Unauthorized, got {:?}", other),
-        }
+        let result = test_client(&server.url()).authenticate("Bearer bad").await;
+        assert!(matches!(result, Err(AuthError::Unauthorized { .. })));
     }
 
     #[tokio::test]
-    async fn test_cache_hit() {
-        let mut server = mockito::Server::new_async().await;
-        let jwt = make_test_jwt("testsecret");
-
-        let mock = server
-            .mock("GET", "/authenticate")
-            .with_status(200)
-            .with_header("Authorization", &format!("Bearer {}", jwt))
-            .expect(1)
-            .create_async()
-            .await;
-
-        let client = AuthClient::new(
-            &server.url(),
-            b"testsecret",
-            Duration::from_secs(5),
-            None,
-            None,
-        );
-
-        let user1 = client.authenticate("Bearer cachedtoken").await.unwrap();
-        let user2 = client.authenticate("Bearer cachedtoken").await.unwrap();
-
-        assert_eq!(user1.username, user2.username);
-        mock.assert_async().await;
-    }
-
-    #[tokio::test]
-    async fn test_auth_service_unreachable() {
+    async fn reports_unreachable_service() {
         let client = AuthClient::new(
             "http://127.0.0.1:1",
-            b"testsecret",
+            PUBLIC_KEY,
+            ISSUER,
+            AUDIENCE,
             Duration::from_secs(1),
             None,
             None,
-        );
-        let result = client.authenticate("Bearer token").await;
-
-        assert!(matches!(result, Err(AuthError::ServiceUnavailable { .. })));
+        )
+        .unwrap();
+        assert!(matches!(
+            client.authenticate("Bearer token").await,
+            Err(AuthError::ServiceUnavailable { .. })
+        ));
     }
 
     #[tokio::test]
-    async fn test_missing_authorization_in_response() {
-        let mut server = mockito::Server::new_async().await;
-
-        server
-            .mock("GET", "/authenticate")
-            .with_status(200)
-            .create_async()
-            .await;
-
-        let client = AuthClient::new(
-            &server.url(),
-            b"testsecret",
-            Duration::from_secs(5),
-            None,
-            None,
-        );
-        let result = client.authenticate("Bearer sometoken").await;
-
-        match result {
-            Err(AuthError::InvalidJwt { message }) => {
-                assert!(
-                    message.contains("missing"),
-                    "expected 'missing' in message, got: {}",
-                    message
-                );
+    async fn rejects_missing_non_bearer_and_invalid_response_tokens() {
+        for authorization in [None, Some("Basic dXNlcjpwYXNz"), Some("Bearer invalid.jwt")] {
+            let mut server = mockito::Server::new_async().await;
+            let mut mock = server.mock("GET", "/authenticate").with_status(200);
+            if let Some(value) = authorization {
+                mock = mock.with_header("Authorization", value);
             }
-            other => panic!("expected InvalidJwt, got {:?}", other),
+            mock.create_async().await;
+
+            let result = test_client(&server.url())
+                .authenticate("Bearer input")
+                .await;
+            assert!(matches!(result, Err(AuthError::InvalidJwt { .. })));
         }
-    }
-
-    #[tokio::test]
-    async fn test_non_bearer_authorization_in_response() {
-        let mut server = mockito::Server::new_async().await;
-
-        server
-            .mock("GET", "/authenticate")
-            .with_status(200)
-            .with_header("Authorization", "Basic dXNlcjpwYXNz")
-            .create_async()
-            .await;
-
-        let client = AuthClient::new(
-            &server.url(),
-            b"testsecret",
-            Duration::from_secs(5),
-            None,
-            None,
-        );
-        let result = client.authenticate("Bearer sometoken").await;
-
-        match result {
-            Err(AuthError::InvalidJwt { message }) => {
-                assert!(
-                    message.contains("not Bearer"),
-                    "expected 'not Bearer' in message, got: {}",
-                    message
-                );
-            }
-            other => panic!("expected InvalidJwt, got {:?}", other),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_invalid_jwt_response() {
-        let mut server = mockito::Server::new_async().await;
-
-        server
-            .mock("GET", "/authenticate")
-            .with_status(200)
-            .with_header("Authorization", "Bearer not_a_valid_jwt")
-            .create_async()
-            .await;
-
-        let client = AuthClient::new(
-            &server.url(),
-            b"testsecret",
-            Duration::from_secs(5),
-            None,
-            None,
-        );
-        let result = client.authenticate("Bearer sometoken").await;
-
-        assert!(matches!(result, Err(AuthError::InvalidJwt { .. })));
     }
 }

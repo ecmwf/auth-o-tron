@@ -555,26 +555,27 @@
       "type": "object",
       "properties": {
         "iss": {
+          "description": "Exact issuer claim included in every issued token.",
           "type": "string"
         },
         "aud": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "description": "Exact audience claim included in every issued token.",
+          "type": "string"
         },
         "exp": {
           "type": "integer",
           "format": "int64"
         },
-        "secret": {
+        "private_key": {
+          "description": "RSA private key in PEM format. Prefer injecting this from a secret.",
           "type": "string"
         }
       },
       "required": [
         "iss",
+        "aud",
         "exp",
-        "secret"
+        "private_key"
       ]
     },
     "LoggingConfig": {
@@ -593,7 +594,7 @@
         },
         "service_version": {
           "type": "string",
-          "default": "0.2.12"
+          "default": "0.3.7"
         }
       },
       "required": [
