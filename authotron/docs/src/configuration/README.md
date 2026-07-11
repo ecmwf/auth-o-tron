@@ -92,11 +92,6 @@ jwt:
   exp: 3600
   secret: your-secret-key-here
 
-store:
-  enabled: true
-  type: mongo
-  uri: mongodb://localhost:27017
-  database: auth_o_tron
 
 logging:
   level: info

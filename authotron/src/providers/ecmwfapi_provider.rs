@@ -133,9 +133,8 @@ async fn query(uri: String, token: String, realm: String) -> Result<Return<User>
         let username = user_info["uid"].as_str().unwrap_or_default().to_string();
         let email = user_info["email"].as_str().map(|s| s.to_string());
         // The raw API key must not be stored as a user attribute: attributes
-        // propagate into JWT claims, the token store, and identity responses,
-        // which would expose the long-lived credential to anyone who can read
-        // an issued JWT.
+        // propagate into JWT claims and identity responses, which would expose the
+        // long-lived credential to anyone who can read an issued JWT.
         let mut attributes = HashMap::new();
         if let Some(email) = email {
             attributes.insert("ecmwf-email".to_string(), email);

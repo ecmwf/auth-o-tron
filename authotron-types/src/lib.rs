@@ -21,8 +21,8 @@ fn default_version() -> i32 {
 
 /// Authenticated user — the single canonical type used across all services.
 ///
-/// Carries identity, roles, attributes, and scopes. The `version` field exists
-/// for storage compatibility (MongoDB documents) and defaults to `1`.
+/// Carries identity, roles, attributes, and scopes. The `version` field supports
+/// wire-format evolution and defaults to `1`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct User {
     #[serde(default = "default_version")]

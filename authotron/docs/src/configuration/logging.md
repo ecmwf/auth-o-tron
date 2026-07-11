@@ -76,7 +76,6 @@ Auth-O-Tron uses structured event naming following the pattern `domain.component
 | auth | Authentication flow events |
 | providers | Provider lifecycle and validation |
 | augmenters | Augmenter lifecycle and enrichment |
-| store | Token store operations |
 | routes | HTTP route handler events |
 | startup | Server initialization events |
 

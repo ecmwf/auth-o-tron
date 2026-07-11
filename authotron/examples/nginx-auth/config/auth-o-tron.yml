@@ -21,13 +21,6 @@ providers:
     uri: https://api.ecmwf.int/v1
     realm: "ecmwf"
 
-store:
-  enabled: false
-  # type: mongo
-  # database: tokens
-  # uri: mongodb://mongodb:27017
-
-services: []
 
 jwt:
   exp: 3600
