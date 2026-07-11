@@ -12,28 +12,35 @@ use authotron::config::{load_config, print_schema};
 use authotron::startup;
 use authotron::utils::logger::init_logging;
 use std::env;
+use std::process::ExitCode;
 use std::sync::Arc;
+
 use tracing::error;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
 
     if args.contains(&"--schema".to_string()) {
         print_schema();
-        return;
+        return ExitCode::SUCCESS;
     }
 
     let config = Arc::new(load_config());
-    init_logging(&config.logging);
+    if let Err(error) = init_logging(&config.logging) {
+        eprintln!("Error initializing logging: {error}");
+        return ExitCode::FAILURE;
+    }
 
-    if let Err(e) = startup::run(config).await {
+    if let Err(error) = startup::run(config).await {
         error!(
             event_name = "startup.server.failed",
             event_domain = "startup",
-            error = %e,
+            error = %error,
             "server error"
         );
-        std::process::exit(1);
+        return ExitCode::FAILURE;
     }
+
+    ExitCode::SUCCESS
 }
