@@ -53,16 +53,17 @@ services: []
 }
 
 #[tokio::test]
-async fn startup_rejects_port_collision() {
-    let config = Arc::new(base_config(9500, true, 9500));
-    let result = startup::run(config).await;
+async fn startup_rejects_equal_configured_ports_including_zero() {
+    for port in [9500, 0] {
+        let config = Arc::new(base_config(port, true, port));
+        let result = startup::run(config).await;
 
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("must be different"),
-        "expected port collision error, got: {err}"
-    );
+        let error = result.expect_err("equal application and metrics ports must be rejected");
+        assert_eq!(
+            error.to_string(),
+            format!("application port and metrics port are both {port}, they must be different")
+        );
+    }
 }
 
 #[tokio::test]

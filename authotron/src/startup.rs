@@ -176,16 +176,106 @@ fn server_shutdown_signals(
     (app, metrics)
 }
 
+#[derive(Clone, Copy)]
+enum ServerKind {
+    Application,
+    Metrics,
+}
+
+impl Display for ServerKind {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Application => formatter.write_str("application"),
+            Self::Metrics => formatter.write_str("metrics"),
+        }
+    }
+}
+
+#[cfg(all(unix, debug_assertions))]
+impl ServerKind {
+    fn test_listener_environment(self) -> &'static str {
+        match self {
+            Self::Application => "AUTHOTRON_TEST_APP_LISTENER_FD",
+            Self::Metrics => "AUTHOTRON_TEST_METRICS_LISTENER_FD",
+        }
+    }
+}
+
+#[cfg(all(unix, debug_assertions))]
+fn listener_from_test_environment(
+    kind: ServerKind,
+    host: &str,
+    port: u16,
+) -> io::Result<Option<TcpListener>> {
+    use std::env;
+    use std::net::IpAddr;
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    let environment = kind.test_listener_environment();
+    let Some(value) = env::var_os(environment) else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .ok_or_else(|| io::Error::other(format!("{environment} is not valid UTF-8")))?;
+    let inherited_fd = value.parse::<libc::c_int>().map_err(|error| {
+        io::Error::other(format!(
+            "{environment} must contain a file descriptor: {error}"
+        ))
+    })?;
+
+    // Duplicate first so an invalid environment value is reported by the OS rather than
+    // being passed to `OwnedFd::from_raw_fd`, which requires a valid, owned descriptor.
+    // SAFETY: `fcntl` does not dereference pointers, and a successful `F_DUPFD_CLOEXEC`
+    // returns a new descriptor owned by this process.
+    let listener_fd = unsafe { libc::fcntl(inherited_fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if listener_fd == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the successful `fcntl` call above returned a new descriptor that this
+    // process owns and has not transferred elsewhere.
+    let listener_fd = unsafe { OwnedFd::from_raw_fd(listener_fd) };
+    let listener = std::net::TcpListener::from(listener_fd);
+    listener.set_nonblocking(true)?;
+
+    let actual_address = listener.local_addr()?;
+    if actual_address.port() != port {
+        return Err(io::Error::other(format!(
+            "pre-bound {kind} listener uses port {}, but configuration uses {port}",
+            actual_address.port()
+        )));
+    }
+    if let Ok(expected_ip) = host.parse::<IpAddr>()
+        && actual_address.ip() != expected_ip
+    {
+        return Err(io::Error::other(format!(
+            "pre-bound {kind} listener uses address {}, but configuration uses {host}",
+            actual_address.ip()
+        )));
+    }
+
+    TcpListener::from_std(listener).map(Some)
+}
+
+async fn bind_listener(host: &str, port: u16, kind: ServerKind) -> io::Result<TcpListener> {
+    #[cfg(all(unix, debug_assertions))]
+    if let Some(listener) = listener_from_test_environment(kind, host, port)? {
+        return Ok(listener);
+    }
+
+    #[cfg(not(all(unix, debug_assertions)))]
+    let _ = kind;
+
+    TcpListener::bind((host, port)).await
+}
+
 async fn run_servers(
     config: Arc<ConfigV2>,
     shutdown: ShutdownCoordinator,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (app, state) = build_app(config.clone()).await?;
 
-    if config.metrics.enabled
-        && config.server.port != 0
-        && config.server.port == config.metrics.port
-    {
+    if config.metrics.enabled && config.server.port == config.metrics.port {
         return Err(format!(
             "application port and metrics port are both {}, they must be different",
             config.server.port
@@ -194,7 +284,7 @@ async fn run_servers(
     }
 
     let host = config.server.host.as_str();
-    let app_listener = TcpListener::bind((host, config.server.port))
+    let app_listener = bind_listener(host, config.server.port, ServerKind::Application)
         .await
         .map_err(|error| {
             format!(
@@ -223,7 +313,7 @@ async fn run_servers(
 
     if let Some(metrics_shutdown) = metrics_shutdown {
         let metrics_router = routes::create_metrics_router(state);
-        let metrics_listener = TcpListener::bind((host, config.metrics.port))
+        let metrics_listener = bind_listener(host, config.metrics.port, ServerKind::Metrics)
             .await
             .map_err(|error| {
                 format!(

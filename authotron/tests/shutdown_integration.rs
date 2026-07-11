@@ -4,8 +4,10 @@ use serde_json::Value;
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write as _};
+use std::io::{self, BufRead, BufReader, Read, Write as _};
 use std::net::{SocketAddr, TcpListener};
+use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
@@ -14,6 +16,9 @@ use std::time::{Duration, Instant};
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(10);
+const APP_LISTENER_FD: libc::c_int = 100;
+const METRICS_LISTENER_FD: libc::c_int = 101;
+const TEMPORARY_FD_START: libc::c_int = 102;
 
 #[derive(Debug)]
 struct LogEvent {
@@ -82,6 +87,53 @@ struct ConfigFile(PathBuf);
 impl Drop for ConfigFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
+    }
+}
+
+struct PreboundListeners {
+    app: TcpListener,
+    metrics: Option<TcpListener>,
+}
+
+impl PreboundListeners {
+    fn bind(metrics_enabled: bool) -> Self {
+        let app = TcpListener::bind("127.0.0.1:0").expect("pre-bind application listener");
+        let metrics = metrics_enabled
+            .then(|| TcpListener::bind("127.0.0.1:0").expect("pre-bind metrics listener"));
+
+        if let Some(metrics) = &metrics {
+            assert_ne!(
+                app.local_addr()
+                    .expect("application listener address")
+                    .port(),
+                metrics
+                    .local_addr()
+                    .expect("metrics listener address")
+                    .port(),
+                "pre-bound listeners must use distinct ports"
+            );
+        }
+
+        Self { app, metrics }
+    }
+
+    fn app_port(&self) -> u16 {
+        self.app
+            .local_addr()
+            .expect("application listener address")
+            .port()
+    }
+
+    fn metrics_port(&self) -> u16 {
+        self.metrics
+            .as_ref()
+            .map(|listener| {
+                listener
+                    .local_addr()
+                    .expect("metrics listener address")
+                    .port()
+            })
+            .unwrap_or(0)
     }
 }
 
@@ -195,7 +247,11 @@ impl DelayedUpstream {
     }
 }
 
-fn write_config(upstream_url: &str, metrics_enabled: bool) -> ConfigFile {
+fn write_config(
+    upstream_url: &str,
+    metrics_enabled: bool,
+    listeners: &PreboundListeners,
+) -> ConfigFile {
     let mode = if metrics_enabled {
         "metrics-enabled"
     } else {
@@ -205,6 +261,8 @@ fn write_config(upstream_url: &str, metrics_enabled: bool) -> ConfigFile {
         "authotron-shutdown-{}-{mode}.yaml",
         std::process::id()
     ));
+    let app_port = listeners.app_port();
+    let metrics_port = listeners.metrics_port();
     let config = format!(
         r#"version: "2.0.0"
 logging:
@@ -227,10 +285,10 @@ jwt:
   secret: "test-secret"
 server:
   host: "127.0.0.1"
-  port: 0
+  port: {app_port}
 metrics:
   enabled: {metrics_enabled}
-  port: 0
+  port: {metrics_port}
 "#
     );
     fs::write(&path, config).expect("write authotron test config");
@@ -267,7 +325,59 @@ fn spawn_output_reader(
     })
 }
 
-fn spawn_authotron(config_path: &PathBuf) -> SpawnedAuthotron {
+fn duplicate_inherited_listener(source: libc::c_int) -> io::Result<libc::c_int> {
+    // SAFETY: `fcntl` only operates on an integer file descriptor. On success, this
+    // returns a new descriptor owned by the child process.
+    let temporary = unsafe { libc::fcntl(source, libc::F_DUPFD_CLOEXEC, TEMPORARY_FD_START) };
+    if temporary == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(temporary)
+    }
+}
+
+fn install_duplicated_listener(temporary: libc::c_int, target: libc::c_int) -> io::Result<()> {
+    // SAFETY: `temporary` is a valid descriptor returned by `fcntl`.
+    let result = unsafe { libc::dup2(temporary, target) };
+    let error = (result == -1).then(io::Error::last_os_error);
+    // SAFETY: this function takes ownership of the temporary descriptor.
+    unsafe { libc::close(temporary) };
+    error.map_or(Ok(()), Err)
+}
+
+fn install_inherited_listeners(
+    app_source: libc::c_int,
+    metrics_source: Option<libc::c_int>,
+) -> io::Result<()> {
+    // Duplicate every source above the fixed target range before overwriting either
+    // target, so this remains correct even if a source descriptor equals a target.
+    let app = duplicate_inherited_listener(app_source)?;
+    let metrics = match metrics_source.map(duplicate_inherited_listener).transpose() {
+        Ok(metrics) => metrics,
+        Err(error) => {
+            // SAFETY: `app` is owned by this function and has not been installed.
+            unsafe { libc::close(app) };
+            return Err(error);
+        }
+    };
+
+    if let Err(error) = install_duplicated_listener(app, APP_LISTENER_FD) {
+        if let Some(metrics) = metrics {
+            // SAFETY: `metrics` is owned by this function and has not been installed.
+            unsafe { libc::close(metrics) };
+        }
+        return Err(error);
+    }
+    if let Some(metrics) = metrics {
+        install_duplicated_listener(metrics, METRICS_LISTENER_FD)?;
+    }
+
+    Ok(())
+}
+
+fn spawn_authotron(config_path: &PathBuf, listeners: PreboundListeners) -> SpawnedAuthotron {
+    let app_listener_fd = listeners.app.as_raw_fd();
+    let metrics_listener_fd = listeners.metrics.as_ref().map(AsRawFd::as_raw_fd);
     let mut command = Command::new(env!("CARGO_BIN_EXE_authotron"));
     for (key, _) in env::vars_os() {
         if key.to_string_lossy().starts_with("AOT_") {
@@ -284,15 +394,32 @@ fn spawn_authotron(config_path: &PathBuf) -> SpawnedAuthotron {
     ] {
         command.env_remove(key);
     }
-    let mut child = command
+    command
         .env("AOT_CONFIG_PATH", config_path)
+        .env(
+            "AUTHOTRON_TEST_APP_LISTENER_FD",
+            APP_LISTENER_FD.to_string(),
+        )
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn authotron binary");
+        .stderr(Stdio::piped());
+    if metrics_listener_fd.is_some() {
+        command.env(
+            "AUTHOTRON_TEST_METRICS_LISTENER_FD",
+            METRICS_LISTENER_FD.to_string(),
+        );
+    }
+
+    // SAFETY: the closure only invokes async-signal-safe descriptor syscalls between
+    // `fork` and `exec`. The source listeners remain alive until `spawn` returns.
+    unsafe {
+        command.pre_exec(move || install_inherited_listeners(app_listener_fd, metrics_listener_fd));
+    }
+
+    let mut child = command.spawn().expect("spawn authotron binary");
+    drop(listeners);
 
     let stdout = child.stdout.take().expect("capture authotron stdout");
     let stderr = child.stderr.take().expect("capture authotron stderr");
@@ -335,9 +462,9 @@ async fn wait_for_exit(child: &mut Child) -> ExitStatus {
 
 async fn run_shutdown_case(metrics_enabled: bool) {
     let mut upstream = DelayedUpstream::start();
-    let config = write_config(&upstream.url(), metrics_enabled);
-    let mut authotron = spawn_authotron(&config.0);
-
+    let listeners = PreboundListeners::bind(metrics_enabled);
+    let config = write_config(&upstream.url(), metrics_enabled, &listeners);
+    let mut authotron = spawn_authotron(&config.0, listeners);
     let app_port = event_port(&authotron.wait_for_event("startup.server.listening"));
     let metrics_port = if metrics_enabled {
         Some(event_port(
