@@ -6,11 +6,15 @@
 // granted to it by virtue of its status as an intergovernmental organisation nor
 // does it submit to any jurisdiction.
 
+use std::{borrow::Cow, fmt};
+
+use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use subtle::ConstantTimeEq;
+use tracing::{debug, warn};
 
 use crate::models::user::User;
 use crate::providers::Provider;
@@ -22,16 +26,116 @@ pub struct PlainAuthConfig {
     pub name: String,
     /// The realm associated with this provider.
     pub realm: String,
-    /// A list of username/password pairs.
+    /// A list of users and their password credentials.
     pub users: Vec<PlainUserEntry>,
 }
 
-/// Represents a single user entry (username + password).
-#[derive(Deserialize, Serialize, Debug, JsonSchema, Clone)]
+/// Represents a single user entry and its password credential.
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct PlainUserEntry {
     pub username: String,
-    pub password: String,
+    /// Exactly one Argon2id hash or deprecated plaintext password.
+    #[serde(flatten)]
+    pub credential: PlainCredential,
     pub roles: Option<Vec<String>>,
+}
+
+impl JsonSchema for PlainUserEntry {
+    fn schema_name() -> Cow<'static, str> {
+        "PlainUserEntry".into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "description": "A plain-provider user with exactly one password credential.",
+            "type": "object",
+            "properties": {
+                "username": { "type": "string" },
+                "password_hash": {
+                    "description": "An Argon2id hash in PHC string format (recommended).",
+                    "type": "string"
+                },
+                "password": {
+                    "description": "Deprecated plaintext password. Use password_hash instead.",
+                    "type": "string",
+                    "deprecated": true
+                },
+                "roles": {
+                    "type": ["array", "null"],
+                    "items": { "type": "string" }
+                }
+            },
+            "required": ["username"],
+            "oneOf": [
+                { "required": ["password_hash"] },
+                { "required": ["password"] }
+            ],
+            "additionalProperties": false
+        })
+    }
+}
+
+/// Password configuration for a plain-provider user.
+#[derive(Deserialize, Serialize, JsonSchema, Clone)]
+#[serde(untagged)]
+pub enum PlainCredential {
+    /// Preferred Argon2id PHC string.
+    Argon2id(Argon2idCredential),
+    /// Deprecated plaintext compatibility.
+    Plaintext(PlaintextCredential),
+}
+
+#[derive(Deserialize, Serialize, JsonSchema, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Argon2idCredential {
+    /// An Argon2id hash in PHC string format.
+    pub password_hash: String,
+}
+
+#[derive(Deserialize, Serialize, JsonSchema, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct PlaintextCredential {
+    /// Deprecated: plaintext password. Use `password_hash` instead.
+    pub password: String,
+}
+
+impl fmt::Debug for PlainCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PlainCredential([REDACTED])")
+    }
+}
+
+impl PlainCredential {
+    async fn verify(&self, candidate: &str) -> bool {
+        match self {
+            Self::Argon2id(credential) => {
+                let password_hash = credential.password_hash.clone();
+                let candidate = candidate.as_bytes().to_vec();
+                tokio::task::spawn_blocking(move || verify_argon2id(&password_hash, &candidate))
+                    .await
+                    .unwrap_or(false)
+            }
+            Self::Plaintext(credential) => credential
+                .password
+                .as_bytes()
+                .ct_eq(candidate.as_bytes())
+                .into(),
+        }
+    }
+}
+
+fn verify_argon2id(password_hash: &str, candidate: &[u8]) -> bool {
+    let Ok(parsed_hash) = PasswordHash::new(password_hash) else {
+        return false;
+    };
+
+    if parsed_hash.algorithm.as_str() != "argon2id" {
+        return false;
+    }
+
+    Argon2::default()
+        .verify_password(candidate, &parsed_hash)
+        .is_ok()
 }
 
 /// A `PlainAuthProvider` that implements Basic authentication by
@@ -43,6 +147,20 @@ pub struct PlainAuthProvider {
 impl PlainAuthProvider {
     /// Create a new `PlainAuthProvider` from the config struct.
     pub fn new(config: &PlainAuthConfig) -> Self {
+        if config
+            .users
+            .iter()
+            .any(|entry| matches!(&entry.credential, PlainCredential::Plaintext(_)))
+        {
+            warn!(
+                event_name = "providers.plain.plaintext_password.deprecated",
+                event_domain = "providers",
+                provider_name = config.name.as_str(),
+                realm = config.realm.as_str(),
+                "plain provider uses deprecated plaintext passwords; use Argon2id password_hash entries"
+            );
+        }
+
         Self {
             config: config.clone(),
         }
@@ -116,14 +234,13 @@ impl Provider for PlainAuthProvider {
             "basic authentication attempt"
         );
         for entry in &self.config.users {
-            if entry.username == user_part && entry.password == pass_part {
-                // Found a match! Return a new user object.
+            if entry.username == user_part && entry.credential.verify(pass_part).await {
                 return Ok(User::new(
                     self.config.realm.clone(),
                     user_part.to_string(),
-                    entry.roles.clone(), // roles
-                    None,                // attributes
-                    None,                // scopes
+                    entry.roles.clone(),
+                    None,
+                    None,
                     Some(1),
                 ));
             }
@@ -136,7 +253,25 @@ impl Provider for PlainAuthProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use argon2::{Algorithm, Params, PasswordHasher, Version, password_hash::SaltString};
     use base64::engine::general_purpose;
+
+    fn plaintext(password: &str) -> PlainCredential {
+        PlainCredential::Plaintext(PlaintextCredential {
+            password: password.to_string(),
+        })
+    }
+
+    fn argon2id(password: &str) -> PlainCredential {
+        let params = Params::new(1024, 1, 1, None).expect("valid test Argon2 parameters");
+        let hasher = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+        let salt = SaltString::encode_b64(b"authotron-tests!").expect("valid test salt");
+        let password_hash = hasher
+            .hash_password(password.as_bytes(), &salt)
+            .expect("test password should hash")
+            .to_string();
+        PlainCredential::Argon2id(Argon2idCredential { password_hash })
+    }
 
     fn create_test_config() -> PlainAuthConfig {
         PlainAuthConfig {
@@ -145,22 +280,22 @@ mod tests {
             users: vec![
                 PlainUserEntry {
                     username: "admin".to_string(),
-                    password: "admin123".to_string(),
+                    credential: plaintext("admin123"),
                     roles: Some(vec!["admin".to_string(), "user".to_string()]),
                 },
                 PlainUserEntry {
                     username: "user1".to_string(),
-                    password: "password1".to_string(),
+                    credential: plaintext("password1"),
                     roles: Some(vec!["user".to_string()]),
                 },
                 PlainUserEntry {
                     username: "guest".to_string(),
-                    password: "guest123".to_string(),
+                    credential: plaintext("guest123"),
                     roles: None, // No roles
                 },
                 PlainUserEntry {
                     username: "empty_roles".to_string(),
-                    password: "password".to_string(),
+                    credential: plaintext("password"),
                     roles: Some(vec![]), // Empty roles vector
                 },
             ],
@@ -173,7 +308,7 @@ mod tests {
             realm: "test".to_string(),
             users: vec![PlainUserEntry {
                 username: "user@domain.com".to_string(),
-                password: "p@ssw0rd!#$".to_string(),
+                credential: plaintext("p@ssw0rd!#$"),
                 roles: Some(vec!["special".to_string()]),
             }],
         }
@@ -185,7 +320,7 @@ mod tests {
             realm: "test".to_string(),
             users: vec![PlainUserEntry {
                 username: "用户".to_string(),
-                password: "密码".to_string(),
+                credential: plaintext("密码"),
                 roles: Some(vec!["unicode".to_string()]),
             }],
         }
@@ -511,5 +646,109 @@ mod tests {
         assert_eq!(provider.config.name, "TestPlain");
         assert_eq!(provider.config.realm, "test");
         assert_eq!(provider.config.users.len(), 4);
+    }
+    #[tokio::test]
+    async fn test_authenticate_correct_argon2id_hash() {
+        let provider = PlainAuthProvider::new(&PlainAuthConfig {
+            name: "Hashed".to_string(),
+            realm: "test".to_string(),
+            users: vec![PlainUserEntry {
+                username: "hashed-user".to_string(),
+                credential: argon2id("correct horse battery staple"),
+                roles: Some(vec!["user".to_string()]),
+            }],
+        });
+        let credentials =
+            general_purpose::STANDARD.encode("hashed-user:correct horse battery staple");
+
+        let user = provider
+            .authenticate(&credentials)
+            .await
+            .expect("correct password should authenticate");
+
+        assert_eq!(user.username, "hashed-user");
+        assert_eq!(user.roles, vec!["user"]);
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_incorrect_argon2id_password() {
+        let provider = PlainAuthProvider::new(&PlainAuthConfig {
+            name: "Hashed".to_string(),
+            realm: "test".to_string(),
+            users: vec![PlainUserEntry {
+                username: "hashed-user".to_string(),
+                credential: argon2id("right-password"),
+                roles: None,
+            }],
+        });
+        let credentials = general_purpose::STANDARD.encode("hashed-user:wrong-password");
+
+        let result = provider.authenticate(&credentials).await;
+
+        assert_eq!(result.unwrap_err(), "Wrong username or password");
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_malformed_argon2id_hash() {
+        let provider = PlainAuthProvider::new(&PlainAuthConfig {
+            name: "Hashed".to_string(),
+            realm: "test".to_string(),
+            users: vec![PlainUserEntry {
+                username: "hashed-user".to_string(),
+                credential: PlainCredential::Argon2id(Argon2idCredential {
+                    password_hash: "$argon2id$malformed".to_string(),
+                }),
+                roles: None,
+            }],
+        });
+        let credentials = general_purpose::STANDARD.encode("hashed-user:any-password");
+
+        let result = provider.authenticate(&credentials).await;
+
+        assert_eq!(result.unwrap_err(), "Wrong username or password");
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_unicode_argon2id_password() {
+        let provider = PlainAuthProvider::new(&PlainAuthConfig {
+            name: "Hashed".to_string(),
+            realm: "test".to_string(),
+            users: vec![PlainUserEntry {
+                username: "unicode-user".to_string(),
+                credential: argon2id("密码🔐"),
+                roles: None,
+            }],
+        });
+        let credentials = general_purpose::STANDARD.encode("unicode-user:密码🔐");
+
+        let result = provider.authenticate(&credentials).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_plaintext_credential_deserializes_for_compatibility() {
+        let entry: PlainUserEntry = serde_json::from_str(
+            r#"{"username":"legacy","password":"still-supported","roles":[]}"#,
+        )
+        .expect("deprecated plaintext credential should remain supported");
+
+        assert!(matches!(entry.credential, PlainCredential::Plaintext(_)));
+    }
+
+    #[test]
+    fn test_credential_rejects_hash_and_plaintext() {
+        let result = serde_json::from_str::<PlainUserEntry>(
+            r#"{"username":"ambiguous","password_hash":"$argon2id$...","password":"secret"}"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_credential_rejects_missing_hash_and_plaintext() {
+        let result = serde_json::from_str::<PlainUserEntry>(r#"{"username":"missing"}"#);
+
+        assert!(result.is_err());
     }
 }

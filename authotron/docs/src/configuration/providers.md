@@ -16,18 +16,21 @@ All providers share these common fields:
 
 Type: `plain`
 
-The plain provider implements HTTP Basic Authentication against a static list of users defined in the configuration file. This is useful for development, testing, or simple deployments.
+The plain provider implements HTTP Basic Authentication against a static list of users defined in the configuration file. Store passwords as Argon2id hashes in PHC string format.
 
 **Fields:**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| users | array | List of user objects with username, password, and roles |
+| users | array | List of user objects with username, password credential, and roles |
 
 Each user object has:
 - `username`: The login name
-- `password`: The password (compared as plaintext)
+- `password_hash`: An Argon2id PHC string (recommended)
+- `password`: Deprecated plaintext compatibility; do not use for new configurations
 - `roles`: Array of role strings assigned to the user (optional, defaults to empty)
+
+Each user must contain exactly one of `password_hash` or `password`. Generate hashes with an Argon2id implementation using a unique random salt and parameters appropriate for your deployment.
 
 **Example:**
 
@@ -38,10 +41,12 @@ providers:
     realm: internal
     users:
       - username: alice
-        password: alicepass123
+        # Hash of alicepass123 for this example only.
+        password_hash: "$argon2id$v=19$m=19456,t=2,p=1$YXV0aG90cm9uLWRvYy0wNQ$bnM0TZfPrwI0Eb2pfBCK39sjwVCHBBUZYykFUnbwWfw"
         roles: [admin, developer]
       - username: bob
-        password: bobpass456
+        # Hash of bobpass456 for this example only.
+        password_hash: "$argon2id$v=19$m=19456,t=2,p=1$YXV0aG90cm9uLWRvYy0wNg$yVm3rzolxmoIYoxZyU/TR7q/PYcU73TsTxUdmXxyIRA"
         roles: [developer]
 ```
 
@@ -194,7 +199,8 @@ providers:
     realm: development
     users:
       - username: dev
-        password: devpass
+        # Hash of devpass for this example only.
+        password_hash: "$argon2id$v=19$m=19456,t=2,p=1$YXV0aG90cm9uLWRvYy0wNw$T21rHRps148bp1VTW3bEfiri1l28TUS9CL9WUL6Xll0"
         roles: [admin]
 
   - type: jwt
