@@ -19,6 +19,10 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use moka::future::Cache;
 use reqwest::Client;
 use reqwest::header::{self, HeaderValue};
+use rsa::RsaPublicKey;
+use rsa::pkcs1::DecodeRsaPublicKey;
+use rsa::pkcs8::DecodePublicKey;
+use rsa::traits::PublicKeyParts;
 use serde::Deserialize;
 
 // Re-exports for consumer convenience
@@ -48,7 +52,7 @@ struct Claims {
     exp: usize,
 }
 
-/// A public RSA key and its unique JWT key identifier.
+/// A public RSA key of at least 2048 bits and its unique JWT key identifier.
 #[derive(Clone, Copy, Debug)]
 pub struct JwtPublicKey<'a> {
     kid: &'a str,
@@ -76,8 +80,9 @@ pub struct JwtVerifier {
 impl JwtVerifier {
     /// Parse an overlapping RSA public keyset and configure exact claim validation.
     ///
-    /// Key identifiers must be non-empty and unique. Keep old and new keys in this
-    /// set during a staged signing-key rotation.
+    /// Key identifiers must be non-empty and unique, and every key must have a modulus
+    /// of at least 2048 bits. Keep old and new keys in this set during a staged
+    /// signing-key rotation.
     pub fn new(
         public_keys: &[JwtPublicKey<'_>],
         issuer: &str,
@@ -96,6 +101,35 @@ impl JwtVerifier {
                     message: "JWT public key identifier (kid) must not be empty".to_string(),
                 });
             }
+            let pem = std::str::from_utf8(public_key.public_key_pem).map_err(|error| {
+                AuthError::InvalidPublicKey {
+                    message: format!(
+                        "invalid RSA public key for kid '{}': {error}",
+                        public_key.kid
+                    ),
+                }
+            })?;
+            let rsa_public_key = match RsaPublicKey::from_public_key_pem(pem) {
+                Ok(key) => key,
+                Err(pkcs8_error) => RsaPublicKey::from_pkcs1_pem(pem).map_err(|pkcs1_error| {
+                    AuthError::InvalidPublicKey {
+                        message: format!(
+                            "invalid RSA public key for kid '{}': failed to parse PKCS#8 ({pkcs8_error}) or PKCS#1 ({pkcs1_error}) PEM",
+                            public_key.kid
+                        ),
+                    }
+                })?,
+            };
+            let bits = rsa_public_key.n().bits();
+            if bits < 2048 {
+                return Err(AuthError::InvalidPublicKey {
+                    message: format!(
+                        "RSA public key for kid '{}' is {bits} bits; minimum is 2048 bits",
+                        public_key.kid
+                    ),
+                });
+            }
+
             let decoding_key =
                 DecodingKey::from_rsa_pem(public_key.public_key_pem).map_err(|error| {
                     AuthError::InvalidPublicKey {
@@ -361,6 +395,10 @@ mod tests {
     const PRIVATE_KEY: &[u8] =
         include_bytes!("../../authotron/tests/fixtures/test-rsa-private.pem");
     const PUBLIC_KEY: &[u8] = include_bytes!("../../authotron/tests/fixtures/test-rsa-public.pem");
+    const WEAK_PUBLIC_KEY_512: &[u8] =
+        include_bytes!("../../authotron/tests/fixtures/test-rsa-public-512.pem");
+    const WEAK_PUBLIC_KEY_1024: &[u8] =
+        include_bytes!("../../authotron/tests/fixtures/test-rsa-public-1024.pem");
     const KEY_ID: &str = "key-2026-01";
     const OTHER_PRIVATE_KEY: &[u8] =
         include_bytes!("../../authotron/tests/fixtures/test-rsa-private-2.pem");
@@ -586,6 +624,35 @@ mod tests {
             AUDIENCE,
         );
         assert!(matches!(result, Err(AuthError::InvalidPublicKey { .. })));
+    }
+
+    fn assert_rejects_weak_public_key(public_key: &[u8], expected_bits: usize) {
+        let keys = [
+            JwtPublicKey::new(KEY_ID, PUBLIC_KEY),
+            JwtPublicKey::new("weak-key", public_key),
+        ];
+        let result = JwtVerifier::new(&keys, ISSUER, AUDIENCE);
+        let error = match result {
+            Ok(_) => panic!("weak public key must be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, AuthError::InvalidPublicKey { .. }));
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("is {expected_bits} bits"))
+                && message.contains("minimum is 2048 bits"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn rejects_512_bit_rsa_public_key() {
+        assert_rejects_weak_public_key(WEAK_PUBLIC_KEY_512, 512);
+    }
+
+    #[test]
+    fn rejects_1024_bit_rsa_public_key() {
+        assert_rejects_weak_public_key(WEAK_PUBLIC_KEY_1024, 1024);
     }
 
     #[test]

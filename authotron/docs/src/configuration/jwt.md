@@ -16,7 +16,7 @@ The required `jwt` section configures the short-lived tokens issued by Auth-O-Tr
 
 Auth-O-Tron signs issued tokens with RS256 only. The server parses the private key once during startup and refuses malformed RSA keys, keys below 2048 bits, and an empty `kid`. Use 3072-bit keys for new deployments. Consumers receive only public keys and must pin RS256 while validating the exact configured `iss` and `aud` values. There is no HMAC fallback.
 
-Every JWT header contains the active `kid`. The `authotron-client` constructor accepts an overlapping public keyset, parses it once, and selects exactly one key by `kid`. It rejects missing or unknown token identifiers and duplicate identifiers in the configured keyset.
+Every JWT header contains the active `kid`. The `authotron-client` constructor accepts an overlapping public keyset, parses it once, and selects exactly one key by `kid`. It rejects RSA public keys below 2048 bits, missing or unknown token identifiers, and duplicate identifiers in the configured keyset.
 
 ## Generated Claims
 
@@ -39,7 +39,7 @@ Generate a private/public key pair:
 
 ```bash
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out jwt-private.pem
-openssl rsa -pubout -in jwt-private.pem -out jwt-public.pem
+openssl pkey -in jwt-private.pem -pubout -out jwt-public.pem
 ```
 
 Inject the private PEM through the environment rather than committing it to the configuration file:

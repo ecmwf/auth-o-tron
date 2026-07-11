@@ -12,11 +12,11 @@ A minimal example showing how to deploy Auth-o-tron as a standalone service behi
 #### 1. Generate a test signing key and start the stack
 
 ```bash
-cd examples/nginx-auth
+cd authotron/examples/nginx-auth
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out jwt-private.pem
-openssl rsa -pubout -in jwt-private.pem -out jwt-public.pem
+openssl pkey -in jwt-private.pem -pubout -out jwt-public.pem
 export AOT_JWT__PRIVATE_KEY="$(cat jwt-private.pem)"
-docker-compose up -d
+docker compose up --build -d
 ```
 
 Give consuming applications `jwt-public.pem` under the `nginx-example-2026-01` key identifier; do not give them the private key. The generated `jwt-private.pem` is ignored by Git.
@@ -81,8 +81,8 @@ upstream api_backend {
 ### Redeploy
 
 ```bash
-docker-compose down
-docker-compose up -d
+docker compose down
+docker compose up --build -d
 ```
 
 All /api/... requests on localhost will now require authentication via Auth-o-tron,

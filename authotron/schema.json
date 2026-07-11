@@ -599,7 +599,7 @@
         },
         "service_version": {
           "type": "string",
-          "default": "0.3.7"
+          "default": "0.4.0"
         }
       },
       "required": [

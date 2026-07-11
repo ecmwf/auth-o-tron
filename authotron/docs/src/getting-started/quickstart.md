@@ -47,7 +47,7 @@ metrics:
 
 ```bash
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out jwt-private.pem
-openssl rsa -pubout -in jwt-private.pem -out jwt-public.pem
+openssl pkey -in jwt-private.pem -pubout -out jwt-public.pem
 export AOT_JWT__PRIVATE_KEY="$(cat jwt-private.pem)"
 AOT_CONFIG_PATH=config.yaml ./target/release/authotron
 ```
@@ -82,4 +82,4 @@ You will see the user identity, roles, and other attributes encoded in the paylo
 
 ## Next Steps
 
-For a complete NGINX integration example with docker-compose, see `examples/nginx-auth` in the repository. This demonstrates how to protect backend services using Auth-O-Tron as an authentication sub-request handler.
+For a complete NGINX integration example with docker-compose, see `authotron/examples/nginx-auth` in the repository. This demonstrates how to protect backend services using Auth-O-Tron as an authentication sub-request handler.
