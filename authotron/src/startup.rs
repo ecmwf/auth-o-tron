@@ -22,6 +22,7 @@ use tracing::info;
 use crate::auth::Auth;
 use crate::config::ConfigV2;
 use crate::metrics::Metrics;
+use crate::models::user::JwtSigner;
 use crate::routes;
 use crate::state::AppState;
 
@@ -32,6 +33,10 @@ use crate::state::AppState;
 pub async fn build_app(
     config: Arc<ConfigV2>,
 ) -> Result<(axum::Router, AppState), Box<dyn std::error::Error>> {
+    let jwt_signer = Arc::new(JwtSigner::from_private_pem(
+        config.jwt.private_key.as_bytes(),
+        &config.jwt.kid,
+    )?);
     let auth_config = config.auth.clone();
     let auth = Arc::new(Auth::new(
         &config.providers,
@@ -69,6 +74,7 @@ pub async fn build_app(
 
     let state = AppState {
         config: config.clone(),
+        jwt_signer,
         auth,
         metrics,
     };

@@ -27,7 +27,7 @@ sequenceDiagram
         Augmenter-->>AOT: Add roles / attributes
     end
 
-    AOT->>AOT: Generate JWT (HS256)
+    AOT->>AOT: Generate JWT (RS256)
     AOT-->>Client: 200 OK<br/>Authorization: Bearer <jwt>
 ```
 
@@ -71,6 +71,7 @@ The resulting JWT contains these standard and custom claims:
 
 - **sub**: Subject, formatted as `{realm}-{username}`
 - **iss**: Configured issuer (your organization)
+- **aud**: Configured audience (the intended consumer)
 - **exp**: Expiration time (configurable, respects user attribute `exp` if present)
 - **iat**: When the token was issued
 - **roles**: Array of role strings from augmenters
@@ -79,7 +80,7 @@ The resulting JWT contains these standard and custom claims:
 - **scopes**: Permissions or scopes if provided by the auth source
 - **attributes**: Key-value map of additional user properties from augmenters
 
-Downstream services validate this JWT using the shared secret and extract user context without needing to query Auth-O-Tron again.
+The JWT header carries a required signing-key identifier (`kid`). Downstream services select the matching key from an overlapping public RSA keyset, pin RS256, and require exact issuer and audience matches. Only Auth-O-Tron holds the active private signing key.
 
 ## Consumer contract notes
 

@@ -41,7 +41,9 @@ augmenters: []
 jwt:
   exp: 3600
   iss: authotron-test
-  secret: test-secret
+  aud: authotron-consumer
+  kid: test-key
+  private_key: test-key-injected-by-test
 server:
   host: "{TEST_HOST}"
   port: {TEST_PORT}
@@ -55,9 +57,10 @@ metrics:
         .extract()
         .expect("Failed to parse integration test config");
 
-    let Config::ConfigV2(cfg) = config else {
+    let Config::ConfigV2(mut cfg) = config else {
         panic!("expected ConfigV2");
     };
+    cfg.jwt.private_key = include_str!("fixtures/test-rsa-private.pem").to_string();
     cfg
 }
 
@@ -186,7 +189,7 @@ async fn integration_ecmwf_token_generator_exchanges_refresh_token() {
         .strip_prefix("Bearer ")
         .expect("Authorization header missing Bearer prefix");
 
-    let claims = decode_claims(token, &config.jwt.secret);
+    let claims = decode_claims(token, &config.jwt);
     assert_eq!(claims.claims.realm.as_deref(), Some("ecmwf"));
     assert!(claims.claims.roles.contains(&"user".to_string()));
 
