@@ -283,26 +283,32 @@
       "type": "object",
       "properties": {
         "aud": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "description": "Exact audience claim included in every issued token.",
+          "type": "string"
         },
         "exp": {
           "type": "integer",
           "format": "int64"
         },
         "iss": {
+          "description": "Exact issuer claim included in every issued token.",
           "type": "string"
         },
-        "secret": {
+        "kid": {
+          "description": "Identifier placed in the JWT header for safe signing-key rotation.",
+          "type": "string"
+        },
+        "private_key": {
+          "description": "RSA private key in PEM format (2048 bits minimum; 3072 recommended).\nPrefer injecting this from a secret.",
           "type": "string"
         }
       },
       "required": [
         "iss",
+        "aud",
+        "kid",
         "exp",
-        "secret"
+        "private_key"
       ]
     },
     "LDAPAugmenterConfig": {
@@ -370,7 +376,7 @@
         },
         "service_version": {
           "type": "string",
-          "default": "0.3.7"
+          "default": "0.4.0"
         }
       },
       "required": [
@@ -539,7 +545,7 @@
           "type": "string"
         },
         "users": {
-          "description": "A list of username/password pairs.",
+          "description": "A list of users and their password credentials.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/PlainUserEntry"
@@ -553,10 +559,16 @@
       ]
     },
     "PlainUserEntry": {
-      "description": "Represents a single user entry (username + password).",
+      "description": "A plain-provider user with exactly one password credential.",
       "type": "object",
       "properties": {
         "password": {
+          "description": "Deprecated plaintext password. Use password_hash instead.",
+          "type": "string",
+          "deprecated": true
+        },
+        "password_hash": {
+          "description": "An Argon2id hash in PHC string format (recommended).",
           "type": "string"
         },
         "roles": {
@@ -572,9 +584,21 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "password_hash"
+          ]
+        },
+        {
+          "required": [
+            "password"
+          ]
+        }
+      ],
       "required": [
-        "username",
-        "password"
+        "username"
       ]
     },
     "ProviderConfig": {
