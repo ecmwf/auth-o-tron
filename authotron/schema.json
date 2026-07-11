@@ -312,14 +312,20 @@
       ]
     },
     "PlainUserEntry": {
-      "description": "Represents a single user entry (username + password).",
+      "description": "A plain-provider user with exactly one password credential.",
       "type": "object",
       "properties": {
         "username": {
           "type": "string"
         },
-        "password": {
+        "password_hash": {
+          "description": "An Argon2id hash in PHC string format (recommended).",
           "type": "string"
+        },
+        "password": {
+          "description": "Deprecated plaintext password. Use password_hash instead.",
+          "type": "string",
+          "deprecated": true
         },
         "roles": {
           "type": [
@@ -332,9 +338,21 @@
         }
       },
       "required": [
-        "username",
-        "password"
-      ]
+        "username"
+      ],
+      "oneOf": [
+        {
+          "required": [
+            "password_hash"
+          ]
+        },
+        {
+          "required": [
+            "password"
+          ]
+        }
+      ],
+      "additionalProperties": false
     },
     "PlainAuthConfig": {
       "description": "PlainAuthConfig defines the data for Basic authentication.",
@@ -349,7 +367,7 @@
           "type": "string"
         },
         "users": {
-          "description": "A list of username/password pairs.",
+          "description": "A list of users and their password credentials.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/PlainUserEntry"
@@ -593,7 +611,7 @@
         },
         "service_version": {
           "type": "string",
-          "default": "0.2.12"
+          "default": "0.3.7"
         }
       },
       "required": [
