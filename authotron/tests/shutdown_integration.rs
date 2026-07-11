@@ -276,13 +276,11 @@ providers:
     uri: "{upstream_url}"
     realm: "ecmwf"
 augmenters: []
-store:
-  enabled: false
-services: []
 jwt:
   exp: 3600
   iss: "authotron-shutdown-test"
-  secret: "test-secret"
+  aud: "shutdown-integration"
+  kid: "shutdown-test-key"
 server:
   host: "127.0.0.1"
   port: {app_port}
@@ -396,6 +394,10 @@ fn spawn_authotron(config_path: &PathBuf, listeners: PreboundListeners) -> Spawn
     }
     command
         .env("AOT_CONFIG_PATH", config_path)
+        .env(
+            "AOT_JWT__PRIVATE_KEY",
+            include_str!("fixtures/test-rsa-private.pem"),
+        )
         .env(
             "AUTHOTRON_TEST_APP_LISTENER_FD",
             APP_LISTENER_FD.to_string(),
