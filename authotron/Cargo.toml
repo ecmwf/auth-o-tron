@@ -60,7 +60,7 @@ futures = "~0.3"
 reqwest = { version = "~0.13", features = ["form", "json", "query"] }
 
 [dev-dependencies]
-authotron-client = { path = "../authotron-client", version = "0.2.0" }
+authotron-client = { path = "../authotron-client" }
 mockito = "~1.7"
 tower = { version = "~0.5", features = ["util"] }
 tracing-test = "~0.2"
