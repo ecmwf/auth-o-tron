@@ -4,54 +4,61 @@ A minimal example showing how to deploy Auth-o-tron as a standalone service behi
 
 ### Prerequisites
 
-- Docker & Docker Compose (v1.27+)  
-- Public Auth-o-tron image:
-  ```bash
-  docker pull eccr.ecmwf.int/auth-o-tron/auth-o-tron:0.2.5
-  ```
+- Docker and Docker Compose
+- A checkout of this repository. The Compose file builds Auth-O-Tron from the current source so its configuration cannot drift from an older published image.
 
 ### Usage
-## 1. Generate a test signing key and start the stack
+
+#### 1. Generate a test signing key and start the stack
+
 ```bash
 cd examples/nginx-auth
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out jwt-private.pem
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out jwt-private.pem
 openssl rsa -pubout -in jwt-private.pem -out jwt-public.pem
 export AOT_JWT__PRIVATE_KEY="$(cat jwt-private.pem)"
 docker-compose up -d
 ```
 
-Give consuming applications `jwt-public.pem`; do not give them the private key.
+Give consuming applications `jwt-public.pem` under the `nginx-example-2026-01` key identifier; do not give them the private key. The generated `jwt-private.pem` is ignored by Git.
 This brings up three services:
+
 - auth-o-tron on port 8080 (internal)
 - nginx-proxy on port 80
 - httpbin on port 80 (internal)
 
-## 2. Test the flow with curl
+#### 2. Test the flow with curl
 
 Unauthenticated request to a protected endpoint:
+
 ```bash
-curl -i http://localhost/api/get◊
+curl -i http://localhost/api/get
 ```
+
 You should receive a 302 Found response with a Location: /authenticate?redirect=… header.
 The response will also include a WWW-Authenticate header listing the available authentication methods
 
 Direct JWT access:
+
 ```bash
 curl -i -H "Authorization: Bearer <your-jwt-token>" http://localhost/api/get
 ```
+
 A working example (using the credentials in the demo config):
+
 ```bash
 curl -i http://localhost/api/get -H "Authorization: Basic dGVzdF91c2VyOnNlY3JldDEyMw=="
 ```
 
-Auth-o-tron allows chaning of multiple authorization tokens:
+Auth-o-tron allows chaining multiple authorization tokens:
+
 ```bash
 curl -i http://localhost/api/get -H "Authorization: Basic dGVzdF91c2VyOnNlY3JldDEyMw==, Bearer some_bearer_token"
 ```
 
 ## Plug in your own application
 
-### Replace the api service in docker-compose.yml:
+### Replace the API service in docker-compose.yml
+
 ```yaml
 services:
   api:
@@ -63,7 +70,8 @@ services:
 
 Ensure your app listens on port 80 (or update the upstream api_backend in nginx.conf to match).
 
-### Update NGINX upstream in nginx.conf if needed:
+### Update the NGINX upstream if needed
+
 ```nginx
 upstream api_backend {
   server api:80;
@@ -71,6 +79,7 @@ upstream api_backend {
 ```
 
 ### Redeploy
+
 ```bash
 docker-compose down
 docker-compose up -d

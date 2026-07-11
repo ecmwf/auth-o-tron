@@ -1,8 +1,8 @@
-version: '3.8'
+version: "3.8"
 
 services:
   auth-o-tron:
-    image: eccr.ecmwf.int/auth-o-tron/auth-o-tron:0.2.5
+    build: ../../..
     container_name: auth-o-tron
     restart: unless-stopped
     # mount our existing config file in read-only mode

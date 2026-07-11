@@ -22,6 +22,10 @@ use axum::http::StatusCode;
 use chrono::Utc;
 use http::request::Parts;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use rsa::RsaPrivateKey;
+use rsa::pkcs1::DecodeRsaPrivateKey;
+use rsa::pkcs8::DecodePrivateKey;
+use rsa::traits::PublicKeyParts;
 use serde::Serialize;
 use std::net::SocketAddr;
 use tracing::warn;
@@ -33,19 +37,29 @@ pub use authotron_types::User;
 /// A parsed RS256 private key used to sign issued JWTs.
 pub struct JwtSigner {
     encoding_key: EncodingKey,
+    kid: String,
 }
 
 /// Errors produced while configuring or using the JWT signer.
 #[derive(Debug)]
 pub enum JwtSigningError {
-    InvalidPrivateKey(jsonwebtoken::errors::Error),
+    InvalidPrivateKey(String),
+    WeakPrivateKey { bits: usize },
+    InvalidKeyId,
     Signing(jsonwebtoken::errors::Error),
 }
 
 impl std::fmt::Display for JwtSigningError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidPrivateKey(error) => write!(f, "invalid JWT RSA private key: {error}"),
+            Self::InvalidPrivateKey(message) => {
+                write!(f, "invalid JWT RSA private key: {message}")
+            }
+            Self::WeakPrivateKey { bits } => write!(
+                f,
+                "JWT RSA private key is {bits} bits; at least 2048 bits are required"
+            ),
+            Self::InvalidKeyId => write!(f, "JWT key identifier (kid) must not be empty"),
             Self::Signing(error) => write!(f, "failed to sign JWT: {error}"),
         }
     }
@@ -54,17 +68,41 @@ impl std::fmt::Display for JwtSigningError {
 impl std::error::Error for JwtSigningError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::InvalidPrivateKey(error) | Self::Signing(error) => Some(error),
+            Self::Signing(error) => Some(error),
+            Self::InvalidPrivateKey(_) | Self::WeakPrivateKey { .. } | Self::InvalidKeyId => None,
         }
     }
 }
 
 impl JwtSigner {
-    /// Parse an RSA private key from PEM. Call this once during startup.
-    pub fn from_private_pem(pem: &[u8]) -> Result<Self, JwtSigningError> {
-        let encoding_key =
-            EncodingKey::from_rsa_pem(pem).map_err(JwtSigningError::InvalidPrivateKey)?;
-        Ok(Self { encoding_key })
+    /// Parse an RSA private key from PEM and validate its identifier and size.
+    /// Call this once during startup.
+    pub fn from_private_pem(pem: &[u8], kid: &str) -> Result<Self, JwtSigningError> {
+        if kid.trim().is_empty() {
+            return Err(JwtSigningError::InvalidKeyId);
+        }
+
+        let encoding_key = EncodingKey::from_rsa_pem(pem)
+            .map_err(|error| JwtSigningError::InvalidPrivateKey(error.to_string()))?;
+        let pem = std::str::from_utf8(pem)
+            .map_err(|error| JwtSigningError::InvalidPrivateKey(error.to_string()))?;
+        let private_key = match RsaPrivateKey::from_pkcs8_pem(pem) {
+            Ok(key) => key,
+            Err(pkcs8_error) => RsaPrivateKey::from_pkcs1_pem(pem).map_err(|pkcs1_error| {
+                JwtSigningError::InvalidPrivateKey(format!(
+                    "failed to parse PKCS#8 ({pkcs8_error}) or PKCS#1 ({pkcs1_error}) PEM"
+                ))
+            })?,
+        };
+        let bits = private_key.n().bits();
+        if bits < 2048 {
+            return Err(JwtSigningError::WeakPrivateKey { bits });
+        }
+
+        Ok(Self {
+            encoding_key,
+            kid: kid.to_string(),
+        })
     }
 }
 
@@ -118,12 +156,9 @@ impl UserJwtExt for User {
             attributes: &self.attributes,
         };
 
-        encode(
-            &Header::new(Algorithm::RS256),
-            &claims,
-            &signer.encoding_key,
-        )
-        .map_err(JwtSigningError::Signing)
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(signer.kid.clone());
+        encode(&header, &claims, &signer.encoding_key).map_err(JwtSigningError::Signing)
     }
 }
 
@@ -213,6 +248,7 @@ mod tests {
             iss: "test_issuer".to_string(),
             aud: "test_audience".to_string(),
             exp: 3600,
+            kid: "key-2026-01".to_string(),
             private_key: String::from_utf8(PRIVATE_KEY.to_vec()).expect("PEM is UTF-8"),
         }
     }
@@ -228,11 +264,14 @@ mod tests {
             Some(1),
         );
         let jwt_config = default_jwt_config();
-        let signer = JwtSigner::from_private_pem(jwt_config.private_key.as_bytes()).unwrap();
+        let signer =
+            JwtSigner::from_private_pem(jwt_config.private_key.as_bytes(), &jwt_config.kid)
+                .unwrap();
         let token = user.to_jwt(&jwt_config, &signer).unwrap();
 
         let header = jsonwebtoken::decode_header(&token).unwrap();
         assert_eq!(header.alg, Algorithm::RS256);
+        assert_eq!(header.kid.as_deref(), Some(jwt_config.kid.as_str()));
         let claims = decode_claims(&token, &jwt_config);
         assert_eq!(claims["iss"], jwt_config.iss);
         assert_eq!(claims["aud"], jwt_config.aud);
@@ -253,7 +292,9 @@ mod tests {
             Some(1),
         );
         let jwt_config = default_jwt_config();
-        let signer = JwtSigner::from_private_pem(jwt_config.private_key.as_bytes()).unwrap();
+        let signer =
+            JwtSigner::from_private_pem(jwt_config.private_key.as_bytes(), &jwt_config.kid)
+                .unwrap();
         let token = user.to_jwt(&jwt_config, &signer).unwrap();
         let claims = decode_claims(&token, &jwt_config);
         assert_eq!(claims["exp"].as_i64(), Some(custom_exp));
@@ -261,7 +302,7 @@ mod tests {
 
     #[test]
     fn malformed_private_key_is_typed_error() {
-        let result = JwtSigner::from_private_pem(b"not a PEM key");
+        let result = JwtSigner::from_private_pem(b"not a PEM key", "test-key");
         assert!(matches!(result, Err(JwtSigningError::InvalidPrivateKey(_))));
     }
 }

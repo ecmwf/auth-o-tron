@@ -59,6 +59,7 @@ jwt:
   exp: 3600
   iss: authotron-test
   aud: authotron-consumer
+  kid: test-key
   private_key: test-key-injected-by-test
 server:
   host: "127.0.0.1"
@@ -110,13 +111,13 @@ async fn integration_plain_auth_flow() {
     assert_eq!(claims.claims.iss.as_deref(), Some(config.jwt.iss.as_str()));
     assert_eq!(claims.claims.aud.as_deref(), Some(config.jwt.aud.as_str()));
 
-    let verified_user = authotron_client::decode_jwt(
-        token,
+    let public_keys = [authotron_client::JwtPublicKey::new(
+        &config.jwt.kid,
         include_bytes!("fixtures/test-rsa-public.pem"),
-        &config.jwt.iss,
-        &config.jwt.aud,
-    )
-    .expect("authotron-client should verify the issued RS256 token");
+    )];
+    let verified_user =
+        authotron_client::decode_jwt(token, &public_keys, &config.jwt.iss, &config.jwt.aud)
+            .expect("authotron-client should verify the issued RS256 token");
     assert_eq!(verified_user.username, "adam");
 
     assert_eq!(claims.claims.roles.len(), 2);

@@ -78,7 +78,7 @@ The resulting JWT contains these standard and custom claims:
 - **scopes**: Permissions or scopes if provided by the auth source
 - **attributes**: Key-value map of additional user properties from augmenters
 
-Downstream services validate this JWT with the public RSA key, pin RS256, and require exact issuer and audience matches. Only Auth-O-Tron holds the private signing key.
+The JWT header carries a required signing-key identifier (`kid`). Downstream services select the matching key from an overlapping public RSA keyset, pin RS256, and require exact issuer and audience matches. Only Auth-O-Tron holds the active private signing key.
 
 ## Consumer contract notes
 

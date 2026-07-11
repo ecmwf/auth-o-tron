@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use moka::future::Cache;
 use reqwest::Client;
 use reqwest::header::{self, HeaderValue};
@@ -48,32 +48,106 @@ struct Claims {
     exp: usize,
 }
 
+/// A public RSA key and its unique JWT key identifier.
+#[derive(Clone, Copy, Debug)]
+pub struct JwtPublicKey<'a> {
+    kid: &'a str,
+    public_key_pem: &'a [u8],
+}
+
+impl<'a> JwtPublicKey<'a> {
+    /// Associate an RSA public PEM with the `kid` used in JWT headers.
+    pub const fn new(kid: &'a str, public_key_pem: &'a [u8]) -> Self {
+        Self {
+            kid,
+            public_key_pem,
+        }
+    }
+}
+
 /// Parsed RS256 verifier with an exact issuer and audience contract.
 #[derive(Clone)]
 pub struct JwtVerifier {
-    decoding_key: DecodingKey,
+    decoding_keys: HashMap<String, DecodingKey>,
     issuer: String,
     audience: String,
 }
 
 impl JwtVerifier {
-    /// Parse an RSA public PEM key and configure exact claim validation.
-    pub fn new(public_key_pem: &[u8], issuer: &str, audience: &str) -> Result<Self, AuthError> {
-        let decoding_key = DecodingKey::from_rsa_pem(public_key_pem).map_err(|error| {
-            AuthError::InvalidPublicKey {
-                message: error.to_string(),
+    /// Parse an overlapping RSA public keyset and configure exact claim validation.
+    ///
+    /// Key identifiers must be non-empty and unique. Keep old and new keys in this
+    /// set during a staged signing-key rotation.
+    pub fn new(
+        public_keys: &[JwtPublicKey<'_>],
+        issuer: &str,
+        audience: &str,
+    ) -> Result<Self, AuthError> {
+        if public_keys.is_empty() {
+            return Err(AuthError::InvalidPublicKey {
+                message: "JWT public keyset must not be empty".to_string(),
+            });
+        }
+
+        let mut decoding_keys = HashMap::with_capacity(public_keys.len());
+        for public_key in public_keys {
+            if public_key.kid.trim().is_empty() {
+                return Err(AuthError::InvalidPublicKey {
+                    message: "JWT public key identifier (kid) must not be empty".to_string(),
+                });
             }
-        })?;
+            let decoding_key =
+                DecodingKey::from_rsa_pem(public_key.public_key_pem).map_err(|error| {
+                    AuthError::InvalidPublicKey {
+                        message: format!(
+                            "invalid RSA public key for kid '{}': {error}",
+                            public_key.kid
+                        ),
+                    }
+                })?;
+            if decoding_keys
+                .insert(public_key.kid.to_string(), decoding_key)
+                .is_some()
+            {
+                return Err(AuthError::InvalidPublicKey {
+                    message: format!(
+                        "ambiguous JWT public keyset: duplicate kid '{}'",
+                        public_key.kid
+                    ),
+                });
+            }
+        }
 
         Ok(Self {
-            decoding_key,
+            decoding_keys,
             issuer: issuer.to_string(),
             audience: audience.to_string(),
         })
     }
 
-    /// Verify an RS256 token and convert its claims into a [`User`].
+    /// Verify an RS256 token by its required `kid` and convert its claims into a [`User`].
     pub fn decode(&self, token: &str) -> Result<User, AuthError> {
+        let header = decode_header(token).map_err(|error| AuthError::InvalidJwt {
+            message: error.to_string(),
+        })?;
+        if header.alg != Algorithm::RS256 {
+            return Err(AuthError::InvalidJwt {
+                message: "JWT algorithm must be RS256".to_string(),
+            });
+        }
+        let kid = header
+            .kid
+            .filter(|kid| !kid.trim().is_empty())
+            .ok_or_else(|| AuthError::InvalidJwt {
+                message: "JWT header must contain a non-empty kid".to_string(),
+            })?;
+        let decoding_key = self
+            .decoding_keys
+            .get(&kid)
+            .ok_or_else(|| AuthError::InvalidJwt {
+                message: format!("unknown JWT kid '{kid}'"),
+            })?;
+
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_issuer(&[&self.issuer]);
         validation.set_audience(&[&self.audience]);
@@ -81,12 +155,11 @@ impl JwtVerifier {
         validation.required_spec_claims.insert("aud".to_string());
         validation.leeway = 5;
 
-        let token_data =
-            decode::<Claims>(token, &self.decoding_key, &validation).map_err(|error| {
-                AuthError::InvalidJwt {
-                    message: error.to_string(),
-                }
-            })?;
+        let token_data = decode::<Claims>(token, decoding_key, &validation).map_err(|error| {
+            AuthError::InvalidJwt {
+                message: error.to_string(),
+            }
+        })?;
         let claims = token_data.claims;
 
         let mut roles_set: HashSet<String> = claims.roles.into_iter().collect();
@@ -116,14 +189,14 @@ impl JwtVerifier {
     }
 }
 
-/// Parse an RSA public PEM and verify a JWT with exact issuer and audience checks.
+/// Parse an RSA public keyset and verify a JWT with exact issuer and audience checks.
 pub fn decode_jwt(
     token: &str,
-    public_key_pem: &[u8],
+    public_keys: &[JwtPublicKey<'_>],
     issuer: &str,
     audience: &str,
 ) -> Result<User, AuthError> {
-    JwtVerifier::new(public_key_pem, issuer, audience)?.decode(token)
+    JwtVerifier::new(public_keys, issuer, audience)?.decode(token)
 }
 
 // ---------------------------------------------------------------------------
@@ -161,17 +234,17 @@ const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(60);
 const DEFAULT_CACHE_CAPACITY: u64 = 10_000;
 
 impl AuthClient {
-    /// Build a client and parse its RSA public key once.
+    /// Build a client and parse its overlapping RSA public keyset once.
     pub fn new(
         url: &str,
-        public_key_pem: &[u8],
+        public_keys: &[JwtPublicKey<'_>],
         issuer: &str,
         audience: &str,
         timeout: Duration,
         cache_ttl: Option<Duration>,
         cache_capacity: Option<u64>,
     ) -> Result<Self, AuthError> {
-        let verifier = JwtVerifier::new(public_key_pem, issuer, audience)?;
+        let verifier = JwtVerifier::new(public_keys, issuer, audience)?;
         let http = Client::builder()
             .timeout(timeout)
             .build()
@@ -224,16 +297,27 @@ impl AuthClient {
                 message: format!("auth service error: {}", e),
             })?;
 
-        if !response.status().is_success() {
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             let www_auth = response
                 .headers()
                 .get(header::WWW_AUTHENTICATE)
-                .and_then(|v| v.to_str().ok())
+                .and_then(|value| value.to_str().ok())
                 .unwrap_or("Bearer")
                 .to_string();
             return Err(AuthError::Unauthorized {
-                message: "authentication failed".to_string(),
+                message: format!("authentication failed with HTTP {status}"),
                 www_authenticate: www_auth,
+            });
+        }
+        if status.is_server_error() {
+            return Err(AuthError::ServiceUnavailable {
+                message: format!("auth service returned HTTP {status}"),
+            });
+        }
+        if !status.is_success() {
+            return Err(AuthError::ServiceUnavailable {
+                message: format!("auth service returned unexpected HTTP {status}"),
             });
         }
 
@@ -277,6 +361,11 @@ mod tests {
     const PRIVATE_KEY: &[u8] =
         include_bytes!("../../authotron/tests/fixtures/test-rsa-private.pem");
     const PUBLIC_KEY: &[u8] = include_bytes!("../../authotron/tests/fixtures/test-rsa-public.pem");
+    const KEY_ID: &str = "key-2026-01";
+    const OTHER_PRIVATE_KEY: &[u8] =
+        include_bytes!("../../authotron/tests/fixtures/test-rsa-private-2.pem");
+    const OTHER_PUBLIC_KEY: &[u8] =
+        include_bytes!("../../authotron/tests/fixtures/test-rsa-public-2.pem");
 
     #[derive(Debug, Serialize)]
     struct TestClaims {
@@ -305,27 +394,37 @@ mod tests {
         }
     }
 
-    fn make_token(claims: &TestClaims) -> String {
+    fn make_token_with_key(claims: &TestClaims, kid: Option<&str>, private_key: &[u8]) -> String {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = kid.map(str::to_string);
         jsonwebtoken::encode(
-            &Header::new(Algorithm::RS256),
+            &header,
             claims,
-            &EncodingKey::from_rsa_pem(PRIVATE_KEY).expect("valid test private key"),
+            &EncodingKey::from_rsa_pem(private_key).expect("valid test private key"),
         )
         .unwrap()
+    }
+
+    fn make_token(claims: &TestClaims) -> String {
+        make_token_with_key(claims, Some(KEY_ID), PRIVATE_KEY)
     }
 
     fn make_test_jwt() -> String {
         make_token(&claims())
     }
 
+    fn public_keys() -> [JwtPublicKey<'static>; 1] {
+        [JwtPublicKey::new(KEY_ID, PUBLIC_KEY)]
+    }
+
     fn decode(token: &str) -> Result<User, AuthError> {
-        decode_jwt(token, PUBLIC_KEY, ISSUER, AUDIENCE)
+        decode_jwt(token, &public_keys(), ISSUER, AUDIENCE)
     }
 
     fn test_client(url: &str) -> AuthClient {
         AuthClient::new(
             url,
-            PUBLIC_KEY,
+            &public_keys(),
             ISSUER,
             AUDIENCE,
             Duration::from_secs(5),
@@ -400,8 +499,10 @@ mod tests {
             exp: usize,
         }
 
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(KEY_ID.to_string());
         let token = jsonwebtoken::encode(
-            &Header::new(Algorithm::RS256),
+            &header,
             &ClaimsWithoutUsername {
                 realm: "testrealm",
                 iss: ISSUER,
@@ -450,21 +551,16 @@ mod tests {
 
     #[test]
     fn rejects_token_signed_by_wrong_rsa_key() {
-        let other_private_key =
-            include_bytes!("../../authotron/tests/fixtures/test-rsa-private-2.pem");
-        let token = jsonwebtoken::encode(
-            &Header::new(Algorithm::RS256),
-            &claims(),
-            &EncodingKey::from_rsa_pem(other_private_key).unwrap(),
-        )
-        .unwrap();
+        let token = make_token_with_key(&claims(), Some(KEY_ID), OTHER_PRIVATE_KEY);
         assert!(matches!(decode(&token), Err(AuthError::InvalidJwt { .. })));
     }
 
     #[test]
     fn rejects_hs256_token_without_fallback() {
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(KEY_ID.to_string());
         let token = jsonwebtoken::encode(
-            &Header::new(Algorithm::HS256),
+            &header,
             &claims(),
             &EncodingKey::from_secret(b"legacy-shared-secret"),
         )
@@ -484,7 +580,49 @@ mod tests {
 
     #[test]
     fn malformed_public_key_is_typed_error() {
-        let result = JwtVerifier::new(b"not a PEM key", ISSUER, AUDIENCE);
+        let result = JwtVerifier::new(
+            &[JwtPublicKey::new(KEY_ID, b"not a PEM key")],
+            ISSUER,
+            AUDIENCE,
+        );
+        assert!(matches!(result, Err(AuthError::InvalidPublicKey { .. })));
+    }
+
+    #[test]
+    fn overlapping_keyset_accepts_tokens_from_both_keys() {
+        let keys = [
+            JwtPublicKey::new(KEY_ID, PUBLIC_KEY),
+            JwtPublicKey::new("key-2026-02", OTHER_PUBLIC_KEY),
+        ];
+        let verifier = JwtVerifier::new(&keys, ISSUER, AUDIENCE).unwrap();
+
+        let old_token = make_token_with_key(&claims(), Some(KEY_ID), PRIVATE_KEY);
+        let new_token = make_token_with_key(&claims(), Some("key-2026-02"), OTHER_PRIVATE_KEY);
+        assert!(verifier.decode(&old_token).is_ok());
+        assert!(verifier.decode(&new_token).is_ok());
+    }
+
+    #[test]
+    fn rejects_missing_or_unknown_kid() {
+        let verifier = JwtVerifier::new(&public_keys(), ISSUER, AUDIENCE).unwrap();
+        let missing = make_token_with_key(&claims(), None, PRIVATE_KEY);
+        let unknown = make_token_with_key(&claims(), Some("retired-key"), PRIVATE_KEY);
+
+        for token in [missing, unknown] {
+            assert!(matches!(
+                verifier.decode(&token),
+                Err(AuthError::InvalidJwt { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_ambiguous_duplicate_kid() {
+        let duplicate_keys = [
+            JwtPublicKey::new(KEY_ID, PUBLIC_KEY),
+            JwtPublicKey::new(KEY_ID, OTHER_PUBLIC_KEY),
+        ];
+        let result = JwtVerifier::new(&duplicate_keys, ISSUER, AUDIENCE);
         assert!(matches!(result, Err(AuthError::InvalidPublicKey { .. })));
     }
 
@@ -547,24 +685,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn propagates_auth_failure() {
-        let mut server = mockito::Server::new_async().await;
-        server
-            .mock("GET", "/authenticate")
-            .with_status(401)
-            .with_header("WWW-Authenticate", r#"Bearer realm="test""#)
-            .create_async()
-            .await;
+    async fn maps_http_statuses_to_typed_errors() {
+        for status in [401, 403] {
+            let mut server = mockito::Server::new_async().await;
+            server
+                .mock("GET", "/authenticate")
+                .with_status(status)
+                .with_header("WWW-Authenticate", r#"Bearer realm="test""#)
+                .create_async()
+                .await;
 
-        let result = test_client(&server.url()).authenticate("Bearer bad").await;
-        assert!(matches!(result, Err(AuthError::Unauthorized { .. })));
+            let result = test_client(&server.url()).authenticate("Bearer bad").await;
+            assert!(matches!(result, Err(AuthError::Unauthorized { .. })));
+        }
+
+        for status in [500, 503] {
+            let mut server = mockito::Server::new_async().await;
+            server
+                .mock("GET", "/authenticate")
+                .with_status(status)
+                .create_async()
+                .await;
+
+            let result = test_client(&server.url()).authenticate("Bearer bad").await;
+            assert!(matches!(result, Err(AuthError::ServiceUnavailable { .. })));
+        }
     }
 
     #[tokio::test]
     async fn reports_unreachable_service() {
         let client = AuthClient::new(
             "http://127.0.0.1:1",
-            PUBLIC_KEY,
+            &public_keys(),
             ISSUER,
             AUDIENCE,
             Duration::from_secs(1),

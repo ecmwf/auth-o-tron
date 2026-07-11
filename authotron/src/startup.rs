@@ -32,6 +32,7 @@ pub async fn build_app(
 ) -> Result<(axum::Router, AppState), Box<dyn std::error::Error>> {
     let jwt_signer = Arc::new(JwtSigner::from_private_pem(
         config.jwt.private_key.as_bytes(),
+        &config.jwt.kid,
     )?);
     let store = create_store(&config.store).await;
     let auth_config = config.auth.clone();

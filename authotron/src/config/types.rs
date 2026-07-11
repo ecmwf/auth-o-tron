@@ -168,8 +168,11 @@ pub struct JWTConfig {
     pub iss: String,
     /// Exact audience claim included in every issued token.
     pub aud: String,
+    /// Identifier placed in the JWT header for safe signing-key rotation.
+    pub kid: String,
     pub exp: i64,
-    /// RSA private key in PEM format. Prefer injecting this from a secret.
+    /// RSA private key in PEM format (2048 bits minimum; 3072 recommended).
+    /// Prefer injecting this from a secret.
     pub private_key: String,
 }
 
@@ -245,6 +248,7 @@ jwt:
   iss: "issuer"
   aud: "audience"
   exp: 3600
+  kid: "key-2026-01"
   private_key: "test-only-key"
 logging:
   level: "info"
@@ -280,6 +284,7 @@ jwt:
   iss: "issuer"
   aud: "audience"
   exp: 3600
+  kid: "key-2026-01"
   private_key: "test-only-key"
 logging:
   level: "info"
@@ -287,7 +292,7 @@ logging:
 services: []
 "#;
 
-        for field in ["iss", "aud", "private_key"] {
+        for field in ["iss", "aud", "kid", "private_key"] {
             let yaml = base
                 .lines()
                 .filter(|line| !line.trim_start().starts_with(&format!("{field}:")))
@@ -312,6 +317,7 @@ jwt:
   iss: "issuer"
   aud: "audience"
   exp: 3600
+  kid: "key-2026-01"
   private_key: "test-only-key"
 logging:
   level: "info"
@@ -340,6 +346,7 @@ jwt:
   iss: "issuer"
   aud: "audience"
   exp: 3600
+  kid: "key-2026-01"
   private_key: "test-only-key"
 logging:
   level: "info"
@@ -370,6 +377,7 @@ jwt:
   iss: "issuer"
   aud: "audience"
   exp: 3600
+  kid: "key-2026-01"
   private_key: "test-only-key"
 logging:
   level: "info"
@@ -398,6 +406,7 @@ jwt:
   iss: "issuer"
   aud: "audience"
   exp: 3600
+  kid: "key-2026-01"
   private_key: "test-only-key"
 logging:
   level: "info"
@@ -430,6 +439,7 @@ jwt:
   iss: "issuer"
   aud: "audience"
   exp: 3600
+  kid: "key-2026-01"
   private_key: "test-only-key"
 logging:
   level: "info"
@@ -460,6 +470,7 @@ jwt:
   iss: "issuer"
   aud: "audience"
   exp: 3600
+  kid: "key-2026-01"
   private_key: "test-only-key"
 logging:
   level: "info"
@@ -488,6 +499,7 @@ jwt:
   iss: "issuer"
   aud: "audience"
   exp: 3600
+  kid: "key-2026-01"
   private_key: "test-only-key"
 logging:
   level: "info"
@@ -520,6 +532,7 @@ jwt:
   iss: "issuer"
   aud: "audience"
   exp: 3600
+  kid: "key-2026-01"
   private_key: "test-only-key"
 logging:
   level: "info"
@@ -585,6 +598,7 @@ jwt:
   iss: "issuer"
   aud: "audience"
   exp: 3600
+  kid: "key-2026-01"
   private_key: "test-only-key"
 logging:
   level: "info"

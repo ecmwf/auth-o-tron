@@ -126,6 +126,7 @@ config:
     iss: my-org
     aud: my-service
     exp: 3600
+    kid: key-2026-01
     private_key: set-via-AOT_JWT__PRIVATE_KEY
   providers:
     - type: plain

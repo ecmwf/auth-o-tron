@@ -28,6 +28,7 @@ jwt:
   iss: "auth-o-tron"
   aud: "local-example"
   exp: 3600
+  kid: "local-2026-01"
   private_key: "set-via-AOT_JWT__PRIVATE_KEY"
 
 logging:
@@ -45,7 +46,7 @@ metrics:
 ## Generate a Test Key and Run the Server
 
 ```bash
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out jwt-private.pem
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out jwt-private.pem
 openssl rsa -pubout -in jwt-private.pem -out jwt-public.pem
 export AOT_JWT__PRIVATE_KEY="$(cat jwt-private.pem)"
 AOT_CONFIG_PATH=config.yaml ./target/release/authotron

@@ -76,7 +76,7 @@ impl User {
 /// Authentication errors shared across the ecosystem.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuthError {
-    /// The token was rejected by the auth provider (HTTP 401).
+    /// The token was rejected by the auth provider (HTTP 401 or 403).
     Unauthorized {
         message: String,
         www_authenticate: String,
@@ -85,7 +85,7 @@ pub enum AuthError {
     InvalidJwt { message: String },
     /// The configured RSA public key could not be parsed.
     InvalidPublicKey { message: String },
-    /// The auth service is unreachable or timed out.
+    /// The auth service is unreachable, timed out, or returned HTTP 5xx.
     ServiceUnavailable { message: String },
 }
 

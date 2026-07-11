@@ -33,6 +33,7 @@ jwt:
   exp: 3600
   iss: authotron-test
   aud: authotron-test
+  kid: nginx-example-2026-01
   # Inject a complete RSA private PEM with AOT_JWT__PRIVATE_KEY.
   private_key: set-via-AOT_JWT__PRIVATE_KEY
 

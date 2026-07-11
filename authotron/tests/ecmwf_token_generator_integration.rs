@@ -45,6 +45,7 @@ jwt:
   exp: 3600
   iss: authotron-test
   aud: authotron-consumer
+  kid: test-key
   private_key: test-key-injected-by-test
 server:
   host: "{TEST_HOST}"

@@ -1,3 +1,5 @@
 /target
 config.yaml
 skaffold.env
+
+authotron/examples/**/jwt-private.pem
