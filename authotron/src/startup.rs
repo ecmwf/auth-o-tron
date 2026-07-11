@@ -11,8 +11,12 @@
 //! Starts the application server and, when enabled, a dedicated metrics/health server
 //! on a separate port.
 
+use std::fmt::{self, Display, Formatter};
+use std::io;
 use std::sync::Arc;
+
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 use tracing::info;
 
 use crate::auth::Auth;
@@ -77,7 +81,105 @@ pub async fn build_app(
     Ok((app, state))
 }
 
-pub async fn run(config: Arc<ConfigV2>) -> Result<(), Box<dyn std::error::Error>> {
+/// Coordinates graceful shutdown across all running HTTP servers.
+#[derive(Clone, Debug)]
+pub struct ShutdownCoordinator {
+    sender: watch::Sender<bool>,
+}
+
+/// A shutdown notification for one server.
+#[derive(Debug)]
+pub struct ShutdownSignal {
+    receiver: watch::Receiver<bool>,
+}
+
+impl ShutdownCoordinator {
+    /// Create a coordinator whose shutdown has not yet been requested.
+    pub fn new() -> Self {
+        let (sender, _) = watch::channel(false);
+        Self { sender }
+    }
+
+    /// Subscribe one server to the shared shutdown notification.
+    pub fn subscribe(&self) -> ShutdownSignal {
+        ShutdownSignal {
+            receiver: self.sender.subscribe(),
+        }
+    }
+
+    /// Notify all current and future subscribers that shutdown was requested.
+    pub fn shutdown(&self) {
+        self.sender.send_replace(true);
+    }
+}
+
+impl Default for ShutdownCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ShutdownSignal {
+    /// Wait until the coordinator requests shutdown.
+    pub async fn wait(mut self) {
+        while !*self.receiver.borrow() {
+            if self.receiver.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShutdownReason {
+    Interrupt,
+    Terminate,
+}
+
+impl Display for ShutdownReason {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Interrupt => formatter.write_str("SIGINT"),
+            Self::Terminate => formatter.write_str("SIGTERM"),
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> io::Result<ShutdownReason> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            result?;
+            Ok(ShutdownReason::Interrupt)
+        }
+        signal = terminate.recv() => signal
+            .map(|_| ShutdownReason::Terminate)
+            .ok_or_else(|| io::Error::other("SIGTERM signal stream closed")),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> io::Result<ShutdownReason> {
+    tokio::signal::ctrl_c().await?;
+    Ok(ShutdownReason::Interrupt)
+}
+
+fn server_shutdown_signals(
+    coordinator: &ShutdownCoordinator,
+    metrics_enabled: bool,
+) -> (ShutdownSignal, Option<ShutdownSignal>) {
+    let app = coordinator.subscribe();
+    let metrics = metrics_enabled.then(|| coordinator.subscribe());
+    (app, metrics)
+}
+
+async fn run_servers(
+    config: Arc<ConfigV2>,
+    shutdown: ShutdownCoordinator,
+) -> Result<(), Box<dyn std::error::Error>> {
     let (app, state) = build_app(config.clone()).await?;
 
     if config.metrics.enabled && config.server.port == config.metrics.port {
@@ -91,9 +193,9 @@ pub async fn run(config: Arc<ConfigV2>) -> Result<(), Box<dyn std::error::Error>
     let host = config.server.host.as_str();
     let app_listener = TcpListener::bind((host, config.server.port))
         .await
-        .map_err(|e| {
+        .map_err(|error| {
             format!(
-                "could not bind application server on {}:{}: {e}",
+                "could not bind application server on {}:{}: {error}",
                 host, config.server.port
             )
         })?;
@@ -106,13 +208,21 @@ pub async fn run(config: Arc<ConfigV2>) -> Result<(), Box<dyn std::error::Error>
         "application server listening"
     );
 
-    if config.metrics.enabled {
+    let (app_shutdown, metrics_shutdown) =
+        server_shutdown_signals(&shutdown, config.metrics.enabled);
+    let app_server = axum::serve(
+        app_listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(app_shutdown.wait());
+
+    if let Some(metrics_shutdown) = metrics_shutdown {
         let metrics_router = routes::create_metrics_router(state);
         let metrics_listener = TcpListener::bind((host, config.metrics.port))
             .await
-            .map_err(|e| {
+            .map_err(|error| {
                 format!(
-                    "could not bind metrics server on {}:{}: {e}",
+                    "could not bind metrics server on {}:{}: {error}",
                     host, config.metrics.port
                 )
             })?;
@@ -125,34 +235,83 @@ pub async fn run(config: Arc<ConfigV2>) -> Result<(), Box<dyn std::error::Error>
             "metrics server listening"
         );
 
-        tokio::try_join!(
-            async {
-                axum::serve(
-                    app_listener,
-                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-                )
-                .await
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-            },
-            async {
-                axum::serve(metrics_listener, metrics_router)
-                    .await
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-            }
-        )?;
+        let metrics_server = axum::serve(metrics_listener, metrics_router)
+            .with_graceful_shutdown(metrics_shutdown.wait());
+        tokio::try_join!(app_server, metrics_server)?;
     } else {
         info!(
             event_name = "startup.metrics.disabled",
             event_domain = "startup",
             "metrics server disabled"
         );
-
-        axum::serve(
-            app_listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await?;
+        app_server.await?;
     }
 
     Ok(())
+}
+
+async fn coordinate_shutdown(
+    coordinator: ShutdownCoordinator,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let reason = wait_for_shutdown_signal().await?;
+    info!(
+        event_name = "startup.shutdown.requested",
+        event_domain = "startup",
+        signal = %reason,
+        "shutdown requested; draining HTTP servers"
+    );
+    coordinator.shutdown();
+    Ok(())
+}
+
+/// Start the application and metrics servers and stop them gracefully on SIGINT or SIGTERM.
+pub async fn run(config: Arc<ConfigV2>) -> Result<(), Box<dyn std::error::Error>> {
+    let coordinator = ShutdownCoordinator::new();
+    tokio::try_join!(
+        run_servers(config, coordinator.clone()),
+        coordinate_shutdown(coordinator),
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::time::timeout;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn coordinator_notifies_all_servers_and_late_subscribers() {
+        let coordinator = ShutdownCoordinator::new();
+        let (app_shutdown, metrics_shutdown) = server_shutdown_signals(&coordinator, true);
+        let app = tokio::spawn(app_shutdown.wait());
+        let metrics = tokio::spawn(metrics_shutdown.expect("metrics signal").wait());
+
+        tokio::task::yield_now().await;
+        assert!(!app.is_finished());
+        assert!(!metrics.is_finished());
+
+        coordinator.shutdown();
+        timeout(Duration::from_secs(1), app)
+            .await
+            .expect("application server received shutdown")
+            .expect("application shutdown task completed");
+        timeout(Duration::from_secs(1), metrics)
+            .await
+            .expect("metrics server received shutdown")
+            .expect("metrics shutdown task completed");
+        timeout(Duration::from_secs(1), coordinator.subscribe().wait())
+            .await
+            .expect("late subscriber observed prior shutdown");
+    }
+
+    #[test]
+    fn metrics_disabled_does_not_create_a_metrics_signal() {
+        let coordinator = ShutdownCoordinator::new();
+        let (_, metrics_shutdown) = server_shutdown_signals(&coordinator, false);
+
+        assert!(metrics_shutdown.is_none());
+    }
 }
