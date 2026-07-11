@@ -57,7 +57,7 @@ tracing-subscriber = { version = "~0.3", features = ["env-filter", "json"] }
 async-trait = "~0.1"
 chrono = "~0.4"
 futures = "~0.3"
-reqwest = { version = "~0.13", features = ["form", "json"] }
+reqwest = { version = "~0.13", features = ["form", "json", "query"] }
 
 [dev-dependencies]
 authotron-client = { path = "../authotron-client", version = "0.2.0" }

@@ -6,27 +6,18 @@
 // granted to it by virtue of its status as an intergovernmental organisation nor
 // does it submit to any jurisdiction.
 
-use std::collections::HashMap;
-use std::sync::LazyLock;
-
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::time::Duration;
+use std::collections::HashMap;
 use tracing::{debug, info};
 
-use crate::utils::log_throttle::should_emit;
+use crate::utils::cache::log_cache_hit;
+use crate::utils::http_client::PROVIDER_HTTP_CLIENT;
 use crate::{models::user::User, providers::Provider};
 use cached::Return;
 #[allow(unused_imports)]
 use cached::proc_macro::cached;
-use reqwest;
-const CACHE_HIT_LOG_WINDOW: Duration = Duration::from_secs(30);
-
-/// Shared client for who-am-i calls. Reusing one client (and its connection
-/// pool) avoids a fresh TCP+TLS handshake on every cache-miss, which under load
-/// churned connections and amplified pressure on the upstream ECMWF API.
-static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
 /// The config needed for the ECMWF API provider (who-am-i endpoint).
 #[derive(Deserialize, Serialize, Debug, JsonSchema, Clone)]
@@ -73,22 +64,23 @@ impl Provider for EcmwfApiProvider {
             self.config.realm.clone(),
         )
         .await?;
-        if cached_user.was_cached
-            && let Some(suppressed_count) =
-                should_emit("providers.ecmwf_api.cache.hit", CACHE_HIT_LOG_WINDOW)
-        {
-            debug!(
-                event_name = "providers.ecmwf_api.cache.hit",
-                event_domain = "providers",
-                provider_name = self.config.name.as_str(),
-                realm = self.config.realm.as_str(),
-                cache_result = "hit",
-                cache_ttl_seconds = 60,
-                cache_key_type = "token",
-                suppressed_count,
-                "provider authentication result served from cache"
-            );
-        }
+        log_cache_hit(
+            cached_user.was_cached,
+            "providers.ecmwf_api.cache.hit",
+            |suppressed_count| {
+                debug!(
+                    event_name = "providers.ecmwf_api.cache.hit",
+                    event_domain = "providers",
+                    provider_name = self.config.name.as_str(),
+                    realm = self.config.realm.as_str(),
+                    cache_result = "hit",
+                    cache_ttl_seconds = 60,
+                    cache_key_type = "token",
+                    suppressed_count,
+                    "provider authentication result served from cache"
+                );
+            },
+        );
         Ok((*cached_user).clone())
     }
 
@@ -98,17 +90,9 @@ impl Provider for EcmwfApiProvider {
 }
 
 /// Queries the ECMWF who-am-i endpoint with the provided token, returning a User on success.
-#[cfg_attr(
-    not(test),
-    cached(
-        time = 60,
-        result = true,
-        with_cached_flag = true,
-        sync_writes = "default"
-    )
-)]
+#[cached(time = 60, size = 100_000, result = true, with_cached_flag = true)]
 async fn query(uri: String, token: String, realm: String) -> Result<Return<User>, String> {
-    let url = format!("{}/who-am-i?token={}", uri, token);
+    let url = format!("{}/who-am-i", uri);
 
     debug!(
         event_name = "providers.ecmwf_api.query.started",
@@ -117,7 +101,12 @@ async fn query(uri: String, token: String, realm: String) -> Result<Return<User>
         realm = realm.as_str(),
         "sending ECMWF who-am-i request"
     );
-    let response = match HTTP_CLIENT.get(&url).send().await {
+    let response = match PROVIDER_HTTP_CLIENT
+        .get(&url)
+        .query(&[("token", token.as_str())])
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => return Err(format!("Error sending request: {}", e)),
     };
@@ -157,8 +146,13 @@ async fn query(uri: String, token: String, realm: String) -> Result<Return<User>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cached::Cached;
     use mockito::Server;
+    use std::sync::mpsc;
+    use std::time::Duration;
     use tokio;
+
+    use crate::utils::cache::ATTACKER_KEYED_CACHE_SIZE;
 
     /// Test that a valid token returns a User with the expected UID.
     #[tokio::test]
@@ -218,5 +212,104 @@ mod tests {
         let result = query(uri, token.to_string(), realm.to_string()).await;
         m.assert_async().await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_ecmwf_api_provider_percent_encodes_token_query_parameter() {
+        for token in ["token&x=y", "token#fragment"] {
+            let mut server = Server::new_async().await;
+            let mock = server
+                .mock("GET", "/who-am-i")
+                .match_query(mockito::Matcher::UrlEncoded(
+                    "token".to_string(),
+                    token.to_string(),
+                ))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(r#"{"uid":"encoded-user"}"#)
+                .create_async()
+                .await;
+
+            let result = query(server.url(), token.to_string(), "test".to_string()).await;
+
+            mock.assert_async().await;
+            assert_eq!(result.unwrap().username, "encoded-user");
+        }
+    }
+
+    #[tokio::test]
+    async fn unrelated_cache_misses_do_not_serialize_upstream_requests() {
+        let (slow_started_tx, slow_started_rx) = mpsc::channel();
+        let mut slow_server = Server::new_async().await;
+        let slow_mock = slow_server
+            .mock("GET", "/who-am-i")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "token".to_string(),
+                "slow-token".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_chunked_body(move |writer| {
+                slow_started_tx.send(()).map_err(std::io::Error::other)?;
+                std::thread::sleep(Duration::from_millis(750));
+                writer.write_all(br#"{"uid":"slow-user"}"#)
+            })
+            .create_async()
+            .await;
+
+        let slow_request = tokio::spawn(query(
+            slow_server.url(),
+            "slow-token".to_string(),
+            "test".to_string(),
+        ));
+        tokio::task::spawn_blocking(move || {
+            slow_started_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("slow upstream request should start")
+        })
+        .await
+        .expect("start notification task should finish");
+
+        let mut fast_server = Server::new_async().await;
+        let fast_mock = fast_server
+            .mock("GET", "/who-am-i")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "token".to_string(),
+                "fast-token".to_string(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"uid":"fast-user"}"#)
+            .create_async()
+            .await;
+
+        let fast_result = tokio::time::timeout(
+            Duration::from_millis(250),
+            query(
+                fast_server.url(),
+                "fast-token".to_string(),
+                "test".to_string(),
+            ),
+        )
+        .await
+        .expect("an unrelated cache miss must not wait for the slow request")
+        .expect("fast upstream request should succeed");
+
+        assert_eq!(fast_result.username, "fast-user");
+        fast_mock.assert_async().await;
+        let slow_result = slow_request
+            .await
+            .expect("slow request task should finish")
+            .expect("slow upstream request should succeed");
+        assert_eq!(slow_result.username, "slow-user");
+        slow_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn query_cache_capacity_matches_shared_limit() {
+        assert_eq!(
+            QUERY.lock().await.cache_capacity(),
+            Some(ATTACKER_KEYED_CACHE_SIZE)
+        );
     }
 }

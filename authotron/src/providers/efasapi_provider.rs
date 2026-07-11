@@ -10,16 +10,14 @@ use std::collections::HashMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 use tracing::{debug, info};
 
-use crate::utils::log_throttle::should_emit;
+use crate::utils::cache::log_cache_hit;
+use crate::utils::http_client::PROVIDER_HTTP_CLIENT;
 use crate::{models::user::User, providers::Provider};
 use cached::Return;
 #[allow(unused_imports)]
 use cached::proc_macro::cached;
-use reqwest;
-const CACHE_HIT_LOG_WINDOW: Duration = Duration::from_secs(30);
 
 #[derive(Deserialize, Serialize, Debug, JsonSchema, Clone)]
 pub struct EFASApiProviderConfig {
@@ -74,22 +72,23 @@ impl Provider for EfasApiProvider {
             self.config.realm.clone(),
         )
         .await?;
-        if cached_user.was_cached
-            && let Some(suppressed_count) =
-                should_emit("providers.efas_api.cache.hit", CACHE_HIT_LOG_WINDOW)
-        {
-            debug!(
-                event_name = "providers.efas_api.cache.hit",
-                event_domain = "providers",
-                provider_name = self.config.name.as_str(),
-                realm = self.config.realm.as_str(),
-                cache_result = "hit",
-                cache_ttl_seconds = 60,
-                cache_key_type = "token",
-                suppressed_count,
-                "provider authentication result served from cache"
-            );
-        }
+        log_cache_hit(
+            cached_user.was_cached,
+            "providers.efas_api.cache.hit",
+            |suppressed_count| {
+                debug!(
+                    event_name = "providers.efas_api.cache.hit",
+                    event_domain = "providers",
+                    provider_name = self.config.name.as_str(),
+                    realm = self.config.realm.as_str(),
+                    cache_result = "hit",
+                    cache_ttl_seconds = 60,
+                    cache_key_type = "token",
+                    suppressed_count,
+                    "provider authentication result served from cache"
+                );
+            },
+        );
         Ok((*cached_user).clone())
     }
 
@@ -99,18 +98,9 @@ impl Provider for EfasApiProvider {
 }
 
 /// Queries the EFAS auth url
-#[cfg_attr(
-    not(test),
-    cached(
-        time = 60,
-        result = true,
-        with_cached_flag = true,
-        sync_writes = "default"
-    )
-)]
+#[cached(time = 60, size = 100_000, result = true, with_cached_flag = true)]
 async fn query(uri: String, token: String, realm: String) -> Result<Return<User>, String> {
-    let client = reqwest::Client::new();
-    let url = format!("{}?token={}", uri, token);
+    let url = uri.clone();
 
     debug!(
         event_name = "providers.efas_api.query.started",
@@ -119,7 +109,12 @@ async fn query(uri: String, token: String, realm: String) -> Result<Return<User>
         realm = realm.as_str(),
         "sending EFAS user-details request"
     );
-    let response = match client.get(&url).send().await {
+    let response = match PROVIDER_HTTP_CLIENT
+        .get(&url)
+        .query(&[("token", token.as_str())])
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => return Err(format!("Error sending request: {}", e)),
     };
@@ -156,8 +151,11 @@ async fn query(uri: String, token: String, realm: String) -> Result<Return<User>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cached::Cached;
     use mockito::Server;
     use tokio;
+
+    use crate::utils::cache::ATTACKER_KEYED_CACHE_SIZE;
     use tracing_test::traced_test;
 
     #[test]
@@ -237,5 +235,36 @@ mod tests {
         let result = query(uri, token.to_string(), realm.to_string()).await;
         m.assert_async().await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_efas_api_provider_percent_encodes_token_query_parameter() {
+        for token in ["token&x=y", "token#fragment"] {
+            let mut server = Server::new_async().await;
+            let mock = server
+                .mock("GET", "/")
+                .match_query(mockito::Matcher::UrlEncoded(
+                    "token".to_string(),
+                    token.to_string(),
+                ))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(r#"{"username":"encoded-user"}"#)
+                .create_async()
+                .await;
+
+            let result = query(server.url(), token.to_string(), "test".to_string()).await;
+
+            mock.assert_async().await;
+            assert_eq!(result.unwrap().username, "encoded-user");
+        }
+    }
+
+    #[tokio::test]
+    async fn query_cache_capacity_matches_shared_limit() {
+        assert_eq!(
+            QUERY.lock().await.cache_capacity(),
+            Some(ATTACKER_KEYED_CACHE_SIZE)
+        );
     }
 }
