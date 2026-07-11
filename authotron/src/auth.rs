@@ -13,7 +13,6 @@ use crate::config::AuthConfig;
 use crate::metrics::{Metrics, MetricsRecorder};
 use crate::models::user::User;
 use crate::providers::{Provider, ProviderConfig, create_auth_provider};
-use crate::store::Store;
 use crate::utils::log_throttle::should_emit;
 use futures::future::{FutureExt, join_all, select_ok};
 use futures::lock::Mutex;
@@ -26,13 +25,11 @@ use tracing::{debug, info, warn};
 
 const AUTH_LOG_SUPPRESSION_WINDOW: Duration = Duration::from_secs(30);
 
-/// Holds all authentication providers, augmenters, and a reference to the store.
+/// Holds all authentication providers and augmenters.
 pub struct Auth {
     pub providers: Vec<Box<dyn Provider>>,
     pub augmenters: Vec<Box<dyn Augmenter>>,
     config: AuthConfig,
-    #[allow(dead_code)]
-    token_store: Arc<dyn Store>,
 }
 
 /// Helper function to map header scheme values to the expected provider type.
@@ -52,7 +49,6 @@ impl Auth {
     pub fn new(
         provider_config: &[ProviderConfig],
         augmenter_config: &[AugmenterConfig],
-        token_store: Arc<dyn Store>,
         config: AuthConfig,
     ) -> Self {
         info!(
@@ -61,24 +57,8 @@ impl Auth {
             "creating auth providers"
         );
         // Convert configs into providers
-        let mut providers: Vec<Box<dyn Provider>> =
+        let providers: Vec<Box<dyn Provider>> =
             provider_config.iter().map(create_auth_provider).collect();
-
-        // Only add token store as provider if it's enabled
-        if token_store.is_enabled() {
-            info!(
-                event_name = "auth.initialization.providers.token_store_enabled",
-                event_domain = "auth",
-                "token store is enabled; adding bearer provider"
-            );
-            providers.push(Box::new(token_store.clone()) as Box<dyn Provider>);
-        } else {
-            info!(
-                event_name = "auth.initialization.providers.token_store_disabled",
-                event_domain = "auth",
-                "token store is disabled; skipping bearer provider"
-            );
-        }
 
         info!(
             event_name = "auth.initialization.augmenters.started",
@@ -90,7 +70,6 @@ impl Auth {
         Auth {
             providers,
             augmenters,
-            token_store,
             config,
         }
     }
@@ -647,7 +626,6 @@ mod tests {
             config: AuthConfig {
                 timeout_in_ms: 1000,
             },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -708,7 +686,6 @@ mod tests {
             config: AuthConfig {
                 timeout_in_ms: 1000,
             },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -757,7 +734,6 @@ mod tests {
             config: AuthConfig {
                 timeout_in_ms: 1000,
             },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -782,7 +758,6 @@ mod tests {
             config: AuthConfig {
                 timeout_in_ms: 1000,
             },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -816,7 +791,6 @@ mod tests {
             config: AuthConfig {
                 timeout_in_ms: 1000,
             },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -879,7 +853,6 @@ mod tests {
             config: AuthConfig {
                 timeout_in_ms: 1000,
             },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = crate::metrics::Metrics::new();
@@ -940,7 +913,6 @@ mod tests {
             config: AuthConfig {
                 timeout_in_ms: 1000,
             },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -1009,7 +981,6 @@ mod tests {
             providers: vec![],
             augmenters: vec![Box::new(aug1), Box::new(aug2), Box::new(aug3)],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -1036,7 +1007,6 @@ mod tests {
             providers: vec![],
             augmenters: vec![Box::new(aug)],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
         let metrics = Metrics::new();
         let user = User {
@@ -1060,7 +1030,6 @@ mod tests {
             providers: vec![],
             augmenters: vec![Box::new(aug)],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
         let metrics = Metrics::new();
         let user = User {
@@ -1143,7 +1112,6 @@ mod tests {
                 Box::new(PlainAdvancedAugmenter::new(&advanced_config)),
             ],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -1193,33 +1161,6 @@ mod tests {
         }
     }
 
-    /// A dummy Store implementation for testing.
-    struct DummyStore;
-
-    #[async_trait]
-    impl crate::store::Store for DummyStore {
-        async fn add_token(
-            &self,
-            _token: &crate::models::token::Token,
-            _user: &User,
-            _expiry: i64,
-        ) -> Result<(), String> {
-            Ok(())
-        }
-        async fn get_tokens(
-            &self,
-            _user: &User,
-        ) -> Result<Vec<crate::models::token::Token>, String> {
-            Ok(vec![])
-        }
-        async fn get_user(&self, _token: &str) -> Result<Option<User>, String> {
-            Ok(None)
-        }
-        async fn delete_token(&self, _token: &str) -> Result<(), String> {
-            Ok(())
-        }
-    }
-
     #[tokio::test]
     async fn test_header_to_provider_type() {
         // Test normalization of header schemes.
@@ -1248,7 +1189,6 @@ mod tests {
             providers: vec![provider1, provider2],
             augmenters: vec![],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
 
         let challenge = auth.generate_challenge_header();
@@ -1271,7 +1211,6 @@ mod tests {
             providers: vec![provider],
             augmenters: vec![],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -1310,7 +1249,6 @@ mod tests {
             providers: vec![basic_provider, bearer_provider],
             augmenters: vec![],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = crate::metrics::Metrics::new();
@@ -1349,7 +1287,6 @@ mod tests {
             providers: vec![local_provider, other_provider],
             augmenters: vec![],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = crate::metrics::Metrics::new();
@@ -1394,7 +1331,6 @@ mod tests {
             providers: vec![provider],
             augmenters: vec![],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
         let metrics = crate::metrics::Metrics::new();
         // Duplicate header part (should only check once, and succeed)
@@ -1427,7 +1363,6 @@ mod tests {
             providers: vec![provider],
             augmenters: vec![],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
         let metrics = crate::metrics::Metrics::new();
         // 4 unique header parts (should be rejected)

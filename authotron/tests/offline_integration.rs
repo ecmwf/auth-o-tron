@@ -52,9 +52,6 @@ augmenters:
             - eve
             - adam
         
-store:
-  enabled: false
-services: []
 jwt:
   exp: 3600
   iss: authotron-test

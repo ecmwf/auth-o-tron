@@ -19,7 +19,6 @@
 - [Server & Metrics](configuration/server.md)
 - [Providers](configuration/providers.md)
 - [Augmenters](configuration/augmenters.md)
-- [Token Store](configuration/store.md)
 - [JWT Signing](configuration/jwt.md)
 - [Logging](configuration/logging.md)
 

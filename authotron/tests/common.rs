@@ -6,7 +6,6 @@ use authotron::config::{AuthConfig, ConfigV2};
 use authotron::metrics::Metrics;
 use authotron::routes::create_app_router;
 use authotron::state::AppState;
-use authotron::store::create_store;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
@@ -33,11 +32,9 @@ pub async fn build_app(config: ConfigV2) -> (Router, Arc<ConfigV2>) {
 #[allow(dead_code)]
 pub async fn build_app_with_state(config: ConfigV2) -> (Router, Arc<ConfigV2>, AppState) {
     let config = Arc::new(config);
-    let store = create_store(&config.store).await;
     let auth = Arc::new(Auth::new(
         &config.providers,
         &config.augmenters,
-        store.clone(),
         AuthConfig {
             timeout_in_ms: config.auth.timeout_in_ms,
         },
@@ -47,7 +44,6 @@ pub async fn build_app_with_state(config: ConfigV2) -> (Router, Arc<ConfigV2>, A
     let state = AppState {
         config: config.clone(),
         auth,
-        store,
         metrics,
     };
 

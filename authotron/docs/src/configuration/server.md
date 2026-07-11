@@ -37,11 +37,10 @@ metrics:
 ```mermaid
 graph TB
     subgraph "Application Server (port 8080)"
-        A1["/authenticate"]
-        A2["/token · /tokens"]
-        A3["/providers · /augmenters"]
-        A4["/health"]
-        A5["/ (homepage)"]
+        A1["/authenticate · /whoami"]
+        A2["/providers · /augmenters"]
+        A3["/health"]
+        A4["/ (homepage)"]
     end
 
     subgraph "Metrics Server (port 9090)"
@@ -58,7 +57,6 @@ The application server and metrics server expose different endpoints:
 
 **Application Server (configured `server.port`):**
 - `/authenticate` - Authentication endpoint
-- `/tokens` - Token management
 - `/providers` - Provider information
 - `/augmenters` - Augmenter information
 - `/health` - Health check

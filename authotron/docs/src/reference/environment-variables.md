@@ -30,7 +30,6 @@ For nested sections, add more double underscores: `AOT_<SECTION>__<SUBSECTION>__
 | `AOT_LOGGING__LEVEL` | logging.level | `info` |
 | `AOT_LOGGING__FORMAT` | logging.format | `json` |
 | `AOT_AUTH__TIMEOUT_IN_MS` | auth.timeout_in_ms | `5000` |
-| `AOT_STORE__ENABLED` | store.enabled | `false` |
 
 ## Precedence
 
