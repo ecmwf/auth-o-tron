@@ -9,24 +9,17 @@
 use cached::Return;
 #[allow(unused_imports)]
 use cached::proc_macro::cached;
-use jsonwebtoken::jwk::JwkSet;
+use jsonwebtoken::jwk::{JwkSet, KeyAlgorithm};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::LazyLock;
-use std::time::Duration;
 use tracing::{debug, info};
 
-use crate::utils::log_throttle::should_emit;
+use crate::utils::cache::log_cache_hit;
+use crate::utils::http_client::PROVIDER_HTTP_CLIENT;
 use crate::{models::user::User, providers::Provider, utils::value::value_to_string};
-const CACHE_HIT_LOG_WINDOW: Duration = Duration::from_secs(30);
-
-/// Shared client for JWKS fetches. Reusing one client (and its connection pool)
-/// avoids a fresh TCP+TLS handshake on every cache-miss, which under load churned
-/// connections and amplified pressure on the upstream identity provider.
-static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
 /// JWT config structure for external usage
 #[derive(Deserialize, Serialize, JsonSchema, Debug, Clone)]
@@ -47,6 +40,7 @@ pub struct JWTProvider {
 struct Claims {
     sub: String,
     resource_access: Option<HashMap<String, RolesContainer>>,
+    #[serde(default)]
     scope: String,
     realm_access: Option<RolesContainer>,
     entitlements: Option<Vec<String>>,
@@ -98,38 +92,37 @@ impl Provider for JWTProvider {
             "attempting JWT decode"
         );
 
-        // Fetch the JWK set (cached)
-        let certs = get_certs(self.config.cert_uri.to_string()).await?;
-        if certs.was_cached
-            && let Some(suppressed_count) =
-                should_emit("providers.jwt.jwks.cache.hit", CACHE_HIT_LOG_WINDOW)
-        {
-            debug!(
-                event_name = "providers.jwt.jwks.cache.hit",
-                event_domain = "providers",
-                provider_name = self.config.name.as_str(),
-                realm = self.config.realm.as_str(),
-                cache_result = "hit",
-                cache_ttl_seconds = 600,
-                cache_key_type = "jwks_uri",
-                suppressed_count,
-                "JWT JWK set served from cache"
-            );
-        }
         let header =
             decode_header(token).map_err(|e| format!("Failed to decode JWT header: {}", e))?;
 
-        // Match the expected algorithm
-        let alg = match header.alg {
-            Algorithm::RS256 => "RS256",
-            Algorithm::HS512 => "HS512",
-            Algorithm::RS512 => "RS512",
+        // Remote JWKS providers deliberately accept only asymmetric RSA
+        // algorithms. Symmetric keys in a remote JWKS would give every party
+        // that can verify a token the ability to mint one.
+        let (algorithm, key_algorithm) = match header.alg {
+            Algorithm::RS256 => (Algorithm::RS256, KeyAlgorithm::RS256),
+            Algorithm::RS512 => (Algorithm::RS512, KeyAlgorithm::RS512),
             _ => return Err(format!("Unsupported JWT algorithm: {:?}", header.alg)),
         };
 
-        // Parse the downloaded JWKS
-        let jwks: JwkSet = serde_json::from_str(&certs)
-            .map_err(|e| format!("Failed to parse certificates: {}", e))?;
+        // Fetch the already-parsed JWK set (cached).
+        let jwks = get_certs(self.config.cert_uri.to_string()).await?;
+        log_cache_hit(
+            jwks.was_cached,
+            "providers.jwt.jwks.cache.hit",
+            |suppressed_count| {
+                debug!(
+                    event_name = "providers.jwt.jwks.cache.hit",
+                    event_domain = "providers",
+                    provider_name = self.config.name.as_str(),
+                    realm = self.config.realm.as_str(),
+                    cache_result = "hit",
+                    cache_ttl_seconds = 600,
+                    cache_key_type = "jwks_uri",
+                    suppressed_count,
+                    "JWT JWK set served from cache"
+                );
+            },
+        );
 
         let kid = header.kid.ok_or("Missing 'kid' in JWT header")?;
         debug!(
@@ -142,11 +135,17 @@ impl Provider for JWTProvider {
             "Failed to find certificate with matching kid {}",
             kid
         ))?;
+        if jwk.common.key_algorithm != Some(key_algorithm) {
+            return Err(format!(
+                "JWK algorithm for kid {} must explicitly match {:?}",
+                kid, algorithm
+            ));
+        }
 
         let decoding_key = DecodingKey::from_jwk(jwk)
             .map_err(|_| "Failed to create decoding key from JWK".to_string())?;
 
-        let mut validation = Validation::new(alg.parse::<Algorithm>().unwrap());
+        let mut validation = Validation::new(algorithm);
         validation.validate_aud = false; // Possibly enable if you want to check "aud"
 
         let decoded = decode::<Claims>(token, &decoding_key, &validation)
@@ -156,7 +155,7 @@ impl Provider for JWTProvider {
             event_domain = "providers",
             provider_name = self.config.name.as_str(),
             realm = self.config.realm.as_str(),
-            alg,
+            alg = ?algorithm,
             "JWT decoded successfully"
         );
 
@@ -216,34 +215,26 @@ impl Provider for JWTProvider {
 }
 
 /// Retrieves the certificates (JWKS) from a remote URI. Cached for 600s to avoid repeated fetches.
-#[cfg_attr(
-    not(test),
-    cached(
-        time = 600,
-        result = true,
-        with_cached_flag = true,
-        sync_writes = "default"
-    )
-)]
-pub async fn get_certs(cert_uri: String) -> Result<Return<String>, String> {
+#[cached(time = 600, size = 100_000, result = true, with_cached_flag = true)]
+pub async fn get_certs(cert_uri: String) -> Result<Return<JwkSet>, String> {
     debug!(
         event_name = "providers.jwt.jwks.fetch.started",
         event_domain = "providers",
         cert_uri = cert_uri.as_str(),
         "fetching JWK set from certificate URI"
     );
-    let res = HTTP_CLIENT
+    let res = PROVIDER_HTTP_CLIENT
         .get(&cert_uri)
         .send()
         .await
         .map_err(|e| format!("Failed to download certificates: {}", e))?;
 
     if res.status().is_success() {
-        let json: Value = res
-            .json()
+        let jwks = res
+            .json::<JwkSet>()
             .await
             .map_err(|e| format!("Failed to parse certificate JSON: {}", e))?;
-        Ok(Return::new(json.to_string()))
+        Ok(Return::new(jwks))
     } else {
         Err(format!("Failed to download certificates: {}", res.status()))
     }
@@ -252,9 +243,12 @@ pub async fn get_certs(cert_uri: String) -> Result<Return<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cached::Cached;
     use mockito::Server;
     use serde_json::json;
     use tokio;
+
+    use crate::utils::cache::ATTACKER_KEYED_CACHE_SIZE;
 
     /// Test that `get_certs` returns the expected JSON when the endpoint is successful.
     #[tokio::test]
@@ -274,12 +268,8 @@ mod tests {
         m.assert_async().await;
         assert!(result.is_ok());
 
-        // Parse both the expected and actual JSON strings.
-        let expected: serde_json::Value =
-            serde_json::from_str(jwks).expect("Invalid expected JSON");
-        let actual: serde_json::Value =
-            serde_json::from_str(&result.unwrap().to_string()).expect("Invalid actual JSON");
-        assert_eq!(actual, expected);
+        let actual = result.expect("JWKS should parse");
+        assert!(actual.keys.is_empty());
     }
 
     /// Test that `get_certs` returns an error when the endpoint returns a failure status.
@@ -301,60 +291,34 @@ mod tests {
     /// Test that JWTProvider::authenticate fails with an invalid token.
     #[tokio::test]
     async fn test_jwt_provider_invalid_token() {
-        // Simulate a JWKS endpoint that returns an empty keys array.
-        let jwks = r#"{"keys": []}"#;
-        let mut server = Server::new_async().await;
-        let m = server
-            .mock("GET", "/")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(jwks)
-            .create_async()
-            .await;
-        let url = server.url();
         let config = JWTAuthConfig {
-            cert_uri: url.to_string(),
+            cert_uri: "http://127.0.0.1:9/must-not-be-fetched".to_string(),
             realm: "test".to_string(),
             name: "TestJWT".to_string(),
             iam_realm: "test".to_string(),
         };
         let provider = JWTProvider::new(&config);
+
         let result = provider.authenticate("invalid.token").await;
-        m.assert_async().await;
+
         assert!(result.is_err());
     }
 
-    /// Test that additional, unspecified claims are preserved as user attributes.
+    /// Symmetric JWT algorithms are rejected before any remote JWKS is used.
     #[tokio::test]
-    async fn test_jwt_provider_preserves_extra_claims() {
-        let jwks =
-            r#"{"keys": [{"kty": "oct", "k": "c2VjcmV0", "alg": "HS512", "kid": "testkid"}]}"#;
-        let mut server = Server::new_async().await;
-        let m = server
-            .mock("GET", "/")
-            .with_status(200)
-            .with_header("content-type", "application/json")
-            .with_body(jwks)
-            .create_async()
-            .await;
-
-        let url = server.url();
+    async fn test_jwt_provider_rejects_hs512() {
         let config = JWTAuthConfig {
-            cert_uri: url.to_string(),
+            cert_uri: "http://127.0.0.1:9/must-not-be-fetched".to_string(),
             realm: "test".to_string(),
             name: "TestJWT".to_string(),
             iam_realm: "test".to_string(),
         };
         let provider = JWTProvider::new(&config);
-
         let claims = json!({
             "sub": "user1",
             "scope": "read write",
             "exp": 4102444800usize,
-            "custom": "abc",
-            "nested": {"flag": true}
         });
-
         let mut header = jsonwebtoken::Header::new(Algorithm::HS512);
         header.kid = Some("testkid".to_string());
         let token = jsonwebtoken::encode(
@@ -364,17 +328,103 @@ mod tests {
         )
         .expect("Failed to create token");
 
-        let user = provider
-            .authenticate(&token)
-            .await
-            .expect("Authentication should succeed");
-        m.assert_async().await;
+        let error = provider.authenticate(&token).await.unwrap_err();
 
-        assert_eq!(user.username, "user1");
-        assert_eq!(user.attributes.get("custom"), Some(&"abc".to_string()));
+        assert!(error.contains("Unsupported JWT algorithm: HS512"));
+    }
+
+    async fn authenticate_rsa_token(
+        token_algorithm: Algorithm,
+        jwk_algorithm: Algorithm,
+    ) -> Result<User, String> {
+        const PRIVATE_KEY: &str = include_str!("../../tests/fixtures/rsa-private-key.pem");
+
+        let encoding_key = jsonwebtoken::EncodingKey::from_rsa_pem(PRIVATE_KEY.as_bytes())
+            .expect("test RSA key should parse");
+        let mut jwk = jsonwebtoken::jwk::Jwk::from_encoding_key(&encoding_key, jwk_algorithm)
+            .expect("public JWK should be derived");
+        jwk.common.key_id = Some("rsa-test".to_string());
+
+        let mut server = Server::new_async().await;
+        let jwks_path = format!("/jwks/{token_algorithm:?}/{jwk_algorithm:?}");
+        let mock = server
+            .mock("GET", jwks_path.as_str())
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(json!({"keys": [jwk]}).to_string())
+            .create_async()
+            .await;
+        let provider = JWTProvider::new(&JWTAuthConfig {
+            cert_uri: format!("{}{jwks_path}", server.url()),
+            realm: "test".to_string(),
+            name: "TestJWT".to_string(),
+            iam_realm: "test".to_string(),
+        });
+        let claims = json!({
+            "sub": "user-without-scope",
+            "preferred_username": "alice",
+            "custom": "preserved",
+            "exp": 4102444800usize,
+        });
+        let mut header = jsonwebtoken::Header::new(token_algorithm);
+        header.kid = Some("rsa-test".to_string());
+        let token =
+            jsonwebtoken::encode(&header, &claims, &encoding_key).expect("RSA token should encode");
+
+        let result = provider.authenticate(&token).await;
+        mock.assert_async().await;
+        result
+    }
+
+    fn assert_user_has_empty_scope(user: &User) {
+        assert_eq!(user.username, "alice");
+        assert_eq!(user.scopes.get("TestJWT"), Some(&Vec::<String>::new()));
         assert_eq!(
-            user.attributes.get("nested"),
-            Some(&"{\"flag\":true}".to_string())
+            user.attributes.get("custom"),
+            Some(&"preserved".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rs256_token_without_scope_authenticates_with_empty_scope() {
+        let user = authenticate_rsa_token(Algorithm::RS256, Algorithm::RS256)
+            .await
+            .expect("RS256 token without scope should authenticate");
+        assert_user_has_empty_scope(&user);
+    }
+
+    #[tokio::test]
+    async fn test_rs512_token_authenticates() {
+        let user = authenticate_rsa_token(Algorithm::RS512, Algorithm::RS512)
+            .await
+            .expect("RS512 token should authenticate");
+        assert_user_has_empty_scope(&user);
+    }
+
+    #[tokio::test]
+    async fn test_jwk_algorithm_must_match_token_algorithm() {
+        let error = authenticate_rsa_token(Algorithm::RS256, Algorithm::RS512)
+            .await
+            .expect_err("mismatched JWK algorithm must be rejected");
+        assert!(error.contains("must explicitly match RS256"));
+    }
+
+    #[test]
+    fn test_claims_default_missing_scope_to_empty() {
+        let claims: Claims = serde_json::from_value(json!({
+            "sub": "user-without-scope",
+            "exp": 4102444800usize,
+        }))
+        .expect("scope should be optional");
+
+        assert!(claims.scope.is_empty());
+    }
+
+    #[tokio::test]
+    async fn jwks_cache_capacity_matches_shared_limit() {
+        assert_eq!(
+            GET_CERTS.lock().await.cache_capacity(),
+            Some(ATTACKER_KEYED_CACHE_SIZE)
         );
     }
 }
