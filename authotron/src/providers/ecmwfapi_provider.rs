@@ -6,27 +6,18 @@
 // granted to it by virtue of its status as an intergovernmental organisation nor
 // does it submit to any jurisdiction.
 
-use std::collections::HashMap;
-use std::sync::LazyLock;
-
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::time::Duration;
+use std::collections::HashMap;
 use tracing::{debug, info};
 
-use crate::utils::log_throttle::should_emit;
+use crate::utils::cache::log_cache_hit;
+use crate::utils::http_client::PROVIDER_HTTP_CLIENT;
 use crate::{models::user::User, providers::Provider};
 use cached::Return;
 #[allow(unused_imports)]
 use cached::proc_macro::cached;
-use reqwest;
-const CACHE_HIT_LOG_WINDOW: Duration = Duration::from_secs(30);
-
-/// Shared client for who-am-i calls. Reusing one client (and its connection
-/// pool) avoids a fresh TCP+TLS handshake on every cache-miss, which under load
-/// churned connections and amplified pressure on the upstream ECMWF API.
-static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
 /// The config needed for the ECMWF API provider (who-am-i endpoint).
 #[derive(Deserialize, Serialize, Debug, JsonSchema, Clone)]
@@ -73,22 +64,23 @@ impl Provider for EcmwfApiProvider {
             self.config.realm.clone(),
         )
         .await?;
-        if cached_user.was_cached
-            && let Some(suppressed_count) =
-                should_emit("providers.ecmwf_api.cache.hit", CACHE_HIT_LOG_WINDOW)
-        {
-            debug!(
-                event_name = "providers.ecmwf_api.cache.hit",
-                event_domain = "providers",
-                provider_name = self.config.name.as_str(),
-                realm = self.config.realm.as_str(),
-                cache_result = "hit",
-                cache_ttl_seconds = 60,
-                cache_key_type = "token",
-                suppressed_count,
-                "provider authentication result served from cache"
-            );
-        }
+        log_cache_hit(
+            cached_user.was_cached,
+            "providers.ecmwf_api.cache.hit",
+            |suppressed_count| {
+                debug!(
+                    event_name = "providers.ecmwf_api.cache.hit",
+                    event_domain = "providers",
+                    provider_name = self.config.name.as_str(),
+                    realm = self.config.realm.as_str(),
+                    cache_result = "hit",
+                    cache_ttl_seconds = 60,
+                    cache_key_type = "token",
+                    suppressed_count,
+                    "provider authentication result served from cache"
+                );
+            },
+        );
         Ok((*cached_user).clone())
     }
 
@@ -102,13 +94,14 @@ impl Provider for EcmwfApiProvider {
     not(test),
     cached(
         time = 60,
+        size = 100_000,
         result = true,
         with_cached_flag = true,
         sync_writes = "default"
     )
 )]
 async fn query(uri: String, token: String, realm: String) -> Result<Return<User>, String> {
-    let url = format!("{}/who-am-i?token={}", uri, token);
+    let url = format!("{}/who-am-i", uri);
 
     debug!(
         event_name = "providers.ecmwf_api.query.started",
@@ -117,7 +110,12 @@ async fn query(uri: String, token: String, realm: String) -> Result<Return<User>
         realm = realm.as_str(),
         "sending ECMWF who-am-i request"
     );
-    let response = match HTTP_CLIENT.get(&url).send().await {
+    let response = match PROVIDER_HTTP_CLIENT
+        .get(&url)
+        .query(&[("token", token.as_str())])
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => return Err(format!("Error sending request: {}", e)),
     };
@@ -219,5 +217,28 @@ mod tests {
         let result = query(uri, token.to_string(), realm.to_string()).await;
         m.assert_async().await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_ecmwf_api_provider_percent_encodes_token_query_parameter() {
+        for token in ["token&x=y", "token#fragment"] {
+            let mut server = Server::new_async().await;
+            let mock = server
+                .mock("GET", "/who-am-i")
+                .match_query(mockito::Matcher::UrlEncoded(
+                    "token".to_string(),
+                    token.to_string(),
+                ))
+                .with_status(200)
+                .with_header("content-type", "application/json")
+                .with_body(r#"{"uid":"encoded-user"}"#)
+                .create_async()
+                .await;
+
+            let result = query(server.url(), token.to_string(), "test".to_string()).await;
+
+            mock.assert_async().await;
+            assert_eq!(result.unwrap().username, "encoded-user");
+        }
     }
 }

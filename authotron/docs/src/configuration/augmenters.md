@@ -100,19 +100,17 @@ The LDAP augmenter queries a Lightweight Directory Access Protocol server to ext
 |-------|------|-------------|
 | uri | string | LDAP server URI (e.g., ldap://ldap.example.com:389) |
 | search_base | string | Base DN for searches (e.g., ou=users,dc=example,dc=com) |
-| filter | string | Single LDAP filter template (optional, uses {username} placeholder) |
-| filters | array | Multiple LDAP filter templates (optional, alternative to single filter) |
+| filter | string | Optional DN fragment used to keep matching `memberOf` values and return their CN |
+| filters | array | Optional DN fragments used to derive hierarchical role paths |
 | bind_dn | string | DN to bind with for searching (service account) |
 | ldap_password | string | Password for the bind DN |
 
 **Filter vs Filters:**
 
-- Use `filter` for a single search that returns group CNs directly.
-- Use `filters` for multiple searches that return hierarchical paths like `/TeamA/Admin`.
+- Use `filter` to keep matching `memberOf` DNs and return their group CNs.
+- Use `filters` to match one or more ancestor DN fragments and return hierarchical paths such as `/TeamA/Admin`.
 
-When using `filters`, each filter is executed and the results are combined. The filter template can use `{username}` as a placeholder.
-
-Results are cached for 120 seconds to reduce LDAP server load.
+LDAP looks up the authenticated username with a `cn` search filter. Usernames are escaped as RFC 4515 filter literals before lookup. Successful results are cached for 120 seconds in a cache capped at 100,000 entries.
 
 **Example with single filter:**
 
@@ -123,7 +121,7 @@ augmenters:
     realm: corporate
     uri: ldap://ldap.company.com:389
     search_base: ou=groups,dc=company,dc=com
-    filter: (member=uid={username},ou=users,dc=company,dc=com)
+    filter: OU=ApplicationRoles,DC=company,DC=com
     bind_dn: cn=service,dc=company,dc=com
     ldap_password: service-password
 ```
@@ -138,8 +136,8 @@ augmenters:
     uri: ldap://ldap.company.com:389
     search_base: ou=teams,dc=company,dc=com
     filters:
-      - (member=uid={username},ou=users,dc=company,dc=com)
-      - (manager=uid={username},ou=users,dc=company,dc=com)
+      - OU=ApplicationRoles,DC=company,DC=com
+      - OU=Operations,DC=company,DC=com
     bind_dn: cn=service,dc=company,dc=com
     ldap_password: service-password
 ```
@@ -155,7 +153,7 @@ augmenters:
     realm: internal
     uri: ldap://ldap.example.com
     search_base: ou=groups,dc=example,dc=com
-    filter: (member=uid={username},ou=users,dc=example,dc=com)
+    filter: OU=Groups,DC=example,DC=com
     bind_dn: cn=reader,dc=example,dc=com
     ldap_password: secret
 ```
