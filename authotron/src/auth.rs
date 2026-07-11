@@ -552,12 +552,13 @@ mod tests {
         // A MetricFamily groups all time series with the same metric name
         let metric_families = metrics.registry.gather();
 
-        // Search through each metric family (e.g., auth_requests_total, auth_duration_seconds)
+        // Search through each metric family (e.g., authotron_auth_requests_total,
+        // authotron_auth_duration_seconds)
         for mf in metric_families {
             // Check if this is the metric we're looking for
             if mf.name() == name {
                 // Each metric family contains multiple time series (one per label combination)
-                // For example, auth_requests_total has separate series for:
+                // For example, authotron_auth_requests_total has separate series for:
                 //   - {result="success", realm="test"}
                 //   - {result="failed", realm="test"}
                 //   - etc.
@@ -640,7 +641,7 @@ mod tests {
         // Verify exact metric values
         let success_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "success"), ("realm", "testrealm")],
         );
         assert_eq!(
@@ -650,7 +651,7 @@ mod tests {
 
         let provider_success = get_counter_value(
             &metrics,
-            "auth_provider_attempts_total",
+            "authotron_auth_provider_attempts_total",
             &[
                 ("provider_name", "TestProvider"),
                 ("provider_type", "Basic"),
@@ -665,7 +666,7 @@ mod tests {
 
         let duration_count = get_histogram_count(
             &metrics,
-            "auth_duration_seconds",
+            "authotron_auth_duration_seconds",
             &[("result", "success"), ("realm", "testrealm")],
         );
         assert_eq!(duration_count, 1, "Should have exactly 1 duration sample");
@@ -700,14 +701,14 @@ mod tests {
         // Verify failure was recorded
         let failed_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "all_failed"), ("realm", "unknown")],
         );
         assert_eq!(failed_count, 1.0, "Should record 1 failed attempt");
 
         let provider_error = get_counter_value(
             &metrics,
-            "auth_provider_attempts_total",
+            "authotron_auth_provider_attempts_total",
             &[
                 ("provider_name", "TestProvider"),
                 ("provider_type", "Basic"),
@@ -720,7 +721,7 @@ mod tests {
         // Verify no success was recorded
         let success_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "success"), ("realm", "testrealm")],
         );
         assert_eq!(success_count, 0.0, "Should have 0 successful attempts");
@@ -744,7 +745,7 @@ mod tests {
 
         let no_header_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "no_auth_header"), ("realm", "unknown")],
         );
         assert_eq!(no_header_count, 1.0, "Should record no_auth_header");
@@ -770,7 +771,7 @@ mod tests {
 
         let invalid_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "invalid_header"), ("realm", "unknown")],
         );
         assert_eq!(invalid_count, 1.0, "Should record invalid_header");
@@ -809,21 +810,21 @@ mod tests {
 
         let success_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "success"), ("realm", "test")],
         );
         assert_eq!(success_count, 3.0, "Should have exactly 3 successes");
 
         let failed_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "all_failed"), ("realm", "unknown")],
         );
         assert_eq!(failed_count, 2.0, "Should have exactly 2 failures");
 
         let total_duration_samples = get_histogram_count(
             &metrics,
-            "auth_duration_seconds",
+            "authotron_auth_duration_seconds",
             &[("result", "success"), ("realm", "test")],
         );
         assert_eq!(
@@ -865,7 +866,7 @@ mod tests {
 
         let augmenter_count = get_counter_value(
             &metrics,
-            "augmenter_attempts_total",
+            "authotron_augmenter_attempts_total",
             &[
                 ("augmenter_name", "test-aug"),
                 ("augmenter_type", "plain"),
@@ -878,7 +879,7 @@ mod tests {
 
         let aug_duration_samples = get_histogram_count(
             &metrics,
-            "augmenter_duration_seconds",
+            "authotron_augmenter_duration_seconds",
             &[("augmenter_type", "plain"), ("realm", "r1")],
         );
         assert_eq!(aug_duration_samples, 1, "Should record augmenter duration");
@@ -927,14 +928,14 @@ mod tests {
 
         let realm1_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "success"), ("realm", "realm1")],
         );
         assert_eq!(realm1_count, 1.0, "realm1 should have 1 success");
 
         let realm2_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "success"), ("realm", "realm2")],
         );
         assert_eq!(realm2_count, 1.0, "realm2 should have 1 success");
