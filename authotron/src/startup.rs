@@ -182,7 +182,10 @@ async fn run_servers(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (app, state) = build_app(config.clone()).await?;
 
-    if config.metrics.enabled && config.server.port == config.metrics.port {
+    if config.metrics.enabled
+        && config.server.port != 0
+        && config.server.port == config.metrics.port
+    {
         return Err(format!(
             "application port and metrics port are both {}, they must be different",
             config.server.port
@@ -200,11 +203,13 @@ async fn run_servers(
             )
         })?;
 
+    let app_port = app_listener.local_addr()?.port();
+
     info!(
         event_name = "startup.server.listening",
         event_domain = "startup",
         host,
-        port = config.server.port,
+        port = app_port,
         "application server listening"
     );
 
@@ -227,11 +232,13 @@ async fn run_servers(
                 )
             })?;
 
+        let metrics_port = metrics_listener.local_addr()?.port();
+
         info!(
             event_name = "startup.metrics.listening",
             event_domain = "startup",
             host,
-            port = config.metrics.port,
+            port = metrics_port,
             "metrics server listening"
         );
 
