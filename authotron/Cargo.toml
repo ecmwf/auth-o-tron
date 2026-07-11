@@ -11,11 +11,11 @@ keywords = ["authentication", "authorization", "gateway", "jwt", "nginx"]
 categories = ["authentication", "network-programming"]
 rust-version = "1.88"
 include = [
-    "src/**/*.rs",
-    "src/static/**",
-    "Cargo.toml",
-    "LICENSE.txt",
-    "README.md",
+  "src/**/*.rs",
+  "src/static/**",
+  "Cargo.toml",
+  "LICENSE.txt",
+  "README.md",
 ]
 
 [dependencies]
@@ -61,3 +61,6 @@ uuid = { version = "~1.22", features = ["v4"] }
 mockito = "~1.7"
 tower = { version = "~0.5", features = ["util"] }
 tracing-test = "~0.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "~0.2"
