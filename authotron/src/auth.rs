@@ -1245,7 +1245,6 @@ mod tests {
             })],
             augmenters: vec![],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
         let metrics = Metrics::new();
 
@@ -1398,7 +1397,6 @@ mod tests {
             })],
             augmenters: vec![],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
         let metrics = Metrics::new();
 
