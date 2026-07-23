@@ -188,13 +188,12 @@ impl Auth {
             return None;
         }
 
-        // Log the client's IP address and auth header for debugging purposes.
+        // Log the client's IP address for debugging purposes.
         debug!(
             event_name = "auth.request.started",
             event_domain = "auth",
             client_ip = ip,
             realm_filter = realm_filter.unwrap_or("none"),
-            auth_header,
             "auth request received"
         );
 
