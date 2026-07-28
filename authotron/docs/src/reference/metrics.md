@@ -16,20 +16,20 @@ By default, this endpoint is available on port `9090`. The format follows the Pr
 
 | Metric Name | Type | Labels | Description |
 |-------------|------|--------|-------------|
-| `auth_requests_total` | Counter | result, realm | Total authentication requests |
-| `auth_duration_seconds` | Histogram | result, realm | Authentication latency distribution |
-| `auth_provider_attempts_total` | Counter | provider_name, provider_type, realm, result | Attempts per authentication provider |
-| `auth_provider_duration_seconds` | Histogram | provider_name, provider_type, realm | Provider-specific latency |
-| `augmenter_attempts_total` | Counter | augmenter_name, augmenter_type, realm, result | Token augmentation attempts |
-| `augmenter_duration_seconds` | Histogram | augmenter_type, realm | Augmentation latency |
+| `authotron_auth_requests_total` | Counter | result, realm | Total authentication requests |
+| `authotron_auth_duration_seconds` | Histogram | result, realm | Authentication latency distribution |
+| `authotron_auth_provider_attempts_total` | Counter | provider_name, provider_type, realm, result | Attempts per authentication provider |
+| `authotron_auth_provider_duration_seconds` | Histogram | provider_name, provider_type, realm | Provider-specific latency |
+| `authotron_augmenter_attempts_total` | Counter | augmenter_name, augmenter_type, realm, result | Token augmentation attempts |
+| `authotron_augmenter_duration_seconds` | Histogram | augmenter_type, realm | Augmentation latency |
 
 ## Label Values
 
-**result** (auth_requests_total): `success`, `no_auth_header`, `invalid_header`, `all_failed`
+**result** (authotron_auth_requests_total): `success`, `no_auth_header`, `invalid_header`, `all_failed`
 
-**result** (auth_provider_attempts_total): `success`, `error`, `timeout`
+**result** (authotron_auth_provider_attempts_total): `success`, `error`, `timeout`
 
-**result** (augmenter_attempts_total): `success`, `error`
+**result** (authotron_augmenter_attempts_total): `success`, `error`
 
 **realm**: The configured authentication realm name, or `unknown` when the request fails before realm resolution
 
@@ -46,37 +46,37 @@ By default, this endpoint is available on port `9090`. The format follows the Pr
 ### Request Rate
 
 ```promql
-rate(auth_requests_total[5m])
+rate(authotron_auth_requests_total[5m])
 ```
 
 ### Authentication Latency (99th Percentile)
 
 ```promql
-histogram_quantile(0.99, rate(auth_duration_seconds_bucket[5m]))
+histogram_quantile(0.99, rate(authotron_auth_duration_seconds_bucket[5m]))
 ```
 
 ### Error Rate by Realm
 
 ```promql
-rate(auth_requests_total{result!="success"}[5m])
+rate(authotron_auth_requests_total{result!="success"}[5m])
 ```
 
 ### Slow Providers (95th Percentile)
 
 ```promql
-histogram_quantile(0.95, rate(auth_provider_duration_seconds_bucket[5m]))
+histogram_quantile(0.95, rate(authotron_auth_provider_duration_seconds_bucket[5m]))
 ```
 
 ### Provider Success Rate
 
 ```promql
-rate(auth_provider_attempts_total{result="success"}[5m])
+rate(authotron_auth_provider_attempts_total{result="success"}[5m])
 ```
 
 ## Alerting Recommendations
 
 Consider alerting on:
 
-- High error rates: `rate(auth_requests_total{result!="success"}[5m]) > 0.1`
-- Elevated latency: `histogram_quantile(0.95, rate(auth_duration_seconds_bucket[5m])) > 1.0`
-- Provider failures: `rate(auth_provider_attempts_total{result=~"error|timeout"}[5m]) > 0`
+- High error rates: `rate(authotron_auth_requests_total{result!="success"}[5m]) > 0.1`
+- Elevated latency: `histogram_quantile(0.95, rate(authotron_auth_duration_seconds_bucket[5m])) > 1.0`
+- Provider failures: `rate(authotron_auth_provider_attempts_total{result=~"error|timeout"}[5m]) > 0`

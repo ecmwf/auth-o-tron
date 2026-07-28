@@ -15,20 +15,23 @@ use tower::ServiceExt;
 fn base_config(server_port: u16, metrics_enabled: bool, metrics_port: u16) -> ConfigV2 {
     let yaml = r#"
 version: "2.0.0"
-store:
-  enabled: false
-providers: []
+providers:
+  - name: configured
+    type: plain
+    realm: test
+    users: []
 augmenters: []
 server:
   port: 0
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  kid: "key-2026-01"
+  private_key: "test-key-injected-by-test"
 logging:
   level: "warn"
   format: "console"
-services: []
     "#;
 
     let config: Config = Figment::new()
@@ -49,20 +52,63 @@ services: []
         port: metrics_port,
     };
 
+    cfg.jwt.private_key = include_str!("fixtures/test-rsa-private.pem").to_string();
     cfg
 }
 
 #[tokio::test]
-async fn startup_rejects_port_collision() {
-    let config = Arc::new(base_config(9500, true, 9500));
-    let result = startup::run(config).await;
+async fn startup_rejects_equal_configured_ports_including_zero() {
+    for port in [9500, 0] {
+        let config = Arc::new(base_config(port, true, port));
+        let result = startup::run(config).await;
 
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
+        let error = result.expect_err("equal application and metrics ports must be rejected");
+        assert_eq!(
+            error.to_string(),
+            format!("application port and metrics port are both {port}, they must be different")
+        );
+    }
+}
+
+#[tokio::test]
+async fn startup_rejects_malformed_rsa_private_key() {
+    let mut config = base_config(0, false, 0);
+    config.jwt.private_key = "not a PEM key".to_string();
+
+    let error = match startup::build_app(Arc::new(config)).await {
+        Ok(_) => panic!("malformed private key must fail startup"),
+        Err(error) => error,
+    };
     assert!(
-        err.contains("must be different"),
-        "expected port collision error, got: {err}"
+        error.to_string().contains("invalid JWT RSA private key"),
+        "unexpected error: {error}"
     );
+}
+
+async fn assert_startup_rejects_weak_key(private_key: &str, expected_bits: usize) {
+    let mut config = base_config(0, false, 0);
+    config.jwt.private_key = private_key.to_string();
+
+    let error = match startup::build_app(Arc::new(config)).await {
+        Ok(_) => panic!("weak private key must fail startup"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("is {expected_bits} bits")),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn startup_rejects_512_bit_rsa_private_key() {
+    assert_startup_rejects_weak_key(include_str!("fixtures/test-rsa-private-512.pem"), 512).await;
+}
+
+#[tokio::test]
+async fn startup_rejects_1024_bit_rsa_private_key() {
+    assert_startup_rejects_weak_key(include_str!("fixtures/test-rsa-private-1024.pem"), 1024).await;
 }
 
 #[tokio::test]
@@ -160,4 +206,30 @@ async fn logo_returns_png() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers().get("content-type").unwrap(), "image/png");
+}
+
+#[tokio::test]
+async fn removed_token_routes_return_not_found() {
+    let config = base_config(0, false, 0);
+    let (app, _) = common::build_app(config).await;
+
+    for request in [
+        Request::get("/token").body(Body::empty()).unwrap(),
+        Request::get("/tokens").body(Body::empty()).unwrap(),
+        Request::delete("/token/opaque-token")
+            .body(Body::empty())
+            .unwrap(),
+    ] {
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[tokio::test]
+async fn providers_exclude_removed_store_provider() {
+    let config = base_config(0, false, 0);
+    let (_, _, state) = common::build_app_with_state(config).await;
+
+    assert_eq!(state.auth.providers.len(), 1);
+    assert_eq!(state.auth.providers[0].get_name(), "configured");
 }

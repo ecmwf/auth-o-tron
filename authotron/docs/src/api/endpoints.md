@@ -1,6 +1,6 @@
 # HTTP Endpoints
 
-Auth-O-Tron exposes endpoints on two ports. The main application port (default 8080) handles authentication and token management. The metrics port (default 9090) exposes health checks and Prometheus metrics.
+Auth-O-Tron exposes endpoints on two ports. The main application port (default 8080) handles authentication. The metrics port (default 9090) exposes health checks and Prometheus metrics.
 
 ## Main Application Port (8080)
 
@@ -52,36 +52,6 @@ curl -H "Authorization: Basic $(echo -n 'user:pass' | base64)" \
 }
 ```
 
-### GET /token
-
-Creates an opaque token for the authenticated user. Requires the token store to be enabled.
-
-| Aspect | Details |
-|--------|---------|
-| **Auth** | Required |
-| **Success (200)** | `{"token": "<uuid>"}` |
-| **Failure (503)** | Token store disabled |
-
-### GET /tokens
-
-Lists all opaque tokens belonging to the authenticated user.
-
-| Aspect | Details |
-|--------|---------|
-| **Auth** | Required |
-| **Success (200)** | `{"tokens": [...]}` |
-| **Failure (503)** | Token store disabled |
-
-### DELETE /token/{token}
-
-Deletes a specific opaque token.
-
-| Aspect | Details |
-|--------|---------|
-| **Auth** | Required |
-| **Param** | `{token}` - UUID of token to delete |
-| **Success (204)** | No content |
-| **Failure (503)** | Token store disabled |
 
 ### GET /providers
 
@@ -138,13 +108,13 @@ Prometheus metrics endpoint.
 Example output:
 
 ```
-# HELP auth_requests_total Total authentication requests
-# TYPE auth_requests_total counter
-auth_requests_total{result="success",realm="internal"} 42
+# HELP authotron_auth_requests_total Total authentication requests
+# TYPE authotron_auth_requests_total counter
+authotron_auth_requests_total{result="success",realm="internal"} 42
 
-# HELP auth_duration_seconds Authentication latency
-# TYPE auth_duration_seconds histogram
-auth_duration_seconds_bucket{result="success",realm="internal",le="0.1"} 35
+# HELP authotron_auth_duration_seconds Authentication latency
+# TYPE authotron_auth_duration_seconds histogram
+authotron_auth_duration_seconds_bucket{result="success",realm="internal",le="0.1"} 35
 ```
 
 ## Endpoint Summary
@@ -153,9 +123,6 @@ auth_duration_seconds_bucket{result="success",realm="internal",le="0.1"} 35
 |--------|------|------|------|---------|
 | GET | /authenticate | 8080 | Credentials | Main auth, returns JWT |
 | GET | /whoami | 8080 | Credentials | Authenticated identity as JSON |
-| GET | /token | 8080 | JWT | Create opaque token |
-| GET | /tokens | 8080 | JWT | List tokens |
-| DELETE | /token/{token} | 8080 | JWT | Delete token |
 | GET | /providers | 8080 | None | List providers |
 | GET | /augmenters | 8080 | None | List augmenters |
 | GET | /health | Both | None | Health check |

@@ -9,9 +9,7 @@
 //! Configuration loading, versioning (v1/v2), and environment variable overrides.
 
 pub mod logging;
-pub mod store;
 pub mod types;
 
 pub use logging::*;
-pub use store::*;
 pub use types::*;

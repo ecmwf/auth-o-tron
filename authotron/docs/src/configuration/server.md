@@ -37,11 +37,10 @@ metrics:
 ```mermaid
 graph TB
     subgraph "Application Server (port 8080)"
-        A1["/authenticate"]
-        A2["/token · /tokens"]
-        A3["/providers · /augmenters"]
-        A4["/health"]
-        A5["/ (homepage)"]
+        A1["/authenticate · /whoami"]
+        A2["/providers · /augmenters"]
+        A3["/health"]
+        A4["/ (homepage)"]
     end
 
     subgraph "Metrics Server (port 9090)"
@@ -58,7 +57,6 @@ The application server and metrics server expose different endpoints:
 
 **Application Server (configured `server.port`):**
 - `/authenticate` - Authentication endpoint
-- `/tokens` - Token management
 - `/providers` - Provider information
 - `/augmenters` - Augmenter information
 - `/health` - Health check
@@ -68,6 +66,10 @@ The application server and metrics server expose different endpoints:
 - `/health` - Health check
 
 Note that `/health` is available on both servers when metrics are enabled. When `metrics.enabled: false`, `/health` is only served on the application port.
+
+## Graceful Shutdown
+
+On `SIGINT` or `SIGTERM`, Auth-O-Tron stops accepting new connections and waits for in-flight requests to finish before shutting down. A single shutdown notification coordinates the application server and the metrics server. The same behavior applies to the application server when metrics are disabled.
 
 ## Port Collision Detection
 

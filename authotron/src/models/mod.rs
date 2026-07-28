@@ -6,7 +6,6 @@
 // granted to it by virtue of its status as an intergovernmental organisation nor
 // does it submit to any jurisdiction.
 
-//! Core data types: User, Token, and JWT claims.
+//! Core user and JWT claim data types.
 
-pub mod token;
 pub mod user;

@@ -10,24 +10,33 @@ All providers share these common fields:
 | name | string | yes | A unique identifier for this provider instance |
 | realm | string | yes | The authentication realm this provider handles (see [Realms](../concepts/how-it-works.md#realms)) |
 
+HTTP-based providers share a pooled client. Connections must be established within 2 seconds and each complete request is limited to 4 seconds. Credential-keyed caches are capped at 100,000 entries; failed and inactive-token results are not cached. Cache misses for different credentials may fill concurrently, so a slow upstream request does not block unrelated authentication; duplicate concurrent fills for the same credential are allowed.
+
 ## Provider Types
 
 ### 1. Plain Provider
 
 Type: `plain`
 
-The plain provider implements HTTP Basic Authentication against a static list of users defined in the configuration file. This is useful for development, testing, or simple deployments.
+The plain provider implements HTTP Basic Authentication against a static list of users defined in the configuration file. Store passwords as Argon2id hashes in PHC string format.
 
 **Fields:**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| users | array | List of user objects with username, password, and roles |
+| users | array | List of user objects with username, password credential, and roles |
 
 Each user object has:
 - `username`: The login name
-- `password`: The password (compared as plaintext)
+- `password_hash`: An Argon2id PHC string (recommended)
+- `password`: Deprecated plaintext compatibility; do not use for new configurations
 - `roles`: Array of role strings assigned to the user (optional, defaults to empty)
+
+Each user must contain exactly one of `password_hash` or `password`. Generate hashes with an Argon2id implementation using a unique random salt and parameters appropriate for your deployment.
+
+Argon2 verification is globally limited to at most two concurrent jobs (and no more than the available CPU parallelism). Excess attempts wait within the normal authentication timeout; work already running remains counted until its blocking operation finishes.
+
+Every well-formed Basic authentication attempt performs one Argon2id verification. Unknown usernames and deprecated plaintext entries use a fixed dummy hash with the example/default parameters (`m=19456,t=2,p=1`); plaintext passwords are then checked via constant-time comparison of fixed-size SHA-256 digests. Plaintext remains a migration-only compatibility path. Use consistent Argon2id parameters for all configured hashes, because deliberately different PHC cost parameters necessarily have different runtimes.
 
 **Example:**
 
@@ -38,10 +47,12 @@ providers:
     realm: internal
     users:
       - username: alice
-        password: alicepass123
+        # Hash of alicepass123 for this example only.
+        password_hash: "$argon2id$v=19$m=19456,t=2,p=1$YXV0aG90cm9uLWRvYy0wNQ$bnM0TZfPrwI0Eb2pfBCK39sjwVCHBBUZYykFUnbwWfw"
         roles: [admin, developer]
       - username: bob
-        password: bobpass456
+        # Hash of bobpass456 for this example only.
+        password_hash: "$argon2id$v=19$m=19456,t=2,p=1$YXV0aG90cm9uLWRvYy0wNg$yVm3rzolxmoIYoxZyU/TR7q/PYcU73TsTxUdmXxyIRA"
         roles: [developer]
 ```
 
@@ -49,7 +60,7 @@ providers:
 
 Type: `jwt`
 
-The JWT provider validates JSON Web Tokens using a JWKS (JSON Web Key Set) endpoint. It fetches public keys from the configured URI and validates token signatures.
+The JWT provider validates JSON Web Tokens using a JWKS (JSON Web Key Set) endpoint. Remote JWKS authentication accepts only keys that explicitly declare `RS256` or `RS512`; symmetric `HS*` keys are rejected. The `scope` claim is optional and defaults to an empty set.
 
 **Fields:**
 
@@ -58,7 +69,7 @@ The JWT provider validates JSON Web Tokens using a JWKS (JSON Web Key Set) endpo
 | cert_uri | string | URL to the JWKS endpoint |
 | iam_realm | string | The realm/issuer to validate against |
 
-The provider caches the JWKS for 600 seconds to avoid repeated requests to the certificate endpoint.
+The provider parses and caches the JWKS for 600 seconds to avoid repeated requests and JSON parsing.
 
 **Example:**
 
@@ -83,7 +94,7 @@ This provider validates tokens against the ECMWF (European Centre for Medium-Ran
 |-------|------|-------------|
 | uri | string | Base URL of the ECMWF API |
 
-The provider calls `{uri}/who-am-i?token={token}` to validate credentials. Results are cached for 60 seconds to reduce API load. Contact ECMWF for the correct `uri` value.
+The provider calls `{uri}/who-am-i` with `token` as a URL-encoded query parameter. Successful results are cached for 60 seconds. Contact ECMWF for the correct `uri` value.
 
 **Example:**
 
@@ -107,7 +118,7 @@ This provider validates tokens against the EFAS (European Flood Awareness System
 |-------|------|-------------|
 | uri | string | Base URL of the EFAS API |
 
-The provider calls `{uri}?token={token}` to validate credentials. Results are cached for 60 seconds. Contact ECMWF for the correct `uri` value.
+The provider calls `{uri}` with `token` as a URL-encoded query parameter. Successful results are cached for 60 seconds. Contact ECMWF for the correct `uri` value.
 
 **Example:**
 
@@ -135,7 +146,7 @@ This provider handles OpenID Connect offline tokens, commonly used with Keycloak
 | private_client_secret | string | Secret for the private client |
 | iam_url | string | Base URL of the identity management server |
 
-The flow is: introspect the offline token, exchange for an access token, validate the access token via JWKS.
+The flow is: introspect the token and require `offline_access` as an exact whitespace-delimited scope, exchange it for an access token, then validate the access token via JWKS. Inactive tokens and tokens without the exact scope are not cached.
 
 **Example:**
 
@@ -166,7 +177,7 @@ This provider integrates with the ECMWF token generator service. It validates to
 | client_secret | string | OAuth client secret |
 | token_generator_url | string | URL of the ECMWF token generator |
 
-The flow is: validate the presented token, exchange for an access token, validate the access token via JWKS.
+The flow is: validate the presented token, exchange it for an access token, validate the access token via JWKS. Inactive validation responses are not cached.
 
 Contact ECMWF for the correct `cert_uri` and `token_generator_url` values for your environment.
 
@@ -194,7 +205,8 @@ providers:
     realm: development
     users:
       - username: dev
-        password: devpass
+        # Hash of devpass for this example only.
+        password_hash: "$argon2id$v=19$m=19456,t=2,p=1$YXV0aG90cm9uLWRvYy0wNw$T21rHRps148bp1VTW3bEfiri1l28TUS9CL9WUL6Xll0"
         roles: [admin]
 
   - type: jwt

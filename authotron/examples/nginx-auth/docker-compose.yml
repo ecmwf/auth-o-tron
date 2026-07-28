@@ -1,8 +1,8 @@
-version: '3.8'
+version: "3.8"
 
 services:
   auth-o-tron:
-    image: eccr.ecmwf.int/auth-o-tron/auth-o-tron:0.2.5
+    build: ../../..
     container_name: auth-o-tron
     restart: unless-stopped
     # mount our existing config file in read-only mode
@@ -10,6 +10,7 @@ services:
       - ./config/auth-o-tron.yml:/etc/auth-o-tron/config.yml:ro
     environment:
       - AOT_CONFIG_PATH=/etc/auth-o-tron/config.yml
+      - AOT_JWT__PRIVATE_KEY=${AOT_JWT__PRIVATE_KEY:?set AOT_JWT__PRIVATE_KEY to an RSA private PEM}
     networks:
       - authnet
 

@@ -5,7 +5,7 @@
 Pull the latest image from the ECMWF container registry:
 
 ```bash
-docker pull eccr.ecmwf.int/auth-o-tron/auth-o-tron:0.3.0
+docker pull eccr.ecmwf.int/auth-o-tron/auth-o-tron:0.4.0
 ```
 
 ## Build from Source

@@ -53,11 +53,6 @@ Auth-O-Tron can be configured to use a variety of authentication providers simul
 
 Multiple providers can run simultaneously, each targeting a different realm.
 
-### Why opaque tokens instead of JWTs for long-lived access?
-
-JWTs are self-contained and stateless, which is great for short-lived tokens. But for long-lived machine-to-machine tokens that may need to be revoked, you need server-side state anyway. Opaque tokens are simpler and more secure in this case — they don't leak user information if compromised.
-
-Auth-O-Tron issues short-lived JWTs to backend services for authorization decisions. Long-lived opaque tokens are managed separately through the token store.
 
 ### Why not just use OAuth2 directly?
 

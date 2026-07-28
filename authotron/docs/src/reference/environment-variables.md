@@ -19,18 +19,19 @@ For nested sections, add more double underscores: `AOT_<SECTION>__<SUBSECTION>__
 ## Common Overrides
 
 | Variable | Config Path | Example Value |
-|----------|-------------|---------------|
+| ---------- | ------------- | --------------- |
 | `AOT_SERVER__HOST` | server.host | `0.0.0.0` |
 | `AOT_SERVER__PORT` | server.port | `8080` |
 | `AOT_METRICS__ENABLED` | metrics.enabled | `true` |
 | `AOT_METRICS__PORT` | metrics.port | `9090` |
 | `AOT_JWT__ISS` | jwt.iss | `my-issuer` |
-| `AOT_JWT__SECRET` | jwt.secret | `my-secret` |
+| `AOT_JWT__AUD` | jwt.aud | `my-service` |
+| `AOT_JWT__KID` | jwt.kid | `key-2026-01` |
+| `AOT_JWT__PRIVATE_KEY` | jwt.private_key | Multiline RSA private PEM |
 | `AOT_JWT__EXP` | jwt.exp | `3600` |
 | `AOT_LOGGING__LEVEL` | logging.level | `info` |
 | `AOT_LOGGING__FORMAT` | logging.format | `json` |
 | `AOT_AUTH__TIMEOUT_IN_MS` | auth.timeout_in_ms | `5000` |
-| `AOT_STORE__ENABLED` | store.enabled | `false` |
 
 ## Precedence
 
@@ -39,7 +40,7 @@ Environment variables take precedence over YAML configuration values. The loadin
 1. Load YAML configuration from `AOT_CONFIG_PATH`
 2. Merge environment variable overrides
 3. Deserialize into the versioned config (v1 configs are converted to v2)
-4. Fail fast on parse errors or invalid values (e.g., port collision)
+4. Fail fast on parse errors or invalid values (for example, a port collision or RSA private key below 2048 bits)
 
 This means you can maintain a base configuration file and selectively override specific values per environment using environment variables.
 
@@ -48,7 +49,7 @@ This means you can maintain a base configuration file and selectively override s
 ```bash
 export AOT_CONFIG_PATH=/etc/auth-o-tron/config.yaml
 export AOT_SERVER__PORT=8080
-export AOT_JWT__SECRET=$(cat /run/secrets/jwt_secret)
+export AOT_JWT__PRIVATE_KEY="$(cat /run/secrets/jwt-private.pem)"
 export AOT_METRICS__ENABLED=true
 
 ./authotron

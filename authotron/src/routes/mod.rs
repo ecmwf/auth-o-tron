@@ -18,7 +18,6 @@ mod health;
 mod homepage;
 mod metrics;
 mod providers;
-mod tokens;
 mod whoami;
 
 use crate::middleware::record_http_metrics;
@@ -30,7 +29,6 @@ pub fn create_app_router(state: AppState) -> Router {
         .merge(homepage::routes())
         .merge(auth::routes())
         .merge(whoami::routes())
-        .merge(tokens::routes())
         .merge(providers::routes())
         .merge(augmenters::routes())
         .merge(health::routes())

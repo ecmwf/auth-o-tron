@@ -13,7 +13,6 @@ use crate::config::AuthConfig;
 use crate::metrics::{Metrics, MetricsRecorder};
 use crate::models::user::User;
 use crate::providers::{Provider, ProviderConfig, create_auth_provider};
-use crate::store::Store;
 use crate::utils::log_throttle::should_emit;
 use futures::future::{FutureExt, join_all, select_ok};
 use futures::lock::Mutex;
@@ -26,24 +25,20 @@ use tracing::{debug, info, warn};
 
 const AUTH_LOG_SUPPRESSION_WINDOW: Duration = Duration::from_secs(30);
 
-/// Holds all authentication providers, augmenters, and a reference to the store.
+/// Holds all authentication providers and augmenters.
 pub struct Auth {
     pub providers: Vec<Box<dyn Provider>>,
     pub augmenters: Vec<Box<dyn Augmenter>>,
     config: AuthConfig,
-    #[allow(dead_code)]
-    token_store: Arc<dyn Store>,
 }
 
-/// Helper function to map header scheme values to the expected provider type.
-/// For example, a header "Plain" is mapped to "Basic" so that providers
-/// that return "Basic" in their `get_type()` match correctly.
+/// Map the `Plain` compatibility alias to the provider's `Basic` type.
+/// All other scheme spelling is preserved; provider matching is case-insensitive.
 fn header_to_provider_type(scheme: &str) -> String {
-    match scheme.to_lowercase().as_str() {
-        "bearer" => "Bearer".to_string(),
-        "plain" => "Basic".to_string(),
-        "basic" => "Basic".to_string(),
-        other => other.to_string(),
+    if scheme.eq_ignore_ascii_case("plain") {
+        "Basic".to_string()
+    } else {
+        scheme.to_string()
     }
 }
 
@@ -52,7 +47,6 @@ impl Auth {
     pub fn new(
         provider_config: &[ProviderConfig],
         augmenter_config: &[AugmenterConfig],
-        token_store: Arc<dyn Store>,
         config: AuthConfig,
     ) -> Self {
         info!(
@@ -61,24 +55,8 @@ impl Auth {
             "creating auth providers"
         );
         // Convert configs into providers
-        let mut providers: Vec<Box<dyn Provider>> =
+        let providers: Vec<Box<dyn Provider>> =
             provider_config.iter().map(create_auth_provider).collect();
-
-        // Only add token store as provider if it's enabled
-        if token_store.is_enabled() {
-            info!(
-                event_name = "auth.initialization.providers.token_store_enabled",
-                event_domain = "auth",
-                "token store is enabled; adding bearer provider"
-            );
-            providers.push(Box::new(token_store.clone()) as Box<dyn Provider>);
-        } else {
-            info!(
-                event_name = "auth.initialization.providers.token_store_disabled",
-                event_domain = "auth",
-                "token store is disabled; skipping bearer provider"
-            );
-        }
 
         info!(
             event_name = "auth.initialization.augmenters.started",
@@ -90,7 +68,6 @@ impl Auth {
         Auth {
             providers,
             augmenters,
-            token_store,
             config,
         }
     }
@@ -128,20 +105,19 @@ impl Auth {
     ///    - Logs a warning if the header is missing or improperly formatted.
     ///
     /// 2. **Credential Parsing:**
-    ///    - Splits the header on commas to allow multiple credentials.
-    ///    - For each segment, splits the segment on whitespace into a scheme (e.g. "Bearer", "Plain", "Basic")
-    ///      and a credential.
-    ///    - Normalizes the scheme using the helper `header_to_provider_type` (which converts "plain" to "Basic").
-    ///    - This normalization ensures that if you supply "Basic" or "plain", both are treated as "Basic", while "Bearer"
-    ///      remains "Bearer".
-    ///    - Uses a `HashMap` to ensure only one credential per scheme is provided; if multiple credentials for the same
-    ///      scheme are detected, it returns `None`.
+    ///    - Splits the header into at most three comma-separated credentials, each containing a scheme
+    ///      (e.g. "Bearer", "Plain", "Basic") and a credential.
+    ///    - Maps the case-insensitive `Plain` compatibility alias to the `Basic` provider type.
+    ///      Other scheme spelling is preserved and matched to provider types case-insensitively.
+    ///    - Rejects the entire header if a normalized scheme occurs more than once. This includes
+    ///      byte-identical parts, casing variants, and `Plain`/`Basic` alias collisions.
     ///
     /// 3. **Provider Filtering & Authentication:**
     ///    - For each (scheme, credential) pair, the function filters the available providers by comparing the provider's
-    ///      `get_type()` (which returns the expected scheme, such as "Basic" or "Bearer") to the normalized scheme.
-    ///      This ensures that if you supply a "Basic" credential, only providers that return "Basic" are tried, and likewise for "Bearer".
-    ///    - Additionally, if a realm filter is provided (via the `X-Auth-Realm` header), only providers with a matching realm are considered.
+    ///      `get_type()` (which returns the expected scheme, such as "Basic" or "Bearer") to the scheme
+    ///      case-insensitively.
+    ///    - Additionally, if a realm filter is provided (via the `X-Auth-Realm` header), only providers with an exact,
+    ///      case-sensitive realm match are considered.
     ///    - For each matching provider, the function initiates an asynchronous authentication call wrapped in a timeout (configured by `timeout_in_ms`).
     ///    - It then uses `select_ok` to await the first provider that successfully authenticates the user.
     ///
@@ -197,25 +173,16 @@ impl Auth {
             "auth request received"
         );
 
-        // Use a HashMap with owned Strings for credentials.
+        // Store credentials by provider scheme while tracking normalized schemes separately.
         let mut creds_map: HashMap<String, String> = HashMap::new();
-        let mut seen_trimmed = std::collections::HashSet::new();
-        let mut unique_count = 0;
+        let mut seen_schemes = std::collections::HashSet::new();
+        let mut credential_count = 0;
 
         // Split the header on commas to allow multiple auth credentials.
         for part in auth_header.split(',') {
             let trimmed = part.trim();
-            // Discard duplicate trimmed parts
-            if !seen_trimmed.insert(trimmed.to_string()) {
-                debug!(
-                    event_name = "auth.header.duplicate_part_discarded",
-                    event_domain = "auth",
-                    "duplicate authorization header part detected and discarded"
-                );
-                continue;
-            }
-            unique_count += 1;
-            if unique_count > 3 {
+            credential_count += 1;
+            if credential_count > 3 {
                 if let Some(suppressed_count) = should_emit(
                     "auth.header.too_many_credentials",
                     AUTH_LOG_SUPPRESSION_WINDOW,
@@ -226,7 +193,7 @@ impl Auth {
                         reason = "too_many_credentials",
                         suppressed_count,
                         max_credentials = 3,
-                        "too many unique authorization credentials"
+                        "too many authorization credentials"
                     );
                 }
                 metrics.record_auth_attempt("invalid_header", "unknown");
@@ -262,6 +229,27 @@ impl Auth {
             let raw_scheme = parts[0];
             let credential = parts[1];
             let normalized_scheme = header_to_provider_type(raw_scheme);
+            if !seen_schemes.insert(normalized_scheme.to_ascii_lowercase()) {
+                if let Some(suppressed_count) =
+                    should_emit("auth.header.duplicate_scheme", AUTH_LOG_SUPPRESSION_WINDOW)
+                {
+                    warn!(
+                        event_name = "auth.header.invalid",
+                        event_domain = "auth",
+                        reason = "duplicate_scheme",
+                        scheme = raw_scheme,
+                        suppressed_count,
+                        "duplicate authorization scheme"
+                    );
+                }
+                metrics.record_auth_attempt("invalid_header", "unknown");
+                metrics.record_auth_duration(
+                    start.elapsed().as_secs_f64(),
+                    "invalid_header",
+                    "unknown",
+                );
+                return None;
+            }
             creds_map.insert(normalized_scheme, credential.to_string());
         }
 
@@ -314,19 +302,14 @@ impl Auth {
             // Set the timeout duration based on the configuration.
             let timeout_duration = std::time::Duration::from_millis(self.config.timeout_in_ms);
             let timeout_ms = self.config.timeout_in_ms;
-            // Filter providers by matching type and (if provided) realm.
+            // Match scheme names case-insensitively, but realm identifiers exactly.
             let futures = self
                 .providers
                 .iter()
                 .filter(|p| {
                     p.get_type().eq_ignore_ascii_case(&scheme)
                         && match realm_filter {
-                            Some(r) => {
-                                // Only consider providers with a realm matching the filter.
-                                p.get_realm()
-                                    .map(|pr| pr.eq_ignore_ascii_case(r))
-                                    .unwrap_or(false)
-                            }
+                            Some(r) => p.get_realm().map(|pr| pr == r).unwrap_or(false),
                             None => true,
                         }
                 })
@@ -573,12 +556,13 @@ mod tests {
         // A MetricFamily groups all time series with the same metric name
         let metric_families = metrics.registry.gather();
 
-        // Search through each metric family (e.g., auth_requests_total, auth_duration_seconds)
+        // Search through each metric family (e.g., authotron_auth_requests_total,
+        // authotron_auth_duration_seconds)
         for mf in metric_families {
             // Check if this is the metric we're looking for
             if mf.name() == name {
                 // Each metric family contains multiple time series (one per label combination)
-                // For example, auth_requests_total has separate series for:
+                // For example, authotron_auth_requests_total has separate series for:
                 //   - {result="success", realm="test"}
                 //   - {result="failed", realm="test"}
                 //   - etc.
@@ -647,7 +631,6 @@ mod tests {
             config: AuthConfig {
                 timeout_in_ms: 1000,
             },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -662,7 +645,7 @@ mod tests {
         // Verify exact metric values
         let success_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "success"), ("realm", "testrealm")],
         );
         assert_eq!(
@@ -672,7 +655,7 @@ mod tests {
 
         let provider_success = get_counter_value(
             &metrics,
-            "auth_provider_attempts_total",
+            "authotron_auth_provider_attempts_total",
             &[
                 ("provider_name", "TestProvider"),
                 ("provider_type", "Basic"),
@@ -687,7 +670,7 @@ mod tests {
 
         let duration_count = get_histogram_count(
             &metrics,
-            "auth_duration_seconds",
+            "authotron_auth_duration_seconds",
             &[("result", "success"), ("realm", "testrealm")],
         );
         assert_eq!(duration_count, 1, "Should have exactly 1 duration sample");
@@ -708,7 +691,6 @@ mod tests {
             config: AuthConfig {
                 timeout_in_ms: 1000,
             },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -723,14 +705,14 @@ mod tests {
         // Verify failure was recorded
         let failed_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "all_failed"), ("realm", "unknown")],
         );
         assert_eq!(failed_count, 1.0, "Should record 1 failed attempt");
 
         let provider_error = get_counter_value(
             &metrics,
-            "auth_provider_attempts_total",
+            "authotron_auth_provider_attempts_total",
             &[
                 ("provider_name", "TestProvider"),
                 ("provider_type", "Basic"),
@@ -743,7 +725,7 @@ mod tests {
         // Verify no success was recorded
         let success_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "success"), ("realm", "testrealm")],
         );
         assert_eq!(success_count, 0.0, "Should have 0 successful attempts");
@@ -757,7 +739,6 @@ mod tests {
             config: AuthConfig {
                 timeout_in_ms: 1000,
             },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -768,7 +749,7 @@ mod tests {
 
         let no_header_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "no_auth_header"), ("realm", "unknown")],
         );
         assert_eq!(no_header_count, 1.0, "Should record no_auth_header");
@@ -782,7 +763,6 @@ mod tests {
             config: AuthConfig {
                 timeout_in_ms: 1000,
             },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -795,7 +775,7 @@ mod tests {
 
         let invalid_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "invalid_header"), ("realm", "unknown")],
         );
         assert_eq!(invalid_count, 1.0, "Should record invalid_header");
@@ -816,7 +796,6 @@ mod tests {
             config: AuthConfig {
                 timeout_in_ms: 1000,
             },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -835,21 +814,21 @@ mod tests {
 
         let success_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "success"), ("realm", "test")],
         );
         assert_eq!(success_count, 3.0, "Should have exactly 3 successes");
 
         let failed_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "all_failed"), ("realm", "unknown")],
         );
         assert_eq!(failed_count, 2.0, "Should have exactly 2 failures");
 
         let total_duration_samples = get_histogram_count(
             &metrics,
-            "auth_duration_seconds",
+            "authotron_auth_duration_seconds",
             &[("result", "success"), ("realm", "test")],
         );
         assert_eq!(
@@ -879,7 +858,6 @@ mod tests {
             config: AuthConfig {
                 timeout_in_ms: 1000,
             },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = crate::metrics::Metrics::new();
@@ -892,7 +870,7 @@ mod tests {
 
         let augmenter_count = get_counter_value(
             &metrics,
-            "augmenter_attempts_total",
+            "authotron_augmenter_attempts_total",
             &[
                 ("augmenter_name", "test-aug"),
                 ("augmenter_type", "plain"),
@@ -905,7 +883,7 @@ mod tests {
 
         let aug_duration_samples = get_histogram_count(
             &metrics,
-            "augmenter_duration_seconds",
+            "authotron_augmenter_duration_seconds",
             &[("augmenter_type", "plain"), ("realm", "r1")],
         );
         assert_eq!(aug_duration_samples, 1, "Should record augmenter duration");
@@ -940,7 +918,6 @@ mod tests {
             config: AuthConfig {
                 timeout_in_ms: 1000,
             },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -955,14 +932,14 @@ mod tests {
 
         let realm1_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "success"), ("realm", "realm1")],
         );
         assert_eq!(realm1_count, 1.0, "realm1 should have 1 success");
 
         let realm2_count = get_counter_value(
             &metrics,
-            "auth_requests_total",
+            "authotron_auth_requests_total",
             &[("result", "success"), ("realm", "realm2")],
         );
         assert_eq!(realm2_count, 1.0, "realm2 should have 1 success");
@@ -1009,7 +986,6 @@ mod tests {
             providers: vec![],
             augmenters: vec![Box::new(aug1), Box::new(aug2), Box::new(aug3)],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -1036,7 +1012,6 @@ mod tests {
             providers: vec![],
             augmenters: vec![Box::new(aug)],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
         let metrics = Metrics::new();
         let user = User {
@@ -1060,7 +1035,6 @@ mod tests {
             providers: vec![],
             augmenters: vec![Box::new(aug)],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
         let metrics = Metrics::new();
         let user = User {
@@ -1143,7 +1117,6 @@ mod tests {
                 Box::new(PlainAdvancedAugmenter::new(&advanced_config)),
             ],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -1193,40 +1166,15 @@ mod tests {
         }
     }
 
-    /// A dummy Store implementation for testing.
-    struct DummyStore;
-
-    #[async_trait]
-    impl crate::store::Store for DummyStore {
-        async fn add_token(
-            &self,
-            _token: &crate::models::token::Token,
-            _user: &User,
-            _expiry: i64,
-        ) -> Result<(), String> {
-            Ok(())
-        }
-        async fn get_tokens(
-            &self,
-            _user: &User,
-        ) -> Result<Vec<crate::models::token::Token>, String> {
-            Ok(vec![])
-        }
-        async fn get_user(&self, _token: &str) -> Result<Option<User>, String> {
-            Ok(None)
-        }
-        async fn delete_token(&self, _token: &str) -> Result<(), String> {
-            Ok(())
-        }
-    }
-
     #[tokio::test]
-    async fn test_header_to_provider_type() {
-        // Test normalization of header schemes.
+    async fn test_header_to_provider_type_only_aliases_plain() {
         assert_eq!(header_to_provider_type("plain"), "Basic");
+        assert_eq!(header_to_provider_type("PlAiN"), "Basic");
         assert_eq!(header_to_provider_type("Basic"), "Basic");
+        assert_eq!(header_to_provider_type("basic"), "basic");
         assert_eq!(header_to_provider_type("Bearer"), "Bearer");
-        assert_eq!(header_to_provider_type("unknown"), "unknown");
+        assert_eq!(header_to_provider_type("bearer"), "bearer");
+        assert_eq!(header_to_provider_type("UnKnOwN"), "UnKnOwN");
     }
 
     #[tokio::test]
@@ -1248,7 +1196,6 @@ mod tests {
             providers: vec![provider1, provider2],
             augmenters: vec![],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
 
         let challenge = auth.generate_challenge_header();
@@ -1271,7 +1218,6 @@ mod tests {
             providers: vec![provider],
             augmenters: vec![],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = Metrics::new();
@@ -1286,6 +1232,28 @@ mod tests {
             .await;
         assert!(user.is_some());
         assert_eq!(user.unwrap().username, "dummy");
+    }
+
+    #[tokio::test]
+    async fn test_authentication_scheme_matching_and_plain_alias() {
+        let auth = Auth {
+            providers: vec![Box::new(DummyProvider {
+                name: "TestBasic".to_string(),
+                provider_type: "Basic".to_string(),
+                realm: Some("localrealm".to_string()),
+                expected_credential: "credential".to_string(),
+            })],
+            augmenters: vec![],
+            config: AuthConfig { timeout_in_ms: 5 },
+        };
+        let metrics = Metrics::new();
+
+        for header in ["bAsIc credential", "pLaIn credential"] {
+            let user = auth
+                .authenticate(header, "127.0.0.1", Some("localrealm"), &metrics)
+                .await;
+            assert!(user.is_some(), "scheme was not matched for {header:?}");
+        }
     }
 
     #[tokio::test]
@@ -1310,7 +1278,6 @@ mod tests {
             providers: vec![basic_provider, bearer_provider],
             augmenters: vec![],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = crate::metrics::Metrics::new();
@@ -1349,7 +1316,6 @@ mod tests {
             providers: vec![local_provider, other_provider],
             augmenters: vec![],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
 
         let metrics = crate::metrics::Metrics::new();
@@ -1372,7 +1338,16 @@ mod tests {
             "Authentication should succeed for realm 'otherrealm'"
         );
 
-        // When the realm filter does not match any provider, authentication should fail.
+        // Realm identifiers are exact and case-sensitive, matching augmenter semantics.
+        let user_none = auth
+            .authenticate(header, "127.0.0.1", Some("LOCALREALM"), &metrics)
+            .await;
+        assert!(
+            user_none.is_none(),
+            "Authentication should fail when only the realm casing differs"
+        );
+
+        // A realm not configured on any provider also fails.
         let user_none = auth
             .authenticate(header, "127.0.0.1", Some("nonexistent"), &metrics)
             .await;
@@ -1383,36 +1358,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_duplicate_headers_checked_once() {
-        let provider = Box::new(DummyProvider {
-            name: "TestBasic".to_string(),
-            provider_type: "Basic".to_string(),
-            realm: Some("localrealm".to_string()),
-            expected_credential: "ZHVtbXk6ZHVtbXk=".to_string(),
-        });
+    async fn test_identical_duplicate_header_parts_are_rejected() {
         let auth = Auth {
-            providers: vec![provider],
+            providers: vec![Box::new(DummyProvider {
+                name: "TestBasic".to_string(),
+                provider_type: "Basic".to_string(),
+                realm: Some("localrealm".to_string()),
+                expected_credential: "correct".to_string(),
+            })],
             augmenters: vec![],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
-        let metrics = crate::metrics::Metrics::new();
-        // Duplicate header part (should only check once, and succeed)
-        let header = "Basic ZHVtbXk6ZHVtbXk=, Basic ZHVtbXk6ZHVtbXk=";
-        let user = auth
-            .authenticate(header, "127.0.0.1", Some("localrealm"), &metrics)
-            .await;
-        assert!(
-            user.is_some(),
-            "Duplicate headers should be checked just once and succeed"
-        );
+        let metrics = Metrics::new();
 
-        // duplicate wrong header gets rejected
-        let wrong_header = "Basic wrong, Basic wrong";
         let user = auth
-            .authenticate(wrong_header, "127.0.0.1", Some("localrealm"), &metrics)
+            .authenticate(
+                "Basic correct, Basic correct",
+                "127.0.0.1",
+                Some("localrealm"),
+                &metrics,
+            )
             .await;
-        assert!(user.is_none(), "Duplicate wrong headers should be rejected");
+
+        assert!(
+            user.is_none(),
+            "byte-identical duplicate parts were accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_normalized_schemes_are_rejected() {
+        let auth = Auth {
+            providers: vec![Box::new(DummyProvider {
+                name: "TestBasic".to_string(),
+                provider_type: "Basic".to_string(),
+                realm: Some("localrealm".to_string()),
+                expected_credential: "correct".to_string(),
+            })],
+            augmenters: vec![],
+            config: AuthConfig { timeout_in_ms: 5 },
+        };
+        let metrics = Metrics::new();
+
+        for header in [
+            "Basic wrong, Basic correct",
+            "Basic wrong, bAsIc correct",
+            "Plain wrong, Basic correct",
+            "pLaIn wrong, basic correct",
+        ] {
+            let user = auth
+                .authenticate(header, "127.0.0.1", Some("localrealm"), &metrics)
+                .await;
+            assert!(
+                user.is_none(),
+                "duplicate normalized scheme accepted in {header:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1421,17 +1422,16 @@ mod tests {
             name: "TestBasic".to_string(),
             provider_type: "Basic".to_string(),
             realm: Some("localrealm".to_string()),
-            expected_credential: "ZHVtbXk6ZHVtbXk=".to_string(),
+            expected_credential: "correct".to_string(),
         });
         let auth = Auth {
             providers: vec![provider],
             augmenters: vec![],
             config: AuthConfig { timeout_in_ms: 5 },
-            token_store: Arc::new(DummyStore),
         };
-        let metrics = crate::metrics::Metrics::new();
-        // 4 unique header parts (should be rejected)
-        let header = "Basic a, Basic b, Basic ZHVtbXk6ZHVtbXk=, Basic c";
+        let metrics = Metrics::new();
+
+        let header = "Bearer a, Basic correct, Digest b, ApiKey c";
         let user = auth
             .authenticate(header, "127.0.0.1", Some("localrealm"), &metrics)
             .await;
@@ -1439,14 +1439,14 @@ mod tests {
             user.is_none(),
             "More than 3 unique headers should be rejected"
         );
-        // check that if correct header is third user is authenticated
-        let header = "Basic a, Basic b, Basic ZHVtbXk6ZHVtbXk=";
+
+        let header = "Bearer a, Digest b, Basic correct";
         let user = auth
             .authenticate(header, "127.0.0.1", Some("localrealm"), &metrics)
             .await;
         assert!(
             user.is_some(),
-            "User should be authenticated with the correct header"
+            "Up to 3 unique headers should still be accepted"
         );
     }
 }

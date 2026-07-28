@@ -12,17 +12,14 @@ use async_trait::async_trait;
 use cached::Return;
 use cached::proc_macro::cached;
 use futures::lock::Mutex;
-use ldap3::{LdapConnAsync, Scope, SearchEntry};
+use ldap3::{LdapConnAsync, Scope, SearchEntry, ldap_escape};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 use tracing::{debug, info};
 
 use crate::augmenters::Augmenter;
 use crate::models::user::User;
-use crate::utils::log_throttle::should_emit;
-
-const CACHE_HIT_LOG_WINDOW: Duration = Duration::from_secs(30);
+use crate::utils::cache::log_cache_hit;
 
 /// Configuration required to connect to LDAP and fetch user roles.
 #[derive(Deserialize, Serialize, JsonSchema, Debug, Hash, PartialEq, Eq, Clone)]
@@ -56,6 +53,28 @@ impl LDAPAugmenter {
             config: config.clone(),
         }
     }
+}
+
+/// Escapes an untrusted value for literal use in an RFC 4515 LDAP filter.
+/// `ldap_escape` covers the RFC-required metacharacters and NUL. Escaping the
+/// remaining control characters as UTF-8 octets also keeps them out of LDAP logs
+/// and avoids implementation-specific parsing.
+fn escape_filter_value(value: &str) -> String {
+    let escaped = ldap_escape(value);
+    let mut output = String::with_capacity(escaped.len());
+
+    for character in escaped.chars() {
+        if character.is_control() {
+            let mut bytes = [0; 4];
+            for byte in character.encode_utf8(&mut bytes).as_bytes() {
+                output.push_str(&format!("\\{byte:02x}"));
+            }
+        } else {
+            output.push(character);
+        }
+    }
+
+    output
 }
 
 /// A helper that attempts to parse out the "CN" component from a full LDAP DN string.
@@ -179,12 +198,7 @@ fn validate_filters(filters: &Option<Vec<String>>) -> Result<(), String> {
 /// With `filters` configured, we parse each filter as a DN fragment; when it matches part of the
 /// user's DN we emit the path of attribute values from that match down to the CN. Legacy single
 /// `filter` keeps returning just the CN when matched.
-#[cached(
-    time = 120,
-    result = true,
-    with_cached_flag = true,
-    sync_writes = "default"
-)]
+#[cached(time = 120, size = 100_000, result = true, with_cached_flag = true)]
 async fn retrieve_ldap_user_roles(
     config: LDAPAugmenterConfig,
     uid: String,
@@ -214,7 +228,7 @@ async fn retrieve_ldap_user_roles(
         .success()
         .map_err(|e| e.to_string())?;
 
-    let search_filter = format!("(&(objectClass=person)(cn={}))", uid);
+    let search_filter = format!("(&(objectClass=person)(cn={}))", escape_filter_value(&uid));
     let (results, _res) = ldap
         .search(
             &config.search_base,
@@ -283,22 +297,23 @@ impl Augmenter for LDAPAugmenter {
         );
         match retrieve_ldap_user_roles(self.config.clone(), username.clone()).await {
             Ok(roles) => {
-                if roles.was_cached
-                    && let Some(suppressed_count) =
-                        should_emit("augmenters.ldap.lookup.cache.hit", CACHE_HIT_LOG_WINDOW)
-                {
-                    debug!(
-                        event_name = "augmenters.ldap.lookup.cache.hit",
-                        event_domain = "augmenters",
-                        augmenter_name = self.config.name.as_str(),
-                        augmenter_type = "ldap",
-                        cache_result = "hit",
-                        cache_ttl_seconds = 120,
-                        cache_key_type = "username",
-                        suppressed_count,
-                        "LDAP role lookup served from cache"
-                    );
-                }
+                log_cache_hit(
+                    roles.was_cached,
+                    "augmenters.ldap.lookup.cache.hit",
+                    |suppressed_count| {
+                        debug!(
+                            event_name = "augmenters.ldap.lookup.cache.hit",
+                            event_domain = "augmenters",
+                            augmenter_name = self.config.name.as_str(),
+                            augmenter_type = "ldap",
+                            cache_result = "hit",
+                            cache_ttl_seconds = 120,
+                            cache_key_type = "username",
+                            suppressed_count,
+                            "LDAP role lookup served from cache"
+                        );
+                    },
+                );
 
                 let fetched_roles_count = roles.len();
                 if fetched_roles_count == 0 {
@@ -348,6 +363,32 @@ impl Augmenter for LDAPAugmenter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cached::Cached;
+
+    use crate::utils::cache::ATTACKER_KEYED_CACHE_SIZE;
+
+    #[test]
+    fn test_escape_filter_value_metacharacters_and_controls() {
+        assert_eq!(escape_filter_value("alice*"), "alice\\2a");
+        assert_eq!(escape_filter_value("alice("), "alice\\28");
+        assert_eq!(escape_filter_value("alice)"), "alice\\29");
+        assert_eq!(escape_filter_value("alice\\"), "alice\\5c");
+        assert_eq!(escape_filter_value("alice\0"), "alice\\00");
+        assert_eq!(escape_filter_value("alice\u{1f}\u{7f}"), "alice\\1f\\7f");
+    }
+
+    #[test]
+    fn test_escape_filter_value_prevents_filter_injection() {
+        let username = "*)(|(cn=*))";
+        let filter = format!(
+            "(&(objectClass=person)(cn={}))",
+            escape_filter_value(username)
+        );
+        assert_eq!(
+            filter,
+            "(&(objectClass=person)(cn=\\2a\\29\\28|\\28cn=\\2a\\29\\29))"
+        );
+    }
 
     /// Test that a valid DN returns the correct CN.
     #[test]
@@ -462,5 +503,13 @@ mod tests {
         );
 
         assert!(roles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ldap_cache_capacity_matches_shared_limit() {
+        assert_eq!(
+            RETRIEVE_LDAP_USER_ROLES.lock().await.cache_capacity(),
+            Some(ATTACKER_KEYED_CACHE_SIZE)
+        );
     }
 }

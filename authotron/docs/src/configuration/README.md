@@ -19,7 +19,7 @@ The configuration file has a `version` field that determines the schema:
 - **version "1.0.0"**: Legacy format with a single `bind_address` field for the server.
 - **version "2.0.0"**: Current format with separate `server` and `metrics` sections for more flexible configuration.
 
-When Auth-O-Tron loads a version 1.0.0 configuration, it automatically converts it to version 2.0.0 at runtime. This conversion maps the legacy `bind_address` to the new `server` section. It is recommended to update your configuration files to version 2.0.0 for clarity and future compatibility.
+Auth-O-Tron still converts a version 1.0.0 server layout to version 2.0.0 at runtime, mapping `bind_address` to `server`. This compatibility applies only to the layout: the JWT settings shared by both versions have a breaking RS256 migration. A legacy `jwt.secret` is no longer accepted in either version. See [Migrating from HMAC JWTs](../migration/rs256.md).
 
 ## Environment Variable Overrides
 
@@ -63,10 +63,12 @@ providers:
     realm: internal
     users:
       - username: admin
-        password: adminpass
+        # Hash of adminpass for this example only.
+        password_hash: "$argon2id$v=19$m=19456,t=2,p=1$YXV0aG90cm9uLWRvYy0wMg$z1Q74VCoGWdQC7OycwP1XrHF5mtr3GnxX68PUqEe0PQ"
         roles: [admin, user]
       - username: guest
-        password: guestpass
+        # Hash of guestpass for this example only.
+        password_hash: "$argon2id$v=19$m=19456,t=2,p=1$YXV0aG90cm9uLWRvYy0wMw$4EYE6u9AV7M5q2hnrIurr2Ws8jvJuNaM+W4ki331HsQ"
         roles: [readonly]
 
   - type: jwt
@@ -90,13 +92,9 @@ jwt:
   iss: auth-o-tron.example.com
   aud: my-application
   exp: 3600
-  secret: your-secret-key-here
+  kid: key-2026-01
+  private_key: set-via-AOT_JWT__PRIVATE_KEY
 
-store:
-  enabled: true
-  type: mongo
-  uri: mongodb://localhost:27017
-  database: auth_o_tron
 
 logging:
   level: info

@@ -8,27 +8,27 @@
 
 //! Shared application state.
 //!
-//! Contains the state that is shared across all request handlers,
-//! including configuration, authentication, and token storage.
+//! Contains the state shared across all request handlers, including configuration
+//! and authentication.
 
 use crate::auth::Auth;
 use crate::config::ConfigV2;
 use crate::metrics::Metrics;
-use crate::store::Store;
+use crate::models::user::JwtSigner;
 use std::sync::Arc;
 
 /// Application state shared across all HTTP handlers.
 ///
-/// This state is cloned for each request handler and contains
-/// references to the configuration, authentication system, and token store.
+/// This state is cloned for each request handler and contains references to the
+/// configuration and authentication system.
 #[derive(Clone)]
 pub struct AppState {
     /// Application configuration loaded at startup.
     pub config: Arc<ConfigV2>,
+    /// RSA signer parsed once during startup.
+    pub jwt_signer: Arc<JwtSigner>,
     /// Authentication system handling provider and augmenter chains.
     pub auth: Arc<Auth>,
-    /// Token store for managing persistent authentication tokens.
-    pub store: Arc<dyn Store>,
     /// Prometheus style metrics
     pub metrics: Metrics,
 }

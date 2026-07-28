@@ -30,12 +30,12 @@ docker run -d \
   -p 9090:9090 \
   -v $(pwd)/config.yaml:/etc/auth-o-tron/config.yaml \
   -e AOT_CONFIG_PATH=/etc/auth-o-tron/config.yaml \
-  eccr.ecmwf.int/auth-o-tron/auth-o-tron:0.3.0
+  eccr.ecmwf.int/auth-o-tron/auth-o-tron:0.4.0
 ```
 
 ## Docker Compose Example
 
-The `examples/nginx-auth` directory contains a complete setup with Auth-O-Tron, NGINX, and an httpbin backend:
+The `authotron/examples/nginx-auth` directory contains a complete setup with Auth-O-Tron, NGINX, and an httpbin backend:
 
 ```yaml
 version: "3.8"

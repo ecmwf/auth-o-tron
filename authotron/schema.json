@@ -30,71 +30,575 @@
     }
   ],
   "$defs": {
-    "StoreConfig": {
-      "description": "A wrapper for the store configuration:\n- enabled: if false, the store is effectively disabled (NoStore).\n- backend: the actual store backend (MongoDB, etc.).",
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "enabled"
-      ],
-      "anyOf": [
+    "AugmenterConfig": {
+      "description": "Configuration options for augmenters (e.g. an LDAP roles augmenter).",
+      "oneOf": [
         {
-          "oneOf": [
-            {
-              "type": "object",
-              "properties": {
-                "type": {
-                  "type": "string",
-                  "const": "mongo"
-                }
-              },
-              "$ref": "#/$defs/MongoDBConfig",
-              "required": [
-                "type"
-              ]
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "ldap"
             }
+          },
+          "$ref": "#/$defs/LDAPAugmenterConfig",
+          "required": [
+            "type"
           ]
         },
-        {}
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "plain"
+            }
+          },
+          "$ref": "#/$defs/PlainAugmenterConfig",
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "plain_advanced"
+            }
+          },
+          "$ref": "#/$defs/PlainAdvancedAugmenterConfig",
+          "required": [
+            "type"
+          ]
+        }
       ]
     },
-    "MongoDBConfig": {
-      "description": "The config struct for MongoDB connections.\nContains the URI and database name.",
+    "AuthConfig": {
+      "description": "Configuration for the authentication timeout.\nThis is used for select_ok operations in the auth module,\nand we kill ongoing futures if they take too long.\n\nNote:\n- The attribute `#[serde(default = \"default_timeout_in_ms\")]` ensures that if\n  the `timeout_in_ms` key is missing during deserialization, it gets set to 5000.\n- However, when the entire auth section is omitted, Serde calls `AuthConfig::default()`.\n  Therefore, we manually implement Default for AuthConfig so that AuthConfig::default()\n  returns a timeout of 5000 instead of the primitive default (0).",
       "type": "object",
       "properties": {
-        "uri": {
+        "timeout_in_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 5000,
+          "minimum": 0
+        }
+      }
+    },
+    "ConfigV1": {
+      "type": "object",
+      "properties": {
+        "augmenters": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AugmenterConfig"
+          }
+        },
+        "auth": {
+          "$ref": "#/$defs/AuthConfig",
+          "default": {
+            "timeout_in_ms": 5000
+          }
+        },
+        "bind_address": {
           "type": "string"
         },
-        "database": {
-          "type": "string"
+        "include_legacy_headers": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "jwt": {
+          "$ref": "#/$defs/JWTConfig"
+        },
+        "logging": {
+          "$ref": "#/$defs/LoggingConfig"
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderConfig"
+          }
         }
       },
       "required": [
-        "uri",
-        "database"
+        "providers",
+        "bind_address",
+        "jwt",
+        "logging"
       ]
     },
-    "ServiceConfig": {
-      "description": "A declaration of services we might need (e.g., to store scopes).",
+    "ConfigV2": {
+      "type": "object",
+      "properties": {
+        "augmenters": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AugmenterConfig"
+          }
+        },
+        "auth": {
+          "$ref": "#/$defs/AuthConfig",
+          "default": {
+            "timeout_in_ms": 5000
+          }
+        },
+        "include_legacy_headers": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "jwt": {
+          "$ref": "#/$defs/JWTConfig"
+        },
+        "logging": {
+          "$ref": "#/$defs/LoggingConfig"
+        },
+        "metrics": {
+          "$ref": "#/$defs/MetricsConfig",
+          "default": {
+            "enabled": true,
+            "port": 9090
+          }
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderConfig"
+          }
+        },
+        "server": {
+          "$ref": "#/$defs/ServerConfig"
+        }
+      },
+      "required": [
+        "providers",
+        "server",
+        "jwt",
+        "logging"
+      ]
+    },
+    "EFASApiProviderConfig": {
       "type": "object",
       "properties": {
         "name": {
           "type": "string"
         },
-        "scopes": {
-          "type": "array",
+        "realm": {
+          "type": "string"
+        },
+        "uri": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uri",
+        "name",
+        "realm"
+      ]
+    },
+    "EcmwfApiProviderConfig": {
+      "description": "The config needed for the ECMWF API provider (who-am-i endpoint).",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "realm": {
+          "type": "string"
+        },
+        "uri": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uri",
+        "realm",
+        "name"
+      ]
+    },
+    "EcmwfTokenGeneratorProviderConfig": {
+      "description": "Config for an ECMWF Token Generator provider that validates tokens through the token generator API.",
+      "type": "object",
+      "properties": {
+        "cert_uri": {
+          "type": "string"
+        },
+        "client_id": {
+          "type": "string"
+        },
+        "client_secret": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "realm": {
+          "type": "string"
+        },
+        "token_generator_url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "cert_uri",
+        "client_id",
+        "client_secret",
+        "token_generator_url",
+        "realm"
+      ]
+    },
+    "JWTAuthConfig": {
+      "description": "JWT config structure for external usage",
+      "type": "object",
+      "properties": {
+        "cert_uri": {
+          "type": "string"
+        },
+        "iam_realm": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "realm": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cert_uri",
+        "realm",
+        "name",
+        "iam_realm"
+      ]
+    },
+    "JWTConfig": {
+      "description": "A simple definition for JWT usage in tokens.",
+      "type": "object",
+      "properties": {
+        "aud": {
+          "description": "Exact audience claim included in every issued token.",
+          "type": "string"
+        },
+        "exp": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "iss": {
+          "description": "Exact issuer claim included in every issued token.",
+          "type": "string"
+        },
+        "kid": {
+          "description": "Identifier placed in the JWT header for safe signing-key rotation.",
+          "type": "string"
+        },
+        "private_key": {
+          "description": "RSA private key in PEM format (2048 bits minimum; 3072 recommended).\nPrefer injecting this from a secret.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "iss",
+        "aud",
+        "kid",
+        "exp",
+        "private_key"
+      ]
+    },
+    "LDAPAugmenterConfig": {
+      "description": "Configuration required to connect to LDAP and fetch user roles.",
+      "type": "object",
+      "properties": {
+        "bind_dn": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "filter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "filters": {
+          "type": [
+            "array",
+            "null"
+          ],
           "items": {
             "type": "string"
+          }
+        },
+        "ldap_password": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "realm": {
+          "type": "string"
+        },
+        "search_base": {
+          "type": "string"
+        },
+        "uri": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "realm",
+        "uri",
+        "search_base",
+        "ldap_password"
+      ]
+    },
+    "LoggingConfig": {
+      "description": "LoggingConfig controls how we initialize tracing/logging.",
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string"
+        },
+        "level": {
+          "type": "string"
+        },
+        "service_name": {
+          "type": "string",
+          "default": "authotron"
+        },
+        "service_version": {
+          "type": "string",
+          "default": "0.4.0"
+        }
+      },
+      "required": [
+        "level",
+        "format"
+      ]
+    },
+    "MetricsConfig": {
+      "description": "Controls the dedicated metrics/health server on a separate port.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "default": 9090,
+          "maximum": 65535,
+          "minimum": 0
+        }
+      }
+    },
+    "OpenIDOfflineProviderConfig": {
+      "description": "Config for an OpenID provider that also supports offline tokens.",
+      "type": "object",
+      "properties": {
+        "cert_uri": {
+          "type": "string"
+        },
+        "iam_url": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "private_client_id": {
+          "type": "string"
+        },
+        "private_client_secret": {
+          "type": "string"
+        },
+        "public_client_id": {
+          "type": "string"
+        },
+        "realm": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "cert_uri",
+        "public_client_id",
+        "private_client_id",
+        "private_client_secret",
+        "iam_url",
+        "realm"
+      ]
+    },
+    "PlainAdvancedAugmenterAugment": {
+      "type": "object",
+      "properties": {
+        "attributes": {
+          "description": "Attributes to upsert (overwrite existing keys).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "roles": {
+          "description": "Roles to append (deduped).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "PlainAdvancedAugmenterConfig": {
+      "description": "PlainAdvancedAugmenterConfig defines matching and augmentation rules.",
+      "type": "object",
+      "properties": {
+        "augment": {
+          "$ref": "#/$defs/PlainAdvancedAugmenterAugment"
+        },
+        "match": {
+          "$ref": "#/$defs/PlainAdvancedAugmenterMatcher"
+        },
+        "name": {
+          "type": "string"
+        },
+        "realm": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "realm",
+        "match",
+        "augment"
+      ]
+    },
+    "PlainAdvancedAugmenterMatcher": {
+      "type": "object",
+      "properties": {
+        "role": {
+          "description": "Existing roles that trigger augmentation.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "username": {
+          "description": "Users whose names trigger augmentation.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "PlainAugmenterConfig": {
+      "description": "PlainAugmenterConfig defines the data for additional roles.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "A friendly name for logs.",
+          "type": "string"
+        },
+        "realm": {
+          "description": "The realm associated with this provider.",
+          "type": "string"
+        },
+        "roles": {
+          "description": "A list of roles and users.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },
       "required": [
         "name",
-        "scopes"
+        "realm",
+        "roles"
+      ]
+    },
+    "PlainAuthConfig": {
+      "description": "PlainAuthConfig defines the data for Basic authentication.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "A friendly name for logs.",
+          "type": "string"
+        },
+        "realm": {
+          "description": "The realm associated with this provider.",
+          "type": "string"
+        },
+        "users": {
+          "description": "A list of users and their password credentials.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlainUserEntry"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "realm",
+        "users"
+      ]
+    },
+    "PlainUserEntry": {
+      "description": "A plain-provider user with exactly one password credential.",
+      "type": "object",
+      "properties": {
+        "password": {
+          "description": "Deprecated plaintext password. Use password_hash instead.",
+          "type": "string",
+          "deprecated": true
+        },
+        "password_hash": {
+          "description": "An Argon2id hash in PHC string format (recommended).",
+          "type": "string"
+        },
+        "roles": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "username": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "password_hash"
+          ]
+        },
+        {
+          "required": [
+            "password"
+          ]
+        }
+      ],
+      "required": [
+        "username"
       ]
     },
     "ProviderConfig": {
@@ -180,495 +684,6 @@
         }
       ]
     },
-    "EcmwfApiProviderConfig": {
-      "description": "The config needed for the ECMWF API provider (who-am-i endpoint).",
-      "type": "object",
-      "properties": {
-        "uri": {
-          "type": "string"
-        },
-        "realm": {
-          "type": "string"
-        },
-        "name": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "uri",
-        "realm",
-        "name"
-      ]
-    },
-    "EcmwfTokenGeneratorProviderConfig": {
-      "description": "Config for an ECMWF Token Generator provider that validates tokens through the token generator API.",
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string"
-        },
-        "cert_uri": {
-          "type": "string"
-        },
-        "client_id": {
-          "type": "string"
-        },
-        "client_secret": {
-          "type": "string"
-        },
-        "token_generator_url": {
-          "type": "string"
-        },
-        "realm": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "name",
-        "cert_uri",
-        "client_id",
-        "client_secret",
-        "token_generator_url",
-        "realm"
-      ]
-    },
-    "EFASApiProviderConfig": {
-      "type": "object",
-      "properties": {
-        "uri": {
-          "type": "string"
-        },
-        "name": {
-          "type": "string"
-        },
-        "realm": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "uri",
-        "name",
-        "realm"
-      ]
-    },
-    "JWTAuthConfig": {
-      "description": "JWT config structure for external usage",
-      "type": "object",
-      "properties": {
-        "cert_uri": {
-          "type": "string"
-        },
-        "realm": {
-          "type": "string"
-        },
-        "name": {
-          "type": "string"
-        },
-        "iam_realm": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "cert_uri",
-        "realm",
-        "name",
-        "iam_realm"
-      ]
-    },
-    "OpenIDOfflineProviderConfig": {
-      "description": "Config for an OpenID provider that also supports offline tokens.",
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string"
-        },
-        "cert_uri": {
-          "type": "string"
-        },
-        "public_client_id": {
-          "type": "string"
-        },
-        "private_client_id": {
-          "type": "string"
-        },
-        "private_client_secret": {
-          "type": "string"
-        },
-        "iam_url": {
-          "type": "string"
-        },
-        "realm": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "name",
-        "cert_uri",
-        "public_client_id",
-        "private_client_id",
-        "private_client_secret",
-        "iam_url",
-        "realm"
-      ]
-    },
-    "PlainUserEntry": {
-      "description": "Represents a single user entry (username + password).",
-      "type": "object",
-      "properties": {
-        "username": {
-          "type": "string"
-        },
-        "password": {
-          "type": "string"
-        },
-        "roles": {
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": {
-            "type": "string"
-          }
-        }
-      },
-      "required": [
-        "username",
-        "password"
-      ]
-    },
-    "PlainAuthConfig": {
-      "description": "PlainAuthConfig defines the data for Basic authentication.",
-      "type": "object",
-      "properties": {
-        "name": {
-          "description": "A friendly name for logs.",
-          "type": "string"
-        },
-        "realm": {
-          "description": "The realm associated with this provider.",
-          "type": "string"
-        },
-        "users": {
-          "description": "A list of username/password pairs.",
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/PlainUserEntry"
-          }
-        }
-      },
-      "required": [
-        "name",
-        "realm",
-        "users"
-      ]
-    },
-    "AugmenterConfig": {
-      "description": "Configuration options for augmenters (e.g. an LDAP roles augmenter).",
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "ldap"
-            }
-          },
-          "$ref": "#/$defs/LDAPAugmenterConfig",
-          "required": [
-            "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "plain"
-            }
-          },
-          "$ref": "#/$defs/PlainAugmenterConfig",
-          "required": [
-            "type"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "const": "plain_advanced"
-            }
-          },
-          "$ref": "#/$defs/PlainAdvancedAugmenterConfig",
-          "required": [
-            "type"
-          ]
-        }
-      ]
-    },
-    "LDAPAugmenterConfig": {
-      "description": "Configuration required to connect to LDAP and fetch user roles.",
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string"
-        },
-        "realm": {
-          "type": "string"
-        },
-        "uri": {
-          "type": "string"
-        },
-        "search_base": {
-          "type": "string"
-        },
-        "filter": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "filters": {
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": {
-            "type": "string"
-          }
-        },
-        "bind_dn": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "ldap_password": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "name",
-        "realm",
-        "uri",
-        "search_base",
-        "ldap_password"
-      ]
-    },
-    "PlainAugmenterConfig": {
-      "description": "PlainAugmenterConfig defines the data for additional roles.",
-      "type": "object",
-      "properties": {
-        "name": {
-          "description": "A friendly name for logs.",
-          "type": "string"
-        },
-        "realm": {
-          "description": "The realm associated with this provider.",
-          "type": "string"
-        },
-        "roles": {
-          "description": "A list of roles and users.",
-          "type": "object",
-          "additionalProperties": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        }
-      },
-      "required": [
-        "name",
-        "realm",
-        "roles"
-      ]
-    },
-    "PlainAdvancedAugmenterMatcher": {
-      "type": "object",
-      "properties": {
-        "username": {
-          "description": "Users whose names trigger augmentation.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": []
-        },
-        "role": {
-          "description": "Existing roles that trigger augmentation.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": []
-        }
-      }
-    },
-    "PlainAdvancedAugmenterAugment": {
-      "type": "object",
-      "properties": {
-        "roles": {
-          "description": "Roles to append (deduped).",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": []
-        },
-        "attributes": {
-          "description": "Attributes to upsert (overwrite existing keys).",
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          },
-          "default": {}
-        }
-      }
-    },
-    "PlainAdvancedAugmenterConfig": {
-      "description": "PlainAdvancedAugmenterConfig defines matching and augmentation rules.",
-      "type": "object",
-      "properties": {
-        "name": {
-          "type": "string"
-        },
-        "realm": {
-          "type": "string"
-        },
-        "match": {
-          "$ref": "#/$defs/PlainAdvancedAugmenterMatcher"
-        },
-        "augment": {
-          "$ref": "#/$defs/PlainAdvancedAugmenterAugment"
-        }
-      },
-      "required": [
-        "name",
-        "realm",
-        "match",
-        "augment"
-      ]
-    },
-    "JWTConfig": {
-      "description": "A simple definition for JWT usage in tokens.",
-      "type": "object",
-      "properties": {
-        "iss": {
-          "type": "string"
-        },
-        "aud": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "exp": {
-          "type": "integer",
-          "format": "int64"
-        },
-        "secret": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "iss",
-        "exp",
-        "secret"
-      ]
-    },
-    "LoggingConfig": {
-      "description": "LoggingConfig controls how we initialize tracing/logging.",
-      "type": "object",
-      "properties": {
-        "level": {
-          "type": "string"
-        },
-        "format": {
-          "type": "string"
-        },
-        "service_name": {
-          "type": "string",
-          "default": "authotron"
-        },
-        "service_version": {
-          "type": "string",
-          "default": "0.2.12"
-        }
-      },
-      "required": [
-        "level",
-        "format"
-      ]
-    },
-    "AuthConfig": {
-      "description": "Configuration for the authentication timeout.\nThis is used for select_ok operations in the auth module,\nand we kill ongoing futures if they take too long.\n\nNote:\n- The attribute `#[serde(default = \"default_timeout_in_ms\")]` ensures that if\n  the `timeout_in_ms` key is missing during deserialization, it gets set to 5000.\n- However, when the entire auth section is omitted, Serde calls `AuthConfig::default()`.\n  Therefore, we manually implement Default for AuthConfig so that AuthConfig::default()\n  returns a timeout of 5000 instead of the primitive default (0).",
-      "type": "object",
-      "properties": {
-        "timeout_in_ms": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0,
-          "default": 5000
-        }
-      }
-    },
-    "ConfigV1": {
-      "type": "object",
-      "properties": {
-        "store": {
-          "$ref": "#/$defs/StoreConfig"
-        },
-        "services": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ServiceConfig"
-          }
-        },
-        "providers": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ProviderConfig"
-          }
-        },
-        "augmenters": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/AugmenterConfig"
-          },
-          "default": []
-        },
-        "bind_address": {
-          "type": "string"
-        },
-        "jwt": {
-          "$ref": "#/$defs/JWTConfig"
-        },
-        "include_legacy_headers": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "logging": {
-          "$ref": "#/$defs/LoggingConfig"
-        },
-        "auth": {
-          "$ref": "#/$defs/AuthConfig",
-          "default": {
-            "timeout_in_ms": 5000
-          }
-        }
-      },
-      "required": [
-        "store",
-        "services",
-        "providers",
-        "bind_address",
-        "jwt",
-        "logging"
-      ]
-    },
     "ServerConfig": {
       "type": "object",
       "properties": {
@@ -679,92 +694,12 @@
         "port": {
           "type": "integer",
           "format": "uint16",
-          "minimum": 0,
-          "maximum": 65535
+          "maximum": 65535,
+          "minimum": 0
         }
       },
       "required": [
         "port"
-      ]
-    },
-    "MetricsConfig": {
-      "description": "Controls the dedicated metrics/health server on a separate port.",
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        },
-        "port": {
-          "type": "integer",
-          "format": "uint16",
-          "minimum": 0,
-          "maximum": 65535,
-          "default": 9090
-        }
-      }
-    },
-    "ConfigV2": {
-      "type": "object",
-      "properties": {
-        "store": {
-          "$ref": "#/$defs/StoreConfig"
-        },
-        "services": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ServiceConfig"
-          }
-        },
-        "providers": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/ProviderConfig"
-          }
-        },
-        "augmenters": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/AugmenterConfig"
-          },
-          "default": []
-        },
-        "server": {
-          "$ref": "#/$defs/ServerConfig"
-        },
-        "metrics": {
-          "$ref": "#/$defs/MetricsConfig",
-          "default": {
-            "enabled": true,
-            "port": 9090
-          }
-        },
-        "jwt": {
-          "$ref": "#/$defs/JWTConfig"
-        },
-        "include_legacy_headers": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "logging": {
-          "$ref": "#/$defs/LoggingConfig"
-        },
-        "auth": {
-          "$ref": "#/$defs/AuthConfig",
-          "default": {
-            "timeout_in_ms": 5000
-          }
-        }
-      },
-      "required": [
-        "store",
-        "services",
-        "providers",
-        "server",
-        "jwt",
-        "logging"
       ]
     }
   }

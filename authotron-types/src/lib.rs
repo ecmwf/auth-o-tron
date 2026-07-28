@@ -21,8 +21,8 @@ fn default_version() -> i32 {
 
 /// Authenticated user — the single canonical type used across all services.
 ///
-/// Carries identity, roles, attributes, and scopes. The `version` field exists
-/// for storage compatibility (MongoDB documents) and defaults to `1`.
+/// Carries identity, roles, attributes, and scopes. The `version` field supports
+/// wire-format evolution and defaults to `1`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct User {
     #[serde(default = "default_version")]
@@ -76,14 +76,16 @@ impl User {
 /// Authentication errors shared across the ecosystem.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuthError {
-    /// The token was rejected by the auth provider (HTTP 401).
+    /// The token was rejected by the auth provider (HTTP 401 or 403).
     Unauthorized {
         message: String,
         www_authenticate: String,
     },
     /// The JWT could not be decoded or validated.
     InvalidJwt { message: String },
-    /// The auth service is unreachable or timed out.
+    /// The configured RSA public key could not be parsed.
+    InvalidPublicKey { message: String },
+    /// The auth service is unreachable, timed out, or returned HTTP 5xx.
     ServiceUnavailable { message: String },
 }
 
@@ -92,6 +94,9 @@ impl std::fmt::Display for AuthError {
         match self {
             AuthError::Unauthorized { message, .. } => write!(f, "unauthorized: {}", message),
             AuthError::InvalidJwt { message } => write!(f, "invalid JWT: {}", message),
+            AuthError::InvalidPublicKey { message } => {
+                write!(f, "invalid JWT public key: {}", message)
+            }
             AuthError::ServiceUnavailable { message } => {
                 write!(f, "auth service unavailable: {}", message)
             }
@@ -209,6 +214,11 @@ mod tests {
             message: "expired".to_string(),
         };
         assert_eq!(format!("{}", err), "invalid JWT: expired");
+
+        let err = AuthError::InvalidPublicKey {
+            message: "malformed PEM".to_string(),
+        };
+        assert_eq!(format!("{}", err), "invalid JWT public key: malformed PEM");
 
         let err = AuthError::ServiceUnavailable {
             message: "timeout".to_string(),

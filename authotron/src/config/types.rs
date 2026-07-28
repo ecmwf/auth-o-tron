@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use std::env;
 
 use super::logging::LoggingConfig;
-use super::store::StoreConfig;
 use crate::augmenters::AugmenterConfig;
 use crate::providers::ProviderConfig;
 
@@ -28,8 +27,6 @@ pub enum Config {
 
 #[derive(Deserialize, Serialize, Debug, JsonSchema)]
 pub struct ConfigV1 {
-    pub store: StoreConfig,
-    pub services: Vec<ServiceConfig>,
     pub providers: Vec<ProviderConfig>,
     #[serde(default)]
     pub augmenters: Vec<AugmenterConfig>,
@@ -43,8 +40,6 @@ pub struct ConfigV1 {
 
 #[derive(Deserialize, Serialize, Debug, JsonSchema)]
 pub struct ConfigV2 {
-    pub store: StoreConfig,
-    pub services: Vec<ServiceConfig>,
     pub providers: Vec<ProviderConfig>,
     #[serde(default)]
     pub augmenters: Vec<AugmenterConfig>,
@@ -127,8 +122,6 @@ pub fn load_config() -> ConfigV2 {
 fn convert_v1_to_v2(v1: ConfigV1) -> Result<ConfigV2, String> {
     let (host, port) = parse_bind_address(&v1.bind_address)?;
     Ok(ConfigV2 {
-        store: v1.store,
-        services: v1.services,
         providers: v1.providers,
         augmenters: v1.augmenters,
         server: ServerConfig { host, port },
@@ -164,17 +157,16 @@ pub fn print_schema() {
 /// A simple definition for JWT usage in tokens.
 #[derive(Deserialize, Serialize, Debug, JsonSchema)]
 pub struct JWTConfig {
+    /// Exact issuer claim included in every issued token.
     pub iss: String,
-    pub aud: Option<String>,
+    /// Exact audience claim included in every issued token.
+    pub aud: String,
+    /// Identifier placed in the JWT header for safe signing-key rotation.
+    pub kid: String,
     pub exp: i64,
-    pub secret: String,
-}
-
-/// A declaration of services we might need (e.g., to store scopes).
-#[derive(Deserialize, Serialize, JsonSchema, Debug)]
-pub struct ServiceConfig {
-    pub name: String,
-    pub scopes: Vec<String>,
+    /// RSA private key in PEM format (2048 bits minimum; 3072 recommended).
+    /// Prefer injecting this from a secret.
+    pub private_key: String,
 }
 
 /// Returns the default timeout value (5000 ms).
@@ -228,9 +220,10 @@ mod tests {
     }
 
     #[test]
-    fn test_v2_config_deserialization_minimal() {
+    fn test_v2_config_deserialization_with_legacy_keys() {
         let yaml = r#"
 version: "2.0.0"
+# Removed keys remain accepted as unknown fields for backwards compatibility.
 store:
   enabled: false
 providers: []
@@ -240,12 +233,16 @@ server:
   port: 3000
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  kid: "key-2026-01"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
-services: []
+services:
+  - name: legacy
+    scopes: [read]
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let config: Config = figment.extract().expect("Should parse config");
@@ -258,25 +255,60 @@ services: []
         assert_eq!(c.metrics.port, 9090);
         assert_eq!(c.logging.level, "info");
         assert_eq!(c.jwt.iss, "issuer");
+        assert_eq!(c.jwt.aud, "audience");
         assert_eq!(c.auth.timeout_in_ms, 5000);
+    }
+
+    #[test]
+    fn test_jwt_contract_fields_are_required() {
+        let base = r#"
+version: "2.0.0"
+store:
+  enabled: false
+providers: []
+augmenters: []
+server:
+  port: 3000
+jwt:
+  iss: "issuer"
+  aud: "audience"
+  exp: 3600
+  kid: "key-2026-01"
+  private_key: "test-only-key"
+logging:
+  level: "info"
+  format: "console"
+services: []
+"#;
+
+        for field in ["iss", "aud", "kid", "private_key"] {
+            let yaml = base
+                .lines()
+                .filter(|line| !line.trim_start().starts_with(&format!("{field}:")))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let result = Figment::new()
+                .merge(Yaml::string(&yaml))
+                .extract::<Config>();
+            assert!(result.is_err(), "jwt.{field} must be required");
+        }
     }
 
     #[test]
     fn test_v2_config_deserialization_missing_server() {
         let yaml = r#"
 version: "2.0.0"
-store:
-  enabled: false
 providers: []
 augmenters: []
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  kid: "key-2026-01"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
-services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let result = figment.extract::<Config>();
@@ -290,20 +322,19 @@ services: []
     fn test_v2_auth_timeout_override() {
         let yaml = r#"
 version: "2.0.0"
-store:
-  enabled: false
 providers: []
 augmenters: []
 server:
   port: 3000
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  kid: "key-2026-01"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
-services: []
 auth:
   timeout_in_ms: 8000
         "#;
@@ -319,20 +350,19 @@ auth:
     fn test_v2_auth_defaults_when_omitted() {
         let yaml = r#"
 version: "2.0.0"
-store:
-  enabled: false
 providers: []
 augmenters: []
 server:
   port: 3000
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  kid: "key-2026-01"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
-services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let config: Config = figment.extract().expect("Should parse config");
@@ -346,20 +376,19 @@ services: []
     fn test_v2_metrics_defaults_when_omitted() {
         let yaml = r#"
 version: "2.0.0"
-store:
-  enabled: false
 providers: []
 augmenters: []
 server:
   port: 3000
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  kid: "key-2026-01"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
-services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let config: Config = figment.extract().expect("Should parse config");
@@ -375,8 +404,6 @@ services: []
     fn test_v2_metrics_explicit_disabled() {
         let yaml = r#"
 version: "2.0.0"
-store:
-  enabled: false
 providers: []
 augmenters: []
 server:
@@ -385,12 +412,13 @@ metrics:
   enabled: false
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  kid: "key-2026-01"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
-services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let config: Config = figment.extract().expect("Should parse config");
@@ -404,8 +432,6 @@ services: []
     fn test_v2_metrics_custom_port() {
         let yaml = r#"
 version: "2.0.0"
-store:
-  enabled: false
 providers: []
 augmenters: []
 server:
@@ -414,12 +440,13 @@ metrics:
   port: 9999
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  kid: "key-2026-01"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
-services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let config: Config = figment.extract().expect("Should parse config");
@@ -431,7 +458,7 @@ services: []
     }
 
     #[test]
-    fn test_v1_backward_compat_bind_address() {
+    fn test_v1_backward_compat_with_legacy_keys() {
         let yaml = r#"
 version: "1.0.0"
 store:
@@ -441,8 +468,10 @@ augmenters: []
 bind_address: "127.0.0.1:8080"
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  kid: "key-2026-01"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
@@ -465,19 +494,18 @@ services: []
     fn test_v1_backward_compat_ipv6_bracketed() {
         let yaml = r#"
 version: "1.0.0"
-store:
-  enabled: false
 providers: []
 augmenters: []
 bind_address: "[::1]:3000"
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  kid: "key-2026-01"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
-services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let config: Config = figment.extract().expect("Should parse v1 config");
@@ -528,20 +556,19 @@ services: []
 
         let yaml = r#"
 version: "2.0.0"
-store:
-  enabled: false
 providers: []
 augmenters: []
 server:
   port: 3000
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  kid: "key-2026-01"
+  private_key: "test-only-key"
 logging:
   level: "info"
   format: "console"
-services: []
         "#;
 
         let figment = figment::Figment::new()

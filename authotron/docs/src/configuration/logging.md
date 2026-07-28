@@ -23,6 +23,8 @@ The `level` field controls which messages are emitted. Messages at the configure
 | warn | Warning conditions that are not errors |
 | error | Error conditions |
 
+Values are case-insensitive. Any other value is a startup error; Auth-O-Tron reports it to standard error and exits without starting either server. Failure to install the process-wide tracing subscriber is handled the same way.
+
 ## Log Formats
 
 ### Console Format
@@ -76,7 +78,6 @@ Auth-O-Tron uses structured event naming following the pattern `domain.component
 | auth | Authentication flow events |
 | providers | Provider lifecycle and validation |
 | augmenters | Augmenter lifecycle and enrichment |
-| store | Token store operations |
 | routes | HTTP route handler events |
 | startup | Server initialization events |
 
