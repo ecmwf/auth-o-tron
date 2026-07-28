@@ -64,7 +64,7 @@ impl Provider for EfasApiProvider {
     }
 
     fn get_realm(&self) -> Option<&str> {
-        Some("efas")
+        Some(&self.config.realm)
     }
 
     async fn authenticate(&self, token: &str) -> Result<User, String> {
@@ -159,6 +159,17 @@ mod tests {
     use mockito::Server;
     use tokio;
     use tracing_test::traced_test;
+
+    #[test]
+    fn test_get_realm_returns_configured_realm() {
+        let provider = EfasApiProvider::new(&EFASApiProviderConfig {
+            uri: "https://example.invalid".to_string(),
+            name: "efas".to_string(),
+            realm: "configured-realm".to_string(),
+        });
+
+        assert_eq!(provider.get_realm(), Some("configured-realm"));
+    }
 
     /// Test that a valid token returns a User with the expected UID.
     #[tokio::test]
