@@ -19,10 +19,6 @@ providers:
 
 augmenters: []
 
-store:
-  enabled: false
-
-services: []
 
 jwt:
   iss: "auth-o-tron"

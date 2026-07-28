@@ -38,9 +38,6 @@ providers:
     token_generator_url: "{generator_url}"
     realm: "ecmwf"
 augmenters: []
-store:
-  enabled: false
-services: []
 jwt:
   exp: 3600
   iss: authotron-test

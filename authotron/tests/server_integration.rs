@@ -15,9 +15,11 @@ use tower::ServiceExt;
 fn base_config(server_port: u16, metrics_enabled: bool, metrics_port: u16) -> ConfigV2 {
     let yaml = r#"
 version: "2.0.0"
-store:
-  enabled: false
-providers: []
+providers:
+  - name: configured
+    type: plain
+    realm: test
+    users: []
 augmenters: []
 server:
   port: 0
@@ -28,7 +30,6 @@ jwt:
 logging:
   level: "warn"
   format: "console"
-services: []
     "#;
 
     let config: Config = Figment::new()
@@ -160,4 +161,30 @@ async fn logo_returns_png() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers().get("content-type").unwrap(), "image/png");
+}
+
+#[tokio::test]
+async fn removed_token_routes_return_not_found() {
+    let config = base_config(0, false, 0);
+    let (app, _) = common::build_app(config).await;
+
+    for request in [
+        Request::get("/token").body(Body::empty()).unwrap(),
+        Request::get("/tokens").body(Body::empty()).unwrap(),
+        Request::delete("/token/opaque-token")
+            .body(Body::empty())
+            .unwrap(),
+    ] {
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[tokio::test]
+async fn providers_exclude_removed_store_provider() {
+    let config = base_config(0, false, 0);
+    let (_, _, state) = common::build_app_with_state(config).await;
+
+    assert_eq!(state.auth.providers.len(), 1);
+    assert_eq!(state.auth.providers[0].get_name(), "configured");
 }

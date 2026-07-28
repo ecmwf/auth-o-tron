@@ -20,7 +20,6 @@ use crate::config::ConfigV2;
 use crate::metrics::Metrics;
 use crate::routes;
 use crate::state::AppState;
-use crate::store::create_store;
 
 /// Build the auth-o-tron application router and state from config.
 ///
@@ -29,12 +28,10 @@ use crate::store::create_store;
 pub async fn build_app(
     config: Arc<ConfigV2>,
 ) -> Result<(axum::Router, AppState), Box<dyn std::error::Error>> {
-    let store = create_store(&config.store).await;
     let auth_config = config.auth.clone();
     let auth = Arc::new(Auth::new(
         &config.providers,
         &config.augmenters,
-        store.clone(),
         auth_config,
     ));
 
@@ -69,7 +66,6 @@ pub async fn build_app(
     let state = AppState {
         config: config.clone(),
         auth,
-        store,
         metrics,
     };
 

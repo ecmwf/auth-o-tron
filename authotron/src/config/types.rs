@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use std::env;
 
 use super::logging::LoggingConfig;
-use super::store::StoreConfig;
 use crate::augmenters::AugmenterConfig;
 use crate::providers::ProviderConfig;
 
@@ -28,8 +27,6 @@ pub enum Config {
 
 #[derive(Deserialize, Serialize, Debug, JsonSchema)]
 pub struct ConfigV1 {
-    pub store: StoreConfig,
-    pub services: Vec<ServiceConfig>,
     pub providers: Vec<ProviderConfig>,
     #[serde(default)]
     pub augmenters: Vec<AugmenterConfig>,
@@ -43,8 +40,6 @@ pub struct ConfigV1 {
 
 #[derive(Deserialize, Serialize, Debug, JsonSchema)]
 pub struct ConfigV2 {
-    pub store: StoreConfig,
-    pub services: Vec<ServiceConfig>,
     pub providers: Vec<ProviderConfig>,
     #[serde(default)]
     pub augmenters: Vec<AugmenterConfig>,
@@ -127,8 +122,6 @@ pub fn load_config() -> ConfigV2 {
 fn convert_v1_to_v2(v1: ConfigV1) -> Result<ConfigV2, String> {
     let (host, port) = parse_bind_address(&v1.bind_address)?;
     Ok(ConfigV2 {
-        store: v1.store,
-        services: v1.services,
         providers: v1.providers,
         augmenters: v1.augmenters,
         server: ServerConfig { host, port },
@@ -168,13 +161,6 @@ pub struct JWTConfig {
     pub aud: Option<String>,
     pub exp: i64,
     pub secret: String,
-}
-
-/// A declaration of services we might need (e.g., to store scopes).
-#[derive(Deserialize, Serialize, JsonSchema, Debug)]
-pub struct ServiceConfig {
-    pub name: String,
-    pub scopes: Vec<String>,
 }
 
 /// Returns the default timeout value (5000 ms).
@@ -228,9 +214,10 @@ mod tests {
     }
 
     #[test]
-    fn test_v2_config_deserialization_minimal() {
+    fn test_v2_config_deserialization_with_legacy_keys() {
         let yaml = r#"
 version: "2.0.0"
+# Removed keys remain accepted as unknown fields for backwards compatibility.
 store:
   enabled: false
 providers: []
@@ -245,7 +232,9 @@ jwt:
 logging:
   level: "info"
   format: "console"
-services: []
+services:
+  - name: legacy
+    scopes: [read]
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let config: Config = figment.extract().expect("Should parse config");
@@ -265,8 +254,6 @@ services: []
     fn test_v2_config_deserialization_missing_server() {
         let yaml = r#"
 version: "2.0.0"
-store:
-  enabled: false
 providers: []
 augmenters: []
 jwt:
@@ -276,7 +263,6 @@ jwt:
 logging:
   level: "info"
   format: "console"
-services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let result = figment.extract::<Config>();
@@ -290,8 +276,6 @@ services: []
     fn test_v2_auth_timeout_override() {
         let yaml = r#"
 version: "2.0.0"
-store:
-  enabled: false
 providers: []
 augmenters: []
 server:
@@ -303,7 +287,6 @@ jwt:
 logging:
   level: "info"
   format: "console"
-services: []
 auth:
   timeout_in_ms: 8000
         "#;
@@ -319,8 +302,6 @@ auth:
     fn test_v2_auth_defaults_when_omitted() {
         let yaml = r#"
 version: "2.0.0"
-store:
-  enabled: false
 providers: []
 augmenters: []
 server:
@@ -332,7 +313,6 @@ jwt:
 logging:
   level: "info"
   format: "console"
-services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let config: Config = figment.extract().expect("Should parse config");
@@ -346,8 +326,6 @@ services: []
     fn test_v2_metrics_defaults_when_omitted() {
         let yaml = r#"
 version: "2.0.0"
-store:
-  enabled: false
 providers: []
 augmenters: []
 server:
@@ -359,7 +337,6 @@ jwt:
 logging:
   level: "info"
   format: "console"
-services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let config: Config = figment.extract().expect("Should parse config");
@@ -375,8 +352,6 @@ services: []
     fn test_v2_metrics_explicit_disabled() {
         let yaml = r#"
 version: "2.0.0"
-store:
-  enabled: false
 providers: []
 augmenters: []
 server:
@@ -390,7 +365,6 @@ jwt:
 logging:
   level: "info"
   format: "console"
-services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let config: Config = figment.extract().expect("Should parse config");
@@ -404,8 +378,6 @@ services: []
     fn test_v2_metrics_custom_port() {
         let yaml = r#"
 version: "2.0.0"
-store:
-  enabled: false
 providers: []
 augmenters: []
 server:
@@ -419,7 +391,6 @@ jwt:
 logging:
   level: "info"
   format: "console"
-services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let config: Config = figment.extract().expect("Should parse config");
@@ -431,7 +402,7 @@ services: []
     }
 
     #[test]
-    fn test_v1_backward_compat_bind_address() {
+    fn test_v1_backward_compat_with_legacy_keys() {
         let yaml = r#"
 version: "1.0.0"
 store:
@@ -465,8 +436,6 @@ services: []
     fn test_v1_backward_compat_ipv6_bracketed() {
         let yaml = r#"
 version: "1.0.0"
-store:
-  enabled: false
 providers: []
 augmenters: []
 bind_address: "[::1]:3000"
@@ -477,7 +446,6 @@ jwt:
 logging:
   level: "info"
   format: "console"
-services: []
         "#;
         let figment = Figment::new().merge(Yaml::string(yaml));
         let config: Config = figment.extract().expect("Should parse v1 config");
@@ -528,8 +496,6 @@ services: []
 
         let yaml = r#"
 version: "2.0.0"
-store:
-  enabled: false
 providers: []
 augmenters: []
 server:
@@ -541,7 +507,6 @@ jwt:
 logging:
   level: "info"
   format: "console"
-services: []
         "#;
 
         let figment = figment::Figment::new()
