@@ -14,6 +14,7 @@
 use crate::auth::Auth;
 use crate::config::ConfigV2;
 use crate::metrics::Metrics;
+use crate::models::user::JwtSigner;
 use crate::store::Store;
 use std::sync::Arc;
 
@@ -25,6 +26,8 @@ use std::sync::Arc;
 pub struct AppState {
     /// Application configuration loaded at startup.
     pub config: Arc<ConfigV2>,
+    /// RSA signer parsed once during startup.
+    pub jwt_signer: Arc<JwtSigner>,
     /// Authentication system handling provider and augmenter chains.
     pub auth: Arc<Auth>,
     /// Token store for managing persistent authentication tokens.

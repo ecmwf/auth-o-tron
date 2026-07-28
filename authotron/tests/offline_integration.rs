@@ -58,7 +58,9 @@ services: []
 jwt:
   exp: 3600
   iss: authotron-test
-  secret: test-secret
+  aud: authotron-consumer
+  kid: test-key
+  private_key: test-key-injected-by-test
 server:
   host: "127.0.0.1"
   port: 8081
@@ -72,9 +74,10 @@ fn load_test_config() -> ConfigV2 {
         .extract()
         .expect("Failed to parse test config YAML");
 
-    let Config::ConfigV2(cfg) = config else {
+    let Config::ConfigV2(mut cfg) = config else {
         panic!("expected ConfigV2");
     };
+    cfg.jwt.private_key = include_str!("fixtures/test-rsa-private.pem").to_string();
     cfg
 }
 
@@ -104,7 +107,18 @@ async fn integration_plain_auth_flow() {
         .strip_prefix("Bearer ")
         .expect("Authorization header missing Bearer prefix");
 
-    let claims = decode_claims(token, &config.jwt.secret);
+    let claims = decode_claims(token, &config.jwt);
+    assert_eq!(claims.claims.iss.as_deref(), Some(config.jwt.iss.as_str()));
+    assert_eq!(claims.claims.aud.as_deref(), Some(config.jwt.aud.as_str()));
+
+    let public_keys = [authotron_client::JwtPublicKey::new(
+        &config.jwt.kid,
+        include_bytes!("fixtures/test-rsa-public.pem"),
+    )];
+    let verified_user =
+        authotron_client::decode_jwt(token, &public_keys, &config.jwt.iss, &config.jwt.aud)
+            .expect("authotron-client should verify the issued RS256 token");
+    assert_eq!(verified_user.username, "adam");
 
     assert_eq!(claims.claims.roles.len(), 2);
     assert!(claims.claims.roles.iter().any(|r| r == "user"));
@@ -213,7 +227,7 @@ async fn integration_plain_auth_realm_separation() {
         .strip_prefix("Bearer ")
         .expect("Authorization header missing Bearer prefix");
 
-    let claims = decode_claims(token, &config.jwt.secret);
+    let claims = decode_claims(token, &config.jwt);
 
     assert_eq!(claims.claims.roles.len(), 1);
     assert!(

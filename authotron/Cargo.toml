@@ -1,6 +1,6 @@
 [package]
 name = "authotron"
-version = "0.3.7"
+version = "0.4.0"
 edition = "2024"
 description = "Authentication and authorization gateway for web APIs. Validates credentials from multiple providers, enriches users with roles, and issues signed JWTs."
 license = "Apache-2.0"
@@ -11,16 +11,16 @@ keywords = ["authentication", "authorization", "gateway", "jwt", "nginx"]
 categories = ["authentication", "network-programming"]
 rust-version = "1.88"
 include = [
-    "src/**/*.rs",
-    "src/static/**",
-    "Cargo.toml",
-    "LICENSE.txt",
-    "README.md",
+  "src/**/*.rs",
+  "src/static/**",
+  "Cargo.toml",
+  "LICENSE.txt",
+  "README.md",
 ]
 
 [dependencies]
 # Shared types
-authotron-types = { path = "../authotron-types", version = "0.1.0" }
+authotron-types = { path = "../authotron-types", version = "0.2.0" }
 
 # Web framework
 aide = { version = "~0.15", features = ["axum", "axum-multipart"] }
@@ -31,6 +31,7 @@ tokio = { version = "~1.50", features = ["full"] }
 # Authentication & crypto
 base64 = "~0.22"
 jsonwebtoken = { version = "~10.3", features = ["rust_crypto"] }
+rsa = "~0.9"
 ldap3 = "~0.12"
 
 # Data & serialization
@@ -58,6 +59,7 @@ reqwest = { version = "~0.13", features = ["form", "json"] }
 uuid = { version = "~1.22", features = ["v4"] }
 
 [dev-dependencies]
+authotron-client = { path = "../authotron-client", version = "0.2.0" }
 mockito = "~1.7"
 tower = { version = "~0.5", features = ["util"] }
 tracing-test = "~0.2"

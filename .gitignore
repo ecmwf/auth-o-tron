@@ -1,3 +1,7 @@
 /target
 config.yaml
 skaffold.env
+
+# Locally generated JWT signing keys (public keys may be committed intentionally).
+/jwt-private.pem
+authotron/examples/**/*private*.pem

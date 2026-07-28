@@ -27,7 +27,7 @@ sequenceDiagram
 
 ## Example Configuration
 
-The `examples/nginx-auth` directory contains a complete working setup. Here is the NGINX configuration with explanations:
+The `authotron/examples/nginx-auth` directory contains a complete working setup. Here is the NGINX configuration with explanations:
 
 ```nginx
 events {
@@ -109,7 +109,7 @@ http {
 ## Headers Forwarded to Backend
 
 | Header | Description |
-|--------|-------------|
+| -------- | ------------- |
 | Authorization | The JWT token issued by Auth-O-Tron |
 | X-Auth-Username | Authenticated username (requires `include_legacy_headers: true`) |
 | X-Auth-Realm | Authentication realm (requires `include_legacy_headers: true`) |

@@ -32,7 +32,11 @@ async fn authenticate(
     user: User,
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> Result<impl IntoResponse, HTTPError> {
-    let jwt = user.to_jwt(&state.config.jwt);
+    let jwt = user
+        .to_jwt(&state.config.jwt, &state.jwt_signer)
+        .map_err(|error| {
+            HTTPError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string(), None)
+        })?;
 
     let mut response_builder = axum::http::response::Response::builder()
         .status(StatusCode::OK)

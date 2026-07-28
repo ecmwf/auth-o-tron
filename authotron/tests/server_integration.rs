@@ -23,8 +23,10 @@ server:
   port: 0
 jwt:
   iss: "issuer"
+  aud: "audience"
   exp: 3600
-  secret: "secret"
+  kid: "key-2026-01"
+  private_key: "test-key-injected-by-test"
 logging:
   level: "warn"
   format: "console"
@@ -49,6 +51,7 @@ services: []
         port: metrics_port,
     };
 
+    cfg.jwt.private_key = include_str!("fixtures/test-rsa-private.pem").to_string();
     cfg
 }
 
@@ -63,6 +66,47 @@ async fn startup_rejects_port_collision() {
         err.contains("must be different"),
         "expected port collision error, got: {err}"
     );
+}
+
+#[tokio::test]
+async fn startup_rejects_malformed_rsa_private_key() {
+    let mut config = base_config(0, false, 0);
+    config.jwt.private_key = "not a PEM key".to_string();
+
+    let error = match startup::build_app(Arc::new(config)).await {
+        Ok(_) => panic!("malformed private key must fail startup"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("invalid JWT RSA private key"),
+        "unexpected error: {error}"
+    );
+}
+
+async fn assert_startup_rejects_weak_key(private_key: &str, expected_bits: usize) {
+    let mut config = base_config(0, false, 0);
+    config.jwt.private_key = private_key.to_string();
+
+    let error = match startup::build_app(Arc::new(config)).await {
+        Ok(_) => panic!("weak private key must fail startup"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("is {expected_bits} bits")),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn startup_rejects_512_bit_rsa_private_key() {
+    assert_startup_rejects_weak_key(include_str!("fixtures/test-rsa-private-512.pem"), 512).await;
+}
+
+#[tokio::test]
+async fn startup_rejects_1024_bit_rsa_private_key() {
+    assert_startup_rejects_weak_key(include_str!("fixtures/test-rsa-private-1024.pem"), 1024).await;
 }
 
 #[tokio::test]
