@@ -23,6 +23,8 @@ The `level` field controls which messages are emitted. Messages at the configure
 | warn | Warning conditions that are not errors |
 | error | Error conditions |
 
+Values are case-insensitive. Any other value is a startup error; Auth-O-Tron reports it to standard error and exits without starting either server. Failure to install the process-wide tracing subscriber is handled the same way.
+
 ## Log Formats
 
 ### Console Format

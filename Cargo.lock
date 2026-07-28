@@ -129,6 +129,7 @@ dependencies = [
  "http",
  "jsonwebtoken",
  "ldap3",
+ "libc",
  "mockito",
  "mongodb",
  "prometheus",

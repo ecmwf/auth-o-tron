@@ -69,6 +69,10 @@ The application server and metrics server expose different endpoints:
 
 Note that `/health` is available on both servers when metrics are enabled. When `metrics.enabled: false`, `/health` is only served on the application port.
 
+## Graceful Shutdown
+
+On `SIGINT` or `SIGTERM`, Auth-O-Tron stops accepting new connections and waits for in-flight requests to finish before shutting down. A single shutdown notification coordinates the application server and the metrics server. The same behavior applies to the application server when metrics are disabled.
+
 ## Port Collision Detection
 
 Auth-O-Tron validates that the application port and metrics port are different. If you accidentally configure them to the same value, the server will fail to start with an error message explaining the conflict.
