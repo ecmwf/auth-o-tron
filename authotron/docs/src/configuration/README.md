@@ -63,10 +63,12 @@ providers:
     realm: internal
     users:
       - username: admin
-        password: adminpass
+        # Hash of adminpass for this example only.
+        password_hash: "$argon2id$v=19$m=19456,t=2,p=1$YXV0aG90cm9uLWRvYy0wMg$z1Q74VCoGWdQC7OycwP1XrHF5mtr3GnxX68PUqEe0PQ"
         roles: [admin, user]
       - username: guest
-        password: guestpass
+        # Hash of guestpass for this example only.
+        password_hash: "$argon2id$v=19$m=19456,t=2,p=1$YXV0aG90cm9uLWRvYy0wMw$4EYE6u9AV7M5q2hnrIurr2Ws8jvJuNaM+W4ki331HsQ"
         roles: [readonly]
 
   - type: jwt

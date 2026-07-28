@@ -27,11 +27,11 @@ providers:
     realm: "ecmwf"
     users:
         - username: adam
-          password: admin
+          password_hash: "$argon2id$v=19$m=19456,t=2,p=1$YXV0aG90cm9uLWRvYy0wOA$F6E6TTxfuya9egnIBJBZ1vIOBLiPqDQcYQK1dSjnFW4"
           roles:
             - user
         - username: eve
-          password: admin
+          password_hash: "$argon2id$v=19$m=19456,t=2,p=1$YXV0aG90cm9uLWRvYy0wOA$F6E6TTxfuya9egnIBJBZ1vIOBLiPqDQcYQK1dSjnFW4"
           roles:
             - superuser
   - name: "Plain provider"
@@ -39,7 +39,7 @@ providers:
     realm: "other"
     users:
         - username: adam
-          password: other
+          password_hash: "$argon2id$v=19$m=19456,t=2,p=1$YXV0aG90cm9uLWRvYy0wOQ$b5CrRmzNWov2aZK7XxcX9XLc4ce0vja7GJRHm62dWXI"
           roles:
             - user
 
