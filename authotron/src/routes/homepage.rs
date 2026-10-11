@@ -12,12 +12,13 @@ use axum::{Router, http::header, response::IntoResponse, routing::get};
 const TEMPLATE: &str = include_str!("../static/index.html");
 const LOGO: &[u8] = include_bytes!("../static/logo.png");
 const FAVICON: &[u8] = include_bytes!("../static/favicon.ico");
+pub(super) const FAVICON_PATH: &str = "/favicon.ico";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(index))
         .route("/static/logo.png", get(logo))
-        .route("/favicon.ico", get(favicon))
+        .route(FAVICON_PATH, get(favicon))
 }
 
 async fn index() -> impl IntoResponse {
@@ -31,4 +32,14 @@ async fn logo() -> impl IntoResponse {
 
 async fn favicon() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "image/x-icon")], FAVICON)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn homepage_favicon_reference_matches_the_asset_route() {
+        assert!(TEMPLATE.contains(&format!(r#"href="{FAVICON_PATH}""#)));
+    }
 }
