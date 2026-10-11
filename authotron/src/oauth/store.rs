@@ -10,7 +10,7 @@
 
 use super::{
     authorization::ValidatedAuthorizationRequest,
-    code_grant::CodeGrant,
+    code_grant::{CodeGrant, CodeGrantError},
     codes::{AuthorizationCode, CodeIssueOutcome, CodeStoreError, IssuedCode, StoredCode},
     consent::{ConsentError, ConsentOutcome, ConsentSession, ConsentToken},
     context::AuthenticatedAuthorization,
@@ -90,6 +90,23 @@ pub struct MemoryTransactionStore {
     config: Arc<OAuthConfig>,
     entries: Mutex<HashMap<[u8; 32], Stored>>,
     codes: Mutex<HashMap<[u8; 32], StoredCode>>,
+}
+
+/// One-use code-consumption proof, with no constructor, Debug, Clone or serde API.
+pub struct RedeemedAuthorization {
+    grant: CodeGrant,
+    issuer: String,
+}
+impl RedeemedAuthorization {
+    // Reserved for the OAuth-internal signing bridge; not public issuance authority.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn grant(&self) -> &CodeGrant {
+        &self.grant
+    }
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn issuer(&self) -> &str {
+        &self.issuer
+    }
 }
 
 fn now_ms() -> Result<u64, StoreError> {
@@ -203,6 +220,52 @@ impl MemoryTransactionStore {
             decision,
             (now_ms, AuthorizationCode::generate),
         )
+    }
+    /// Validate exact public-client inputs and atomically consume a code once.
+    pub async fn redeem_code(
+        &self,
+        code: &AuthorizationCode,
+        client_id: &str,
+        redirect_uri: &str,
+        resource: &str,
+        code_verifier: &str,
+    ) -> Result<RedeemedAuthorization, CodeStoreError> {
+        self.redeem_code_at(
+            code,
+            (client_id, redirect_uri, resource, code_verifier),
+            now_ms,
+        )
+    }
+    fn redeem_code_at(
+        &self,
+        code: &AuthorizationCode,
+        inputs: (&str, &str, &str, &str),
+        clock: impl FnOnce() -> Result<u64, StoreError>,
+    ) -> Result<RedeemedAuthorization, CodeStoreError> {
+        use CodeStoreError::*;
+        // Codes only: never acquire entries while holding this lock. No await.
+        let mut codes = self.codes.lock().map_err(|_| Unavailable)?;
+        let now = clock().map_err(|_| Unavailable)?;
+        if !valid_time(now) {
+            return Err(Unavailable);
+        }
+        codes.retain(|_, code| code.expires_at_ms() > now);
+        let key = code.hash();
+        let grant = codes
+            .get(&key)
+            .ok_or(Missing)?
+            .grant(code, &self.config, now)?;
+        let (client, callback, resource, verifier) = inputs;
+        grant
+            .validate_redemption(client, callback, resource, verifier, &self.config, now)
+            .map_err(|error| match error {
+                CodeGrantError::InvalidRedemption | CodeGrantError::Expired => Missing,
+                _ => Unavailable,
+            })?;
+        let issuer = self.config.issuer.as_ref().ok_or(Unavailable)?.clone();
+        codes.remove(&key).ok_or(Missing)?;
+        // This proof is constructed only after successful removal under the same lock.
+        Ok(RedeemedAuthorization { grant, issuer })
     }
     fn issue_code_at(
         &self,
@@ -532,7 +595,11 @@ pub(super) mod tests {
     }
     async fn ready(store: &MemoryTransactionStore) -> (TransactionId, ConsentToken, u64) {
         let (_, _, identity) = super::super::context::tests::fixture().await;
-        let request = validate_authorization_request(&store.config, b"client_id=desktop&redirect_uri=https://app.example.org/cb&response_type=code&resource=https://mcp.example.org/mcp&scope=read&state=opaque%2Bclient&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256").unwrap();
+        let callback = &store.config.clients[0].redirect_uris[0];
+        let query = format!(
+            "client_id=desktop&redirect_uri={callback}&response_type=code&resource=https://mcp.example.org/mcp&scope=read&state=opaque%2Bclient&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256"
+        );
+        let request = validate_authorization_request(&store.config, query.as_bytes()).unwrap();
         let created = store.create(request, [7; 32]).await.unwrap();
         let witness = store.lookup_bound(&created.id, &[7; 32]).await.unwrap();
         let now = identity.verified_at_ms();
@@ -551,6 +618,160 @@ pub(super) mod tests {
             panic!("issued code required")
         };
         code
+    }
+    const REDEMPTION: (&str, &str, &str, &str) = (
+        "desktop",
+        "https://app.example.org/cb",
+        "https://mcp.example.org/mcp",
+        "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+    );
+    async fn redeemable(store: &MemoryTransactionStore) -> IssuedCode {
+        let (id, token, _) = ready(store).await;
+        issued(
+            store
+                .issue_code(&id, &[7; 32], token.as_secret_str(), "approve")
+                .await
+                .unwrap(),
+        )
+    }
+    #[tokio::test]
+    async fn redemption_is_exact_one_use_and_binds_literal_issuer() {
+        let base = code_store(1);
+        let mut cfg = (*base.config).clone();
+        cfg.issuer = Some("https://login.example.org/".into());
+        cfg.clients[0].application_type = crate::config::oauth::ApplicationType::Native;
+        cfg.clients[0].redirect_uris = vec!["http://127.0.0.1:49152/cb".into()];
+        let store = MemoryTransactionStore::new(Arc::new(cfg)).unwrap();
+        let issued = redeemable(&store).await;
+        let (client, _, resource, verifier) = REDEMPTION;
+        let callback = issued.redirect_uri();
+        for inputs in [
+            ("other", callback, resource, verifier),
+            (client, "http://127.0.0.1:49153/cb", resource, verifier),
+            (client, "http://127.0.0.1:49152/CB", resource, verifier),
+            (client, "http://127.0.0.1:49152/%63b", resource, verifier),
+            (client, callback, "https://mcp.example.org/mcp/", verifier),
+            (client, callback, resource, &"x".repeat(43)),
+            (client, callback, resource, "short"),
+            (client, callback, resource, &"!".repeat(43)),
+        ] {
+            assert_eq!(
+                store.redeem_code_at(issued.code(), inputs, now_ms).err(),
+                Some(CodeStoreError::Missing)
+            );
+            assert_eq!(store.codes.lock().unwrap().len(), 1);
+        }
+        let proof = store
+            .redeem_code(issued.code(), client, callback, resource, verifier)
+            .await
+            .unwrap();
+        assert_eq!(proof.issuer(), "https://login.example.org/");
+        assert_eq!(proof.grant().as_user().username, "alice");
+        assert_eq!(proof.grant().scopes(), ["read"]);
+        assert_eq!(proof.grant().client_id(), client);
+        assert_eq!(proof.grant().redirect_uri(), callback);
+        assert_eq!(proof.grant().resource(), resource);
+        assert_eq!(proof.grant().state(), Some("opaque+client"));
+        assert!(store.codes.lock().unwrap().is_empty());
+        assert_eq!(
+            store
+                .redeem_code_at(
+                    issued.code(),
+                    (client, callback, resource, verifier),
+                    now_ms
+                )
+                .err(),
+            Some(CodeStoreError::Missing)
+        );
+        assert!(redeemable(&store).await.expires_at_ms() > now_ms().unwrap());
+    }
+    #[tokio::test]
+    async fn redemption_time_policy_and_wrong_envelope_preserve_unexpired_codes() {
+        let mut store = code_store(1);
+        Arc::get_mut(&mut store.config)
+            .unwrap()
+            .authorization_code_ttl_seconds = 60;
+        let issued = redeemable(&store).await;
+        let issued_at = issued.expires_at_ms() - 60_000;
+        assert_eq!(
+            store
+                .redeem_code_at(issued.code(), REDEMPTION, at(issued_at - 1))
+                .err(),
+            Some(CodeStoreError::Unavailable)
+        );
+        let original = store.config.clone();
+        let mut tightened = (*original).clone();
+        tightened.authorization_code_ttl_seconds = 30;
+        store.config = Arc::new(tightened);
+        assert_eq!(
+            store
+                .redeem_code_at(issued.code(), REDEMPTION, at(issued_at + 30_000))
+                .err(),
+            Some(CodeStoreError::Missing)
+        );
+        assert_eq!(store.codes.lock().unwrap().len(), 1);
+        for case in 0..2 {
+            let mut cfg = (*original).clone();
+            match case {
+                0 => cfg.resources[0].scopes[0]
+                    .required_roles
+                    .push("revoked".into()),
+                _ => cfg.max_authentication_age_seconds = 1,
+            }
+            store.config = Arc::new(cfg);
+            assert_eq!(
+                store
+                    .redeem_code_at(issued.code(), REDEMPTION, at(issued_at + 1000))
+                    .err(),
+                Some(CodeStoreError::Unavailable)
+            );
+            assert_eq!(store.codes.lock().unwrap().len(), 1);
+        }
+        store.config = original;
+        let other = AuthorizationCode::generate().unwrap();
+        let record = store
+            .codes
+            .lock()
+            .unwrap()
+            .remove(&issued.code().hash())
+            .unwrap();
+        store.codes.lock().unwrap().insert(other.hash(), record);
+        assert_eq!(
+            store.redeem_code_at(&other, REDEMPTION, now_ms).err(),
+            Some(CodeStoreError::Unavailable)
+        );
+        assert_eq!(store.codes.lock().unwrap().len(), 1);
+        assert_eq!(
+            store
+                .redeem_code_at(&other, REDEMPTION, at(issued.expires_at_ms()))
+                .err(),
+            Some(CodeStoreError::Missing)
+        );
+        assert!(store.codes.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn competing_redemptions_have_one_proof_and_one_missing_result() {
+        let store = code_store(1);
+        let issued = redeemable(&store).await;
+        let barrier = std::sync::Barrier::new(2);
+        let redeem = || {
+            barrier.wait();
+            store.redeem_code_at(issued.code(), REDEMPTION, now_ms)
+        };
+        let results = std::thread::scope(|scope| {
+            let a = scope.spawn(redeem);
+            let b = scope.spawn(redeem);
+            [a.join().unwrap(), b.join().unwrap()]
+        });
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(CodeStoreError::Missing)))
+                .count(),
+            1
+        );
+        assert!(store.codes.lock().unwrap().is_empty());
     }
     #[tokio::test]
     async fn issued_codes_release_source_slots_and_capacity_failures_preserve_consent() {

@@ -6,9 +6,12 @@
 // granted to it by virtue of its status as an intergovernmental organisation nor
 // does it submit to any jurisdiction.
 
-//! Secret authorization-code handles and trusted stored envelopes; no redemption API.
+//! Secret authorization-code handles and trusted stored envelopes.
 
-use super::{code_grant::CodeGrant, store::TransactionId};
+use super::{
+    code_grant::{CodeGrant, CodeGrantError},
+    store::TransactionId,
+};
 use crate::config::OAuthConfig;
 use subtle::ConstantTimeEq;
 
@@ -96,8 +99,7 @@ impl StoredCode {
             expires_at_ms: grant.expires_at_ms(),
         })
     }
-    // Record validation only; a future store must atomically consume before returning proof.
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Record validation only; the store must atomically consume before returning proof.
     pub(super) fn grant(
         &self,
         code: &AuthorizationCode,
@@ -110,8 +112,10 @@ impl StoredCode {
         if now >= self.expires_at_ms {
             return Err(CodeStoreError::Missing);
         }
-        let grant =
-            CodeGrant::decode(&self.bytes, cfg, now).map_err(|_| CodeStoreError::Unavailable)?;
+        let grant = CodeGrant::decode(&self.bytes, cfg, now).map_err(|error| match error {
+            CodeGrantError::Expired => CodeStoreError::Missing,
+            _ => CodeStoreError::Unavailable,
+        })?;
         if grant.expires_at_ms() > self.expires_at_ms {
             return Err(CodeStoreError::Unavailable);
         }

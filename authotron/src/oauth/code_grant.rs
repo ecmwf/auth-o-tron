@@ -107,7 +107,6 @@ impl CodeGrant {
     /// Trusted backend asserts prior approval; not request JSON, a MAC or issuance proof.
     /// Base64url example: `e30` canonically encodes `{}`; `e30=` has invalid padding.
     /// Decoded bytes must separately satisfy the authenticated-context codec.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn decode(
         bytes: &[u8],
         config: &OAuthConfig,

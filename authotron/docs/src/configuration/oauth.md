@@ -223,7 +223,8 @@ in-process policy eligibility only: development-memory persistence is described
 below alongside explicit shared Valkey authenticated persistence. Durability
 depends on backend configuration. Explicit consent and atomic decision completion
 in memory and shared Valkey are described below, alongside Memory code issuance.
-Code redemption and HTTP/startup integration remain unimplemented.
+Memory redemption is described below; signed-token bridging and HTTP/startup
+integration remain unimplemented.
 
 ### OAuth-internal authenticated-context codec
 
@@ -314,7 +315,8 @@ InvalidContext, Expired and InvalidRedemption, without submitted values. Checks 
 not consume the grant and supply no token-signing proof: a future backend must
 atomically consume a one-use code before returning issuance authority. Code handles
 and stored envelopes are described below; Memory issuance is available explicitly,
-while redemption and HTTP integration are future slices.
+alongside one-use Memory redemption; signed-token bridging and HTTP integration
+are future slices.
 This capability is explicitly usable with OAuth disabled; startup remains Unsupported.
 
 ### OAuth-internal code-grant codec
@@ -498,13 +500,13 @@ without extending the envelope ceiling. A copied envelope cannot be accepted und
 another code handle. This assumes trusted storage, not a MAC; restoration is not
 code consumption or token-issuance proof. Code expiry still follows the grant's
 code/consent/context minimum (code TTL defaults to 60 seconds), with PKCE required
-for future redemption.
+for redemption.
 
 `max_authorization_codes` sets a separate Memory code count cap, default 1024 and range
 1–100000. At the maximum, 96 KiB payloads alone permit 9.8304 GB (about 9.15 GiB), plus
 overhead. CodeStoreError classes are Missing, Limited, InvalidToken, InvalidDecision
-and Unavailable. Memory persistence is described below; shared Valkey code storage,
-redemption and HTTP/startup integration remain future work. OAuth enablement remains
+and Unavailable. Memory persistence and redemption are described below; shared Valkey
+code storage, signed-token bridging and HTTP/startup integration remain future work. OAuth enablement remains
 Unsupported.
 
 ### Development-memory atomic code issuance
@@ -529,6 +531,33 @@ persistence or distributed guarantees. Pruning and validation are synchronous un
 locks; no background cleanup runs. Existing `decide_consent` consumes consent alone;
 future code-delivery callers must use `issue_code`, never decide then persist in
 separate calls. Issuance supplies no redemption or token-signing proof.
+
+### Development-memory one-use code redemption
+
+`MemoryTransactionStore::redeem_code(code, client_id, redirect_uri, resource,
+code_verifier)` locks only codes, samples trusted server time after locking and
+prunes expired envelopes. It checks the actual submitted handle hash, restores the
+bounded grant under current store config, then validates exact client/callback
+(including native loopback port), mandatory resource and S256 PKCE. Cached source
+and browser hashes remain server data; redemption needs no browser cookie or source
+ID. Verification-time identity snapshots are revalidated for current policy and
+freshness without rerunning providers or augmenters. No raw verifier is retained.
+
+All validation precedes removal under the same lock, with no await or acquisition
+of the transactions lock. Only after successful removal is an opaque
+`RedeemedAuthorization` constructed; competing consumers have one winner. Missing,
+expired/replayed codes and invalid client/callback/resource/PKCE return fixed Missing.
+Invalid time, policy/context, hash association or corrupt-record failures return
+Unavailable, preserving unexpired records. Time before issuance is rejected; time
+at the effective deadline is expired. Effective expiry tightening also fails closed.
+
+The result has private fields, no public constructor, Debug, Clone or serde, and only
+OAuth-internal grant/issuer readers. It retains the store's literal issuer spelling
+(including a trailing slash) for the next signing bridge to bind exactly. That bridge
+must recheck its active policy/freshness and issuer; redemption itself neither signs
+nor issues a token. One use and capacity reclamation are per Memory instance only,
+without restart or distributed guarantees. HTTP and shared Valkey redemption remain
+future work; OAuth enablement remains Unsupported.
 
 ### Store-provided source witnesses
 
@@ -634,7 +663,7 @@ of an authorization code. A future ConsentReady-to-Code transition must atomical
 persist the code while consuming consent; the current method only deletes the
 session and returns an opaque consent proof. No HTTP or startup integration is added.
 
-Shared Valkey codes, code redemption, HTTP token issuance, discovery/JWKS, browser CORS,
+Shared Valkey codes/redemption, signed-token bridging, HTTP token issuance, discovery/JWKS, browser CORS,
 and MCP integration remain future capabilities. No HTTP tokens are issued and
 `enabled: true` still fails startup as Unsupported. The legacy HMAC `jwt.secret`
 must never be published through
