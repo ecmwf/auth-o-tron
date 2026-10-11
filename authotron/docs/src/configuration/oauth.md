@@ -146,8 +146,29 @@ No automatic reload or rotation is implemented. Future deployments must coordina
 active-key changes across replicas and retain old public keys through the longest
 issued access-token lifetime plus clock skew before retirement.
 
-Authorization codes, PKCE S256, RS256 access tokens, discovery/JWKS, browser CORS,
-and MCP integration remain future capabilities. No tokens are issued and
+## Typed access-token capability
+
+`oauth::tokens::TokenIssuer::new(&config, &key_manager)` validates config, requires
+an issuer (≤2048 bytes), and matches supplied signing references to the manager's
+loaded snapshot. `issue_access_token` accepts a client, exact resource, requested
+scopes and freshly verified user. Callers must enforce trusted successful augmentation,
+consent and a server-owned grant/code proof; this helper performs none of those checks.
+It works in-process with OAuth disabled; no HTTP issuance exists.
+Issuance re-runs policy, bounds identity fields to 128 control-free UTF-8 bytes and
+roles to 64 entries of 128 bytes each. Header: RS256, `typ: at+jwt`, active `kid`.
+Claims: `iss`, `sub`, `aud`, `iat`, `exp`, `jti`, `client_id`, `scope`, `roles`.
+Issuer spelling and audience resource are exact. Subject is `urn:authotron:subject:`
+plus base64url SHA-256 of length-prefixed issuer/realm/username; stable, not anonymous.
+Roles are only the unique required-role union for granted scopes; usernames, realms,
+unrelated roles, attributes, emails, user scopes and credentials are omitted.
+Scope order is preserved. Server-clock time and checked configured TTL determine
+expiry (through year 9999); `jti` is UUIDv4. Wire limit: 32 KiB. Non-Debug responses
+serialize only `access_token`, `token_type: Bearer`, `expires_in`, `scope`; no refresh.
+Errors are fixed configuration/identity/policy/time/signing/size classes. Consumers
+must enforce `at+jwt`, RS256, expected issuer/audience; a complete MCP validator is future work.
+
+Authorization codes, PKCE S256, HTTP token issuance, discovery/JWKS, browser CORS,
+and MCP integration remain future capabilities. No HTTP tokens are issued and
 `enabled: true` still fails startup as Unsupported. The legacy HMAC `jwt.secret`
 must never be published through
 future JWKS or reused as an OAuth asymmetric signing key.

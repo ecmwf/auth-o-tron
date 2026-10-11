@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OAuthSigningConfig {
     #[schemars(length(min = 1, max = 64), regex(pattern = r"^[A-Za-z0-9._-]+$"))]
@@ -22,7 +22,7 @@ pub struct OAuthSigningConfig {
 }
 
 /// Admin-selected paths only; key contents are never part of the config contract.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OAuthSigningKey {
     #[schemars(length(min = 1, max = 64), regex(pattern = r"^[A-Za-z0-9._-]+$"))]

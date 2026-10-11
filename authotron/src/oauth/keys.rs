@@ -67,6 +67,7 @@ pub struct PublicJwks {
 
 /// Private state deliberately has no Debug/Serialize implementation or public signer API.
 pub struct KeyManager {
+    signing_config: OAuthSigningConfig,
     active_kid: String,
     encoding: EncodingKey,
     jwks: PublicJwks,
@@ -130,6 +131,7 @@ impl KeyManager {
             });
         }
         let manager = Self {
+            signing_config: config.clone(),
             active_kid: config.active_kid.clone(),
             encoding: active.ok_or(KeyError::Configuration)?,
             jwks: PublicJwks { keys },
@@ -157,6 +159,9 @@ impl KeyManager {
     }
     pub fn jwks(&self) -> &PublicJwks {
         &self.jwks
+    }
+    pub(super) fn matches_config(&self, config: &OAuthSigningConfig) -> bool {
+        self.signing_config == *config
     }
     /// Only sibling OAuth capabilities can borrow the validated signing key.
     pub(super) fn active_signer(&self) -> (&str, &EncodingKey) {
@@ -199,7 +204,7 @@ fn read_pem(_: &Path) -> Result<Zeroizing<Vec<u8>>, KeyError> {
 }
 
 #[cfg(all(test, unix))]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use rsa::{
         pkcs1::EncodeRsaPublicKey,
@@ -213,7 +218,7 @@ mod tests {
         sync::OnceLock,
     };
 
-    fn keys() -> &'static [RsaPrivateKey; 3] {
+    pub(in crate::oauth) fn keys() -> &'static [RsaPrivateKey; 3] {
         static KEYS: OnceLock<[RsaPrivateKey; 3]> = OnceLock::new();
         KEYS.get_or_init(|| {
             [2048, 2048, 1024].map(|bits| RsaPrivateKey::new(&mut OsRng, bits).unwrap())
