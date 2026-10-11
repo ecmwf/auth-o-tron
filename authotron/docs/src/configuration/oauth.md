@@ -218,8 +218,9 @@ Fixed errors distinguish Configuration, InvalidTime, InvalidTransaction, Binding
 StaleIdentity and AccessDenied, without identity data. Callers still enforce
 Origin/CSRF, and must recheck current policy/freshness at future issuance. This is
 in-process policy eligibility only: development-memory persistence is described
-below, but no shared/durable authenticated persistence, consent flag, grant, code,
-or HTTP/startup integration is implemented.
+below alongside explicit shared Valkey authenticated persistence. Durability
+depends on backend configuration; consent, grants, codes, and HTTP/startup
+integration remain unimplemented.
 
 ### OAuth-internal authenticated-context codec
 
@@ -239,7 +240,7 @@ providers/augmenters, so verification-time roles remain a revocation window unti
 authentication age expires; current policy is still rechecked. Deserialization
 allocations are wire-bounded, not an end-to-end hard memory guarantee. Fixed codec
 errors add TooLarge, InvalidRecord and UnsupportedVersion. The development-memory
-store below uses this private codec; shared authenticated-context storage is future work.
+and Valkey stores below use this private codec; no HTTP flow is wired.
 
 ## Typed access-token capability
 
@@ -281,8 +282,8 @@ Challenge: canonical unpadded base64url SHA-256 (43 characters/32 bytes). Immuta
 digests in constant time. Successful requests have immutable getters, not login,
 consent or grant proof. Fixed-error failures **stay local; never redirect to raw
 submitted callbacks**. Error-redirect routing, extensions, authorization HTTP routes,
-shared transaction storage and code issuance are future work. The explicit
-development-memory API is described below; it is not wired into an HTTP flow.
+and code issuance remain future work. Explicit development-memory and shared Valkey
+transaction APIs are described below; neither is wired into an HTTP flow.
 
 ## Authorization-transaction record codec
 
@@ -351,8 +352,7 @@ missing/expired IDs or wrong binding return Missing. Codec/metadata failures ret
 Unavailable without consuming corrupt state. Both kinds share the configured count
 cap, and only successful typed consume removes an unexpired entry. No operation
 adds consent, grants or codes. Source matching now distinguishes IDs even when all
-request, browser-binding and expiry facts are identical. Valkey authenticated promotion and HTTP
-integration remain separate future slices.
+request, browser-binding and expiry facts are identical. HTTP integration remains a future slice.
 
 ### Store-provided source witnesses
 
@@ -389,13 +389,16 @@ No OAuth backend or connection is initialized at startup.
 `oauth::valkey_transactions::ValkeyTransactionStore::new(config, &backend)` is an
 explicit connection call requiring Valkey settings. Async `create`, `lookup`, and
 `consume` use the memory store's ID/handle/record contracts, without local cache or
-fallback. Namespace: `<key_prefix>:oauth:authorization-transactions:v1:`, with only
+fallback. Namespace: `<key_prefix>:oauth:authorization-transactions:v2:`, with only
 hashed-ID record keys and an expiry sorted-set index, separate from UI state.
 Replicas sharing a namespace must use consistent policy snapshots, TTL and capacity.
 Creation obtains server `TIME`, encodes/revalidates the record, then Lua checks the
 current server time and expiry window, prunes expired index members, checks shared
-capacity, and uses `SET NX PXAT` plus `ZADD`. No client/replica clock determines expiry.
-Lookup checks types, metadata and `STRLEN` before a bounded `GET`, returning exact
+capacity, and creates an absent hash with `HSET`, `PEXPIREAT` and `ZADD` in one script.
+No client/replica clock determines expiry. Each hash has exactly `kind`, `expiry`
+and `payload` fields; kind is Pending or Authenticated. Version-1 string records
+are not migrated or decoded in this namespace; old keys expire independently.
+Lookup checks types/metadata and `HSTRLEN` before bounded `HGET`, returning exact
 bytes and server time for Rust codec/config/binding checks. Reads never refresh TTL.
 Consume validates that read in Rust, then Lua compares exact bytes and expiry at
 current server time before `DEL`/`ZREM`; changed data or another winner fail closed.
@@ -404,11 +407,28 @@ Lua checks key types and mutation ACL permissions before writes. Atomic executio
 is not rollback: unexpected write failures/OOM or lost responses can leave ambiguous
 outcomes; operations are not automatically replayed. Invalid data yields fixed
 Unavailable errors, not raw backend diagnostics. The index is bounded to 100000
-members and uses no `KEYS` scans; record reads are capped at 16 KiB. Expired members
+members and uses no `KEYS` scans; Pending reads are capped at 16 KiB and Authenticated
+reads at 64 KiB. Expired members
 are pruned in one atomic script: a large expired batch can occupy the shared
 server and exceed a caller's operation deadline, so tune capacity and timeouts.
 This remains
-authorization-input storage only, not login/consent proof or atomic code issuance.
+transaction/context storage only, not consent/grant proof or atomic code issuance.
+
+`promote_authenticated` requires a source-bound context matching the actual ID,
+exact Pending bytes and expiry. Rust revalidates the private context against current
+config, browser binding and server time, then Lua CAS checks Pending kind, unchanged
+bytes/metadata and current time before replacing the same hash and index score.
+All HSET/PEXPIREAT/ZADD permissions are preflighted before conversion. Effective
+expiry must stay positive, unexpired and no later than the Pending deadline.
+Both states use one global capacity slot; repeat promotion returns Missing.
+Pending lookup/consume (including bound lookup) return Missing for Authenticated
+state. New typed `lookup_authenticated` and `consume_authenticated` recheck the
+private codec, source-ID hash, current eligibility and effective expiry, with no
+TTL refresh. Authenticated consume CAS additionally checks the effective freshness
+deadline even when current policy makes it earlier than stored metadata. Wrong
+binding preserves state as Missing; corrupt/oversized/unknown-kind/source-mismatched
+data stays unconsumed as fixed Unavailable. Cross-replica snapshots still require
+trusted storage and coherent config; restoration is not fresh provider execution.
 
 Authorization codes, HTTP token issuance, discovery/JWKS, browser CORS,
 and MCP integration remain future capabilities. No HTTP tokens are issued and
