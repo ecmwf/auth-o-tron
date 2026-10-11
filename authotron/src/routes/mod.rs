@@ -14,6 +14,7 @@
 
 mod augmenters;
 mod auth;
+mod browser_login;
 mod health;
 mod homepage;
 mod login;
@@ -30,6 +31,7 @@ pub fn create_app_router(state: AppState) -> Router {
     Router::new()
         .merge(homepage::routes())
         .merge(login::routes(&state.config.ui))
+        .merge(browser_login::routes(&state.config.ui))
         .merge(auth::routes())
         .merge(whoami::routes())
         .merge(tokens::routes())

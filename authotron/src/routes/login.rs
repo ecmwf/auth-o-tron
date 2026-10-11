@@ -12,7 +12,7 @@ use axum::{
     Router,
     extract::State,
     http::header,
-    response::{Html, IntoResponse, Response},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::get,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -24,6 +24,7 @@ use crate::config::UiConfig;
 use crate::state::AppState;
 
 const STYLESHEET: &str = include_str!("../static/login.css");
+const DIALOG_POLICY: &str = "default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 // Curated Aviso branding fixture from https://aviso-playground.ecmwf.int/static/logo.png.
 // The official 650x650 RGBA artwork is resized to a 192x192, 16-colour PNG.
 // Only the bundled asset is served; requests never fetch the upstream image.
@@ -46,8 +47,39 @@ pub fn routes(config: &UiConfig) -> Router<AppState> {
         .route("/static/aviso-logo.png", get(aviso_logo))
 }
 
-async fn login(State(state): State<AppState>) -> Response {
-    secure_response(Html(render_login(&state.config.ui)).into_response(), false)
+async fn login(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    let session = if state.config.ui.has_direct_login() {
+        match super::browser_login::current_session(&state, &headers).await {
+            Ok(session) => session,
+            Err(error) => return super::browser_login::unavailable(error),
+        }
+    } else {
+        None
+    };
+    if state.config.ui.has_direct_login()
+        && !(state.config.ui.basic.is_some() && state.config.ui.ecmwf_api_key.is_some())
+        && state.config.ui.sign_in_actions.is_empty()
+        && session.is_some()
+    {
+        return secure_response(Redirect::to("/login/account").into_response(), true);
+    }
+    let config = if state.config.ui.has_direct_login() {
+        super::browser_login::private_ui(&state)
+    } else {
+        state.config.ui.clone()
+    };
+    let mut response = secure_response(Html(render_login(&config)).into_response(), false);
+    if state.config.ui.has_direct_login() {
+        response.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            DIALOG_POLICY.parse().expect("static dialog policy"),
+        );
+        response.headers_mut().insert(
+            header::REFERRER_POLICY,
+            "strict-origin".parse().expect("static referrer policy"),
+        );
+    }
+    response
 }
 
 pub(super) fn secure_response(mut response: Response, form: bool) -> Response {
@@ -98,7 +130,7 @@ async fn aviso_logo() -> Response {
 }
 
 fn render_login(config: &UiConfig) -> String {
-    let available = !config.sign_in_actions.is_empty();
+    let available = !config.sign_in_actions.is_empty() || config.has_direct_login();
     render_page_with_dialog(
         config,
         html! {
@@ -129,6 +161,12 @@ fn render_login(config: &UiConfig) -> String {
                 "Use direct identity verification or a configured browser sign-in flow."
                 }
                 div class="login-actions" {
+                    @if config.basic.is_some() {
+                        a class="login-action" href="/login/basic" { "Username and password" }
+                    }
+                    @if config.ecmwf_api_key.is_some() {
+                        a class="login-action" href="/login/ecmwf-api-key" { "ECMWF API key" }
+                    }
                     @for action in &config.sign_in_actions {
                         a class="login-action" href=(action.start_url.as_str()) { (&action.label) }
                     }

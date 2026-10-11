@@ -1244,4 +1244,76 @@ mod tests {
         assert_eq!(state.inflight.available_permits(), MAX_INFLIGHT);
         mock.assert_async().await;
     }
+
+    #[tokio::test]
+    async fn expired_transactions_and_sessions_fail_closed_through_routes() {
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode},
+        };
+        use std::sync::Arc;
+        use tower::ServiceExt;
+        let config: ConfigV2 = serde_json::from_value(serde_json::json!({
+            "store": {"enabled": false}, "services": [], "augmenters": [],
+            "providers": [{"type": "ecmwf-api", "name": "public-provider", "realm": "ecmwf", "uri": "http://127.0.0.1:1"}],
+            "server": {"port": 0}, "jwt": {"iss": "public-test", "exp": 300, "secret": "public-test-only-secret"},
+            "logging": {"level": "warn", "format": "console"},
+            "ui": {"enabled": true, "ecmwf_api_key": {"provider_name": "public-provider"}, "browser_session": {"public_origin": "https://login.example.test", "backend": {"type": "memory"}}}
+        })).unwrap();
+        let (app, state) = crate::startup::build_app(Arc::new(config)).await.unwrap();
+        let (sid, csrf) = state.browser.create_form().unwrap();
+        state
+            .browser
+            .entries
+            .lock()
+            .unwrap()
+            .forms
+            .get_mut(&sid)
+            .unwrap()
+            .expires = Instant::now();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/login/ecmwf-api-key")
+                    .header("origin", "https://login.example.test")
+                    .header("cookie", format!("__Host-authotron_form={sid}"))
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("api_key=public-fixture&csrf={csrf}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let user = User::new("ecmwf".into(), "public-user".into(), None, None, None, None);
+        let sid = state.browser.create_session(user, None).unwrap();
+        state
+            .browser
+            .entries
+            .lock()
+            .unwrap()
+            .sessions
+            .get_mut(&sid)
+            .unwrap()
+            .expires = Instant::now();
+        for path in ["/login/account", "/login"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(path)
+                        .header("cookie", format!("__Host-authotron_session={sid}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if path == "/login" {
+                    StatusCode::OK
+                } else {
+                    StatusCode::SEE_OTHER
+                }
+            );
+        }
+    }
 }
