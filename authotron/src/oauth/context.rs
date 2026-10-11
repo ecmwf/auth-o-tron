@@ -10,11 +10,14 @@
 
 use super::{
     authentication::{AuthenticationError, VerifiedOAuthIdentity, restore_from_trusted_storage},
-    records::{AuthorizationTransaction, MAX_TRANSACTION_BYTES, valid_time},
+    records::{
+        AuthorizationTransaction, BoundAuthorizationTransaction, MAX_TRANSACTION_BYTES, valid_time,
+    },
 };
 use crate::{config::OAuthConfig, models::user::User};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 
 pub(super) const MAX_AUTHENTICATED_CONTEXT_BYTES: usize = 64 * 1024;
 
@@ -40,6 +43,7 @@ struct ContextDto {
     roles: Vec<String>,
     verified_at_ms: u64,
     transaction: String,
+    source_transaction_id_hash: Option<[u8; 32]>,
 }
 
 /// Owns verification proof/snapshot and validated input. No Debug, Clone or public serialization.
@@ -48,8 +52,27 @@ pub struct AuthenticatedAuthorization {
     identity: VerifiedOAuthIdentity,
     scopes: Vec<String>,
     expires_at_ms: u64,
+    source_transaction_id_hash: Option<[u8; 32]>,
 }
 impl AuthenticatedAuthorization {
+    /// Bind only from a successful store lookup, not a caller-selected identifier tag.
+    pub fn new_bound(
+        source: BoundAuthorizationTransaction,
+        identity: VerifiedOAuthIdentity,
+        browser_hash: &[u8; 32],
+        config: &OAuthConfig,
+        server_now_ms: u64,
+    ) -> Result<Self, ContextError> {
+        let (transaction, hash) = source.into_parts();
+        let mut context = Self::new(transaction, identity, browser_hash, config, server_now_ms)?;
+        context.source_transaction_id_hash = Some(hash);
+        Ok(context)
+    }
+    pub(super) fn matches_source(&self, transaction_id_hash: &[u8; 32]) -> bool {
+        self.source_transaction_id_hash
+            .as_ref()
+            .is_some_and(|hash| bool::from(hash.ct_eq(transaction_id_hash)))
+    }
     /// Server supplies trusted time and binding; callers still enforce Origin/CSRF.
     /// Check the bound transaction before credential verification and use coherent
     /// verification-state/config snapshots; this constructor cannot establish that linkage.
@@ -108,6 +131,7 @@ impl AuthenticatedAuthorization {
             identity,
             scopes,
             expires_at_ms,
+            source_transaction_id_hash: None,
         })
     }
     pub fn transaction(&self) -> &AuthorizationTransaction {
@@ -133,12 +157,13 @@ impl AuthenticatedAuthorization {
             .encode()
             .map_err(|_| ContextError::InvalidTransaction)?;
         let dto = ContextDto {
-            version: 1,
+            version: 2,
             username: user.username.clone(),
             realm: user.realm.clone(),
             roles: user.roles.clone(),
             verified_at_ms: self.verified_at_ms(),
             transaction: URL_SAFE_NO_PAD.encode(transaction),
+            source_transaction_id_hash: self.source_transaction_id_hash,
         };
         let bytes = serde_json::to_vec(&dto).map_err(|_| ContextError::InvalidRecord)?;
         if bytes.len() > MAX_AUTHENTICATED_CONTEXT_BYTES {
@@ -159,7 +184,7 @@ impl AuthenticatedAuthorization {
             return Err(TooLarge);
         }
         let dto: ContextDto = serde_json::from_slice(bytes).map_err(|_| InvalidRecord)?;
-        if dto.version != 1 {
+        if dto.version != 2 {
             return Err(UnsupportedVersion);
         }
         if dto.transaction.len() > (MAX_TRANSACTION_BYTES * 4).div_ceil(3) {
@@ -182,7 +207,10 @@ impl AuthenticatedAuthorization {
                     AuthenticationError::Unavailable => InvalidTime,
                     _ => InvalidRecord,
                 })?;
-        Self::new(transaction, identity, browser_hash, config, server_now_ms)
+        let mut context = Self::new(transaction, identity, browser_hash, config, server_now_ms)?;
+        // This field is authoritative only across the explicitly trusted-storage boundary.
+        context.source_transaction_id_hash = dto.source_transaction_id_hash;
+        Ok(context)
     }
 }
 
@@ -245,7 +273,7 @@ pub(super) mod tests {
         names.sort_unstable();
         assert_eq!(
             names.join(" "),
-            "realm roles transaction username verified_at_ms version"
+            "realm roles source_transaction_id_hash transaction username verified_at_ms version"
         );
         let restored = AuthenticatedAuthorization::decode(&bytes, &config, &[7; 32], now).unwrap();
         assert_eq!(restored.encode().unwrap(), bytes);
@@ -276,7 +304,9 @@ pub(super) mod tests {
         let bytes = context.encode().unwrap();
         let original: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         for (field, replacement, error) in [
-            ("version", json!(2), UnsupportedVersion),
+            ("version", json!(3), UnsupportedVersion),
+            ("version", json!(1), UnsupportedVersion),
+            ("source_transaction_id_hash", json!([1, 2]), InvalidRecord),
             ("username", json!(" "), InvalidRecord),
             ("realm", json!("local\n"), InvalidRecord),
             ("roles", json!(["x".repeat(129)]), InvalidRecord),

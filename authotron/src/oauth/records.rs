@@ -19,6 +19,29 @@ use subtle::ConstantTimeEq;
 
 pub const MAX_TRANSACTION_BYTES: usize = 16 * 1024;
 
+/// Store-provided source witness. No public constructor, Clone, Debug or deserialization.
+pub struct BoundAuthorizationTransaction {
+    transaction: AuthorizationTransaction,
+    transaction_id_hash: [u8; 32],
+}
+impl BoundAuthorizationTransaction {
+    pub(super) fn from_store(
+        transaction: AuthorizationTransaction,
+        transaction_id_hash: [u8; 32],
+    ) -> Self {
+        Self {
+            transaction,
+            transaction_id_hash,
+        }
+    }
+    pub fn transaction(&self) -> &AuthorizationTransaction {
+        &self.transaction
+    }
+    pub(super) fn into_parts(self) -> (AuthorizationTransaction, [u8; 32]) {
+        (self.transaction, self.transaction_id_hash)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordError {
     TooLarge,

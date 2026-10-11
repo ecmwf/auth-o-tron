@@ -11,7 +11,7 @@
 use super::{
     authorization::ValidatedAuthorizationRequest,
     context::AuthenticatedAuthorization,
-    records::{AuthorizationTransaction, valid_time},
+    records::{AuthorizationTransaction, BoundAuthorizationTransaction, valid_time},
 };
 use crate::config::OAuthConfig;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -117,6 +117,17 @@ impl MemoryTransactionStore {
         browser_hash: &[u8; 32],
     ) -> Result<AuthorizationTransaction, StoreError> {
         self.access_at(id, browser_hash, now_ms, false)
+    }
+    pub async fn lookup_bound(
+        &self,
+        id: &TransactionId,
+        browser_hash: &[u8; 32],
+    ) -> Result<BoundAuthorizationTransaction, StoreError> {
+        let transaction = self.lookup(id, browser_hash).await?;
+        Ok(BoundAuthorizationTransaction::from_store(
+            transaction,
+            id.hash(),
+        ))
     }
     pub async fn consume(
         &self,
@@ -242,6 +253,9 @@ impl MemoryTransactionStore {
         if !pending.matches_browser_binding(binding) {
             return Err(StoreError::Missing);
         }
+        if !context.matches_source(&id.hash()) {
+            return Err(StoreError::Unavailable);
+        }
         let source = context
             .transaction()
             .encode()
@@ -286,7 +300,7 @@ impl MemoryTransactionStore {
                 super::context::ContextError::Binding => StoreError::Missing,
                 _ => StoreError::Unavailable,
             })?;
-        if context.expires_at_ms() > stored.expires_at_ms {
+        if !context.matches_source(&key) || context.expires_at_ms() > stored.expires_at_ms {
             return Err(StoreError::Unavailable);
         }
         if consume {
@@ -319,16 +333,113 @@ pub(super) mod tests {
         AuthenticatedAuthorization,
         u64,
     ) {
-        let (mut config, transaction, identity) = super::super::context::tests::fixture().await;
+        let (mut config, _, identity) = super::super::context::tests::fixture().await;
         config.max_authorization_transactions = 1;
         config.max_authentication_age_seconds = 1;
         let now = identity.verified_at_ms();
         let config = Arc::new(config);
         let store = MemoryTransactionStore::new(config.clone()).unwrap();
         let created = store.create_at(request(&config), [7; 32], at(now)).unwrap();
+        let source = store.lookup_bound(&created.id, &[7; 32]).await.unwrap();
         let context =
-            AuthenticatedAuthorization::new(transaction, identity, &[7; 32], &config, now).unwrap();
+            AuthenticatedAuthorization::new_bound(source, identity, &[7; 32], &config, now)
+                .unwrap();
         (store, created, context, now)
+    }
+    #[tokio::test]
+    async fn source_witness_prevents_identical_payload_id_aliasing_and_cache_copy() {
+        let (mut config, _, identity) = super::super::context::tests::fixture().await;
+        config.max_authorization_transactions = 2;
+        let now = identity.verified_at_ms();
+        let store = MemoryTransactionStore::new(Arc::new(config)).unwrap();
+        let a = store
+            .create_at(request(&store.config), [7; 32], at(now))
+            .unwrap();
+        let b = store
+            .create_at(request(&store.config), [7; 32], at(now))
+            .unwrap();
+        assert!(a.id.hash() != b.id.hash());
+        {
+            let entries = store.entries.lock().unwrap();
+            assert!(entries[&a.id.hash()].bytes == entries[&b.id.hash()].bytes);
+            assert_eq!(
+                entries[&a.id.hash()].expires_at_ms,
+                entries[&b.id.hash()].expires_at_ms
+            );
+        }
+        let source = store.lookup_bound(&a.id, &[7; 32]).await.unwrap();
+        let context =
+            AuthenticatedAuthorization::new_bound(source, identity, &[7; 32], &store.config, now)
+                .unwrap();
+        let saved = context.encode().unwrap();
+        assert_eq!(
+            store.promote_at(&b.id, &[7; 32], context, at(now)).err(),
+            Some(StoreError::Unavailable)
+        );
+        assert!(store.access_at(&a.id, &[7; 32], at(now), false).is_ok());
+        assert!(store.access_at(&b.id, &[7; 32], at(now), false).is_ok());
+        let restored =
+            AuthenticatedAuthorization::decode(&saved, &store.config, &[7; 32], now).unwrap();
+        store
+            .promote_at(&a.id, &[7; 32], restored, at(now))
+            .unwrap();
+        assert!(
+            store
+                .authenticated_at(&a.id, &[7; 32], at(now), false)
+                .is_ok()
+        );
+        {
+            let mut entries = store.entries.lock().unwrap();
+            let original = &entries[&a.id.hash()];
+            let copied = Stored {
+                kind: StoredKind::Authenticated,
+                bytes: original.bytes.clone(),
+                expires_at_ms: original.expires_at_ms,
+            };
+            entries.insert(b.id.hash(), copied);
+        }
+        for consume in [false, true] {
+            assert_eq!(
+                store
+                    .authenticated_at(&b.id, &[7; 32], at(now), consume)
+                    .err(),
+                Some(StoreError::Unavailable)
+            );
+        }
+        assert_eq!(store.entries.lock().unwrap().len(), 2);
+        assert!(
+            store
+                .authenticated_at(&a.id, &[7; 32], at(now), true)
+                .is_ok()
+        );
+    }
+    #[tokio::test]
+    async fn unbound_policy_context_cannot_be_promoted_even_when_all_facts_match() {
+        let (config, transaction, identity) = super::super::context::tests::fixture().await;
+        let now = identity.verified_at_ms();
+        let store = MemoryTransactionStore::new(Arc::new(config)).unwrap();
+        let created = store
+            .create_at(request(&store.config), [7; 32], at(now))
+            .unwrap();
+        let context =
+            AuthenticatedAuthorization::new(transaction, identity, &[7; 32], &store.config, now)
+                .unwrap();
+        assert!(
+            context.transaction().encode().unwrap()
+                == store.entries.lock().unwrap()[&created.id.hash()].bytes
+        );
+        assert_eq!(
+            store
+                .promote_at(&created.id, &[7; 32], context, at(now))
+                .err(),
+            Some(StoreError::Unavailable)
+        );
+        assert!(store.lookup_bound(&created.id, &[7; 32]).await.is_ok());
+        let absent = TransactionId::parse(&URL_SAFE_NO_PAD.encode([0; 32])).unwrap();
+        assert_eq!(
+            store.lookup_bound(&absent, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
     }
     #[tokio::test]
     async fn public_promotion_keeps_one_capacity_slot_and_typed_access() {
@@ -458,7 +569,7 @@ pub(super) mod tests {
                 .access_at(&created.id, &[7; 32], at(now + 1000), false)
                 .is_ok()
         );
-        let (original, _, context, now) = authenticated_fixture().await;
+        let (original, _, _, now) = authenticated_fixture().await;
         let mut denied = (*original.config).clone();
         denied.resources[0].scopes[0]
             .required_roles
@@ -467,6 +578,16 @@ pub(super) mod tests {
         let created = denied
             .create_at(request(&denied.config), [7; 32], at(now))
             .unwrap();
+        let source = denied.lookup_bound(&created.id, &[7; 32]).await.unwrap();
+        let (_, _, identity) = super::super::context::tests::fixture().await;
+        let context = AuthenticatedAuthorization::new_bound(
+            source,
+            identity,
+            &[7; 32],
+            &original.config,
+            now,
+        )
+        .unwrap();
         assert_eq!(
             denied
                 .promote_at(&created.id, &[7; 32], context, at(now))
@@ -505,11 +626,9 @@ pub(super) mod tests {
     async fn concurrent_promotion_has_one_winner_and_bad_authenticated_data_is_not_consumed() {
         let (store, created, first, now) = authenticated_fixture().await;
         let (_, _, identity) = super::super::context::tests::fixture().await;
-        let transaction = store
-            .access_at(&created.id, &[7; 32], at(now), false)
-            .unwrap();
+        let source = store.lookup_bound(&created.id, &[7; 32]).await.unwrap();
         let second =
-            AuthenticatedAuthorization::new(transaction, identity, &[7; 32], &store.config, now)
+            AuthenticatedAuthorization::new_bound(source, identity, &[7; 32], &store.config, now)
                 .unwrap();
         let store = Arc::new(store);
         let id = Arc::new(created.id);

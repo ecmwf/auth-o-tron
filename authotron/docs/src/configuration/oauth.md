@@ -224,8 +224,9 @@ or HTTP/startup integration is implemented.
 ### OAuth-internal authenticated-context codec
 
 `AuthenticatedAuthorization::encode/decode` are restricted to sibling OAuth modules,
-not external callers or request JSON. Version-1 private JSON accepts only username,
-realm, roles, verification time, and a canonical unpadded base64url transaction blob.
+not external callers or request JSON. Version-2 private JSON accepts only username,
+realm, roles, verification time, a canonical unpadded base64url transaction blob,
+and nullable `source_transaction_id_hash`. Version 1 is rejected; no compatibility migration is provided.
 There are no attributes, user scopes, consent flags, stored authorized-scope lists,
 or derived expiry claims. The wire limit is 64 KiB, checked before JSON parsing;
 decoded transaction bytes are capped at 16 KiB before the transaction codec runs.
@@ -340,7 +341,7 @@ consent or grants. No backend is wired at startup; OAuth remains Unsupported.
 Async `promote_authenticated(id, browser_hash, context)` replaces a Pending entry
 exactly once with an Authenticated entry under the same hashed key/capacity slot.
 It samples trusted time under lock, decodes the pending record, checks binding and
-exact canonical source transaction bytes/expiry, then revalidates the context with
+the context's store-provided source-ID hash and exact source bytes/expiry, then revalidates the context with
 the store's config snapshot before replacement. Expiry shrinks to context freshness
 or the original transaction deadline, never extends. Failures leave unexpired input
 unchanged; a second promotion returns Missing and cannot overwrite the earlier identity.
@@ -349,9 +350,26 @@ return typed contexts via the private codec, without refreshing expiry; wrong ki
 missing/expired IDs or wrong binding return Missing. Codec/metadata failures return
 Unavailable without consuming corrupt state. Both kinds share the configured count
 cap, and only successful typed consume removes an unexpired entry. No operation
-adds consent, grants or codes. Source matching binds request/expiry facts, not a new
-transaction-ID field inside the record. Valkey authenticated promotion and HTTP
+adds consent, grants or codes. Source matching now distinguishes IDs even when all
+request, browser-binding and expiry facts are identical. Valkey authenticated promotion and HTTP
 integration remain separate future slices.
+
+### Store-provided source witnesses
+
+Memory and Valkey `lookup_bound(id, browser_hash)` return an opaque
+`BoundAuthorizationTransaction` only after successful pending lookup validation.
+It owns the input record and actual lookup-key ID hash, with a read-only transaction
+getter and no public constructor, Clone, Debug or deserialization. Obtain this
+witness before credential verification; `AuthenticatedAuthorization::new_bound`
+consumes it with the fresh identity proof. No separate caller ID tag can bind or
+rebind a context. The original `new` remains unbound for pure in-process eligibility;
+unbound contexts cannot be promoted or loaded as persisted authenticated state.
+Memory promotion checks the hash in constant time and retains the full source-byte
+checks. Authenticated lookup/consume also verify the persisted hash against the
+indexed ID before removal, rejecting copied records. Mismatch/missing source is
+fixed Unavailable, with unexpired data preserved. The private version-2 codec carries
+the hash across trusted storage; it is not a MAC against storage compromise.
+Neither lookup API creates consent, codes, grants or new startup/HTTP wiring.
 
 ### Shared Valkey connector foundation
 

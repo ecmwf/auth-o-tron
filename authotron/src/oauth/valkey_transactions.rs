@@ -10,7 +10,9 @@
 
 use super::{
     authorization::ValidatedAuthorizationRequest,
-    records::{AuthorizationTransaction, MAX_TRANSACTION_BYTES, valid_time},
+    records::{
+        AuthorizationTransaction, BoundAuthorizationTransaction, MAX_TRANSACTION_BYTES, valid_time,
+    },
     store::{CreatedTransaction, StoreError, TransactionId},
 };
 use crate::{
@@ -160,6 +162,17 @@ impl ValkeyTransactionStore {
     ) -> Result<AuthorizationTransaction, StoreError> {
         self.read(id, browser_hash).await.map(|(record, _)| record)
     }
+    pub async fn lookup_bound(
+        &self,
+        id: &TransactionId,
+        browser_hash: &[u8; 32],
+    ) -> Result<BoundAuthorizationTransaction, StoreError> {
+        let transaction = self.lookup(id, browser_hash).await?;
+        Ok(BoundAuthorizationTransaction::from_store(
+            transaction,
+            id.hash(),
+        ))
+    }
     pub async fn consume(
         &self,
         id: &TransactionId,
@@ -296,6 +309,8 @@ mod tests {
             created.expires_at_ms
         );
         let ttl2: i64 = command(&a, redis::cmd("PTTL").arg(&keys[1])).await;
+        let witness = b.lookup_bound(&created.id, &[7; 32]).await.unwrap();
+        assert_eq!(witness.transaction().expires_at_ms(), created.expires_at_ms);
         assert!(ttl2 < ttl1 && ttl2 > 0);
         let (left, right) = tokio::join!(
             a.consume(&created.id, &[7; 32]),
