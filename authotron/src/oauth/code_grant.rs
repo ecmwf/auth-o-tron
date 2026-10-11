@@ -11,11 +11,17 @@
 use super::{
     authorization::{PkceChallenge, ValidatedAuthorizationRequest},
     consent::ConsentedAuthorization,
-    context::AuthenticatedAuthorization,
+    context::{AuthenticatedAuthorization, MAX_AUTHENTICATED_CONTEXT_BYTES},
     records::valid_time,
     store::TransactionId,
 };
 use crate::{config::OAuthConfig, models::user::User};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use serde::{Deserialize, Serialize};
+
+// Awaiting explicit code-backend integration; these are not public restoration APIs.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) const MAX_CODE_GRANT_BYTES: usize = 96 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodeGrantError {
@@ -24,11 +30,26 @@ pub enum CodeGrantError {
     InvalidContext,
     Expired,
     InvalidRedemption,
+    TooLarge,
+    InvalidRecord,
+    UnsupportedVersion,
 }
 
 /// Owned approval snapshot: no Debug, Clone, serde or raw-identity constructor.
 pub struct CodeGrant {
     context: AuthenticatedAuthorization,
+    source_hash: [u8; 32],
+    browser_hash: [u8; 32],
+    issued_at_ms: u64,
+    expires_at_ms: u64,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodeGrantDto {
+    version: u8,
+    context: String,
     source_hash: [u8; 32],
     browser_hash: [u8; 32],
     issued_at_ms: u64,
@@ -67,6 +88,104 @@ fn checked_context(
 }
 
 impl CodeGrant {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn encode(&self) -> Result<Vec<u8>, CodeGrantError> {
+        let context = self
+            .context
+            .encode()
+            .map_err(|_| CodeGrantError::InvalidContext)?;
+        let dto = CodeGrantDto {
+            version: 1,
+            context: URL_SAFE_NO_PAD.encode(context),
+            source_hash: self.source_hash,
+            browser_hash: self.browser_hash,
+            issued_at_ms: self.issued_at_ms,
+            expires_at_ms: self.expires_at_ms,
+        };
+        let bytes = serde_json::to_vec(&dto).map_err(|_| CodeGrantError::InvalidRecord)?;
+        if bytes.len() > MAX_CODE_GRANT_BYTES {
+            return Err(CodeGrantError::TooLarge);
+        }
+        Ok(bytes)
+    }
+    /// Trusted backend asserts prior approval; not request JSON, a MAC or issuance proof.
+    /// Base64url example: `e30` canonically encodes `{}`; `e30=` has invalid padding.
+    /// Decoded bytes must separately satisfy the authenticated-context codec.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) fn decode(
+        bytes: &[u8],
+        config: &OAuthConfig,
+        server_now_ms: u64,
+    ) -> Result<Self, CodeGrantError> {
+        use CodeGrantError::*;
+        if bytes.len() > MAX_CODE_GRANT_BYTES {
+            return Err(TooLarge);
+        }
+        let dto: CodeGrantDto = serde_json::from_slice(bytes).map_err(|_| InvalidRecord)?;
+        if dto.version != 1 {
+            return Err(UnsupportedVersion);
+        }
+        configuration(config)?;
+        if dto.issued_at_ms == 0
+            || !valid_time(dto.issued_at_ms)
+            || !valid_time(dto.expires_at_ms)
+            || dto.expires_at_ms <= dto.issued_at_ms
+            || dto.expires_at_ms - dto.issued_at_ms > 300_000
+        {
+            return Err(InvalidRecord);
+        }
+        if !valid_time(server_now_ms) || dto.issued_at_ms > server_now_ms {
+            return Err(InvalidTime);
+        }
+        if server_now_ms >= dto.expires_at_ms {
+            return Err(Expired);
+        }
+        let deadline = dto
+            .issued_at_ms
+            .checked_add(config.authorization_code_ttl_seconds * 1000)
+            .filter(|time| valid_time(*time))
+            .ok_or(InvalidTime)?;
+        if dto.context.len() > (MAX_AUTHENTICATED_CONTEXT_BYTES * 4).div_ceil(3) {
+            return Err(TooLarge);
+        }
+        let context_bytes = URL_SAFE_NO_PAD
+            .decode(&dto.context)
+            .map_err(|_| InvalidRecord)?;
+        if context_bytes.len() > MAX_AUTHENTICATED_CONTEXT_BYTES {
+            return Err(TooLarge);
+        }
+        if URL_SAFE_NO_PAD.encode(&context_bytes) != dto.context {
+            return Err(InvalidRecord);
+        }
+        let context = AuthenticatedAuthorization::decode(
+            &context_bytes,
+            config,
+            &dto.browser_hash,
+            server_now_ms,
+        )
+        .map_err(|_| InvalidContext)?;
+        let context = checked_context(
+            &context,
+            &dto.source_hash,
+            &dto.browser_hash,
+            config,
+            server_now_ms,
+        )?;
+        if dto.expires_at_ms > context.transaction().expires_at_ms() {
+            return Err(InvalidRecord);
+        }
+        let expires_at_ms = dto.expires_at_ms.min(deadline).min(context.expires_at_ms());
+        if server_now_ms >= expires_at_ms {
+            return Err(Expired);
+        }
+        Ok(Self {
+            context,
+            source_hash: dto.source_hash,
+            browser_hash: dto.browser_hash,
+            issued_at_ms: dto.issued_at_ms,
+            expires_at_ms,
+        })
+    }
     /// Consumes checked explicit approval. Source ID, binding and time are server-owned.
     pub fn from_consent(
         approval: ConsentedAuthorization,
@@ -220,6 +339,204 @@ mod tests {
             .unwrap()
             .as_millis() as u64;
         (cfg, created.id, *approval, now)
+    }
+
+    #[tokio::test]
+    async fn private_codec_round_trip_bounds_and_expiry_tightening() {
+        let (mut cfg, id, approval, now) = approved(300, 300).await;
+        let grant = CodeGrant::from_consent(approval, &cfg, &id, &[7; 32], now).unwrap();
+        let bytes = grant.encode().unwrap();
+        let dto: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let mut fields: Vec<_> = dto
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            [
+                "browser_hash",
+                "context",
+                "expires_at_ms",
+                "issued_at_ms",
+                "source_hash",
+                "version"
+            ]
+        );
+        let restored = CodeGrant::decode(&bytes, &cfg, now).unwrap();
+        assert_eq!(restored.encode().unwrap(), bytes);
+        assert_eq!(restored.state(), Some("opaque+client"));
+        assert_eq!(restored.as_user().roles, ["reader", "member"]);
+        assert_eq!(restored.scopes(), ["read"]);
+        assert_eq!(
+            restored.validate_redemption(CLIENT, CALLBACK, RESOURCE, VERIFIER, &cfg, now),
+            Ok(())
+        );
+        let context: serde_json::Value = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(dto["context"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(context.get("attributes").is_none() && context.get("scopes").is_none());
+        assert!(!String::from_utf8(bytes.clone()).unwrap().contains(VERIFIER));
+        let mut context_bytes = serde_json::to_vec(&context).unwrap();
+        context_bytes.resize(MAX_AUTHENTICATED_CONTEXT_BYTES, b' ');
+        let mut boundary = dto;
+        boundary["context"] = serde_json::json!(URL_SAFE_NO_PAD.encode(&context_bytes));
+        let boundary = serde_json::to_vec(&boundary).unwrap();
+        assert!(CodeGrant::decode(&boundary, &cfg, now).is_ok());
+        let mut padded = bytes.clone();
+        padded.resize(MAX_CODE_GRANT_BYTES, b' ');
+        assert!(CodeGrant::decode(&padded, &cfg, now).is_ok());
+        padded.push(b' ');
+        assert_eq!(
+            CodeGrant::decode(&padded, &cfg, now).err(),
+            Some(CodeGrantError::TooLarge)
+        );
+        cfg.authorization_code_ttl_seconds = 30;
+        let tightened = CodeGrant::decode(&bytes, &cfg, now).unwrap();
+        assert_eq!(tightened.expires_at_ms(), now + 30_000);
+        assert_eq!(
+            CodeGrant::decode(&bytes, &cfg, now + 30_000).err(),
+            Some(CodeGrantError::Expired)
+        );
+        cfg.authorization_code_ttl_seconds = 300;
+        assert_eq!(
+            CodeGrant::decode(&bytes, &cfg, now)
+                .unwrap()
+                .expires_at_ms(),
+            grant.expires_at_ms()
+        );
+        assert_eq!(
+            CodeGrant::decode(&tightened.encode().unwrap(), &cfg, now)
+                .unwrap()
+                .expires_at_ms(),
+            tightened.expires_at_ms()
+        );
+        cfg.max_authentication_age_seconds = 1;
+        assert_eq!(
+            CodeGrant::decode(&bytes, &cfg, now)
+                .unwrap()
+                .expires_at_ms(),
+            grant.verified_at_ms() + 1000
+        );
+    }
+
+    #[tokio::test]
+    async fn private_codec_rejects_shape_context_binding_and_time_metadata() {
+        use CodeGrantError::*;
+        let (cfg, id, approval, now) = approved(300, 300).await;
+        let grant = CodeGrant::from_consent(approval, &cfg, &id, &[7; 32], now).unwrap();
+        let original: serde_json::Value = serde_json::from_slice(&grant.encode().unwrap()).unwrap();
+        for (field, value, expected) in [
+            ("version", serde_json::json!(2), UnsupportedVersion),
+            ("approved", serde_json::json!(true), InvalidRecord),
+            (
+                "source_hash",
+                serde_json::json!([8; 32].to_vec()),
+                InvalidContext,
+            ),
+            (
+                "browser_hash",
+                serde_json::json!([8; 32].to_vec()),
+                InvalidContext,
+            ),
+            ("issued_at_ms", serde_json::json!(0), InvalidRecord),
+            ("issued_at_ms", serde_json::json!(now + 1), InvalidTime),
+            ("expires_at_ms", serde_json::json!(now), InvalidRecord),
+            (
+                "expires_at_ms",
+                serde_json::json!(now + 300_001),
+                InvalidRecord,
+            ),
+            (
+                "expires_at_ms",
+                serde_json::json!(253402300800000_u64),
+                InvalidRecord,
+            ),
+            ("context", serde_json::json!("e30="), InvalidRecord),
+            ("context", serde_json::json!("e31"), InvalidRecord),
+            (
+                "context",
+                serde_json::json!(
+                    "A".repeat((MAX_AUTHENTICATED_CONTEXT_BYTES * 4).div_ceil(3) + 1)
+                ),
+                TooLarge,
+            ),
+        ] {
+            let mut dto = original.clone();
+            dto[field] = value;
+            assert_eq!(
+                CodeGrant::decode(&serde_json::to_vec(&dto).unwrap(), &cfg, now).err(),
+                Some(expected)
+            );
+        }
+        let mut dto = original.clone();
+        dto.as_object_mut().unwrap().remove("source_hash");
+        assert_eq!(
+            CodeGrant::decode(&serde_json::to_vec(&dto).unwrap(), &cfg, now).err(),
+            Some(InvalidRecord)
+        );
+        let mut context: serde_json::Value = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(original["context"].as_str().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        context["attributes"] = serde_json::json!({"approved": true});
+        dto = original;
+        dto["context"] =
+            serde_json::json!(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&context).unwrap()));
+        assert_eq!(
+            CodeGrant::decode(&serde_json::to_vec(&dto).unwrap(), &cfg, now).err(),
+            Some(InvalidContext)
+        );
+        let bytes = grant.encode().unwrap();
+        assert_eq!(
+            CodeGrant::decode(&bytes, &cfg, now - 1).err(),
+            Some(InvalidTime)
+        );
+        assert_eq!(
+            CodeGrant::decode(&bytes, &cfg, u64::MAX).err(),
+            Some(InvalidTime)
+        );
+        assert_eq!(
+            CodeGrant::decode(&bytes, &cfg, grant.expires_at_ms()).err(),
+            Some(Expired)
+        );
+    }
+
+    #[tokio::test]
+    async fn private_codec_rechecks_registry_policy_and_original_transaction_ceiling() {
+        let (cfg, id, approval, now) = approved(30, 300).await;
+        let grant = CodeGrant::from_consent(approval, &cfg, &id, &[7; 32], now).unwrap();
+        let bytes = grant.encode().unwrap();
+        for case in 0..3 {
+            let mut changed = cfg.clone();
+            match case {
+                0 => changed.clients[0].client_id = "other".into(),
+                1 => {
+                    changed.clients[0].redirect_uris =
+                        vec!["https://app.example.org/removed".into()]
+                }
+                _ => changed.resources[0].scopes[0]
+                    .required_roles
+                    .push("revoked".into()),
+            }
+            assert_eq!(
+                CodeGrant::decode(&bytes, &changed, now).err(),
+                Some(CodeGrantError::InvalidContext)
+            );
+        }
+        let mut dto: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        dto["expires_at_ms"] = serde_json::json!(now + 60_000);
+        assert_eq!(
+            CodeGrant::decode(&serde_json::to_vec(&dto).unwrap(), &cfg, now).err(),
+            Some(CodeGrantError::InvalidRecord)
+        );
     }
 
     #[tokio::test]

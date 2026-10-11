@@ -311,8 +311,38 @@ time at or after code expiry is Expired. Errors are fixed Configuration, Invalid
 InvalidContext, Expired and InvalidRedemption, without submitted values. Checks do
 not consume the grant and supply no token-signing proof: a future backend must
 atomically consume a one-use code before returning issuance authority. Code IDs,
-private grant codec, backend code storage and HTTP integration are future slices.
+backend code storage and HTTP integration are future slices.
 This capability is explicitly usable with OAuth disabled; startup remains Unsupported.
+
+### OAuth-internal code-grant codec
+
+`CodeGrant::encode/decode` are restricted to sibling OAuth modules. Version-1 private
+JSON rejects unknown fields and contains only `version`, canonical unpadded base64url
+`context`, 32-byte `source_hash` and `browser_hash`, `issued_at_ms` and `expires_at_ms`.
+The context uses the private authenticated-context codec, not a raw User, arbitrary
+scope list or serialized consent capability. Wire limit: 96 KiB before JSON parsing;
+context text is capped before base64 decoding, with a 64 KiB decoded-context limit
+before context parsing and canonical re-encoding checks.
+
+Decode requires positive representable metadata times through year 9999, issuance
+no later than trusted server time (no skew allowance), expiry after issuance and
+current time, a stored window of at most 300 seconds and no expiry beyond the source
+transaction deadline. It checks cached source/browser hashes, current registry,
+policy and identity freshness. Effective expiry is the minimum of stored expiry,
+issuance plus **current** code TTL and recomputed context expiry. Tightening policy
+can shorten expiry; relaxation cannot extend the stored ceiling. Access-token TTL
+is independent. Fixed codec errors add TooLarge, InvalidRecord and UnsupportedVersion.
+
+The authenticated backend record asserts that explicit approval already occurred
+under checked Origin, request context, binding and consent nonce. This is not a MAC,
+fresh provider verification or protection against compromised storage. Cached hashes
+are server data, not token-request parameters; redemption requires no browser cookie
+or source ID. Decode does not reconstruct `ConsentedAuthorization` and grants no
+code-minting, one-use or token-issuance authority. Repeated trusted restores remain
+possible: redemption validation and successful atomic backend code consumption must
+precede token issuance. The future backend must bind the submitted code handle's
+hash to this exact payload and its metadata; this codec contains no code-ID hash
+and cannot establish that association. Namespaces require coherent issuer/config snapshots.
 
 ## Typed access-token capability
 
