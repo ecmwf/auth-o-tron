@@ -523,14 +523,28 @@ is exposed only through `as_secret_str` for future callback delivery, not loggin
 Explicit Memory issuance generates codes; no redirect or HTTP delivery is wired.
 
 The private stored envelope consumes a typed CodeGrant, retaining only its bounded
-96 KiB codec bytes, expiry and its own actual code-handle hash. Raw code values are
-not stored. Internal restoration compares that hash in constant time before decoding,
+96 KiB codec bytes, expiry, originating literal issuer and its own actual code-handle
+hash. Raw code values are not stored. Internal restoration compares that hash in
+constant time and requires the cached issuer to exactly match reader config before decoding,
 rejects an expired envelope, and rechecks grant codec/current-policy constraints
 without extending the envelope ceiling. A copied envelope cannot be accepted under
 another code handle. This assumes trusted storage, not a MAC; restoration is not
 code consumption or token-issuance proof. Code expiry still follows the grant's
 code/consent/context minimum (code TTL defaults to 60 seconds), with PKCE required
 for redemption.
+
+OAuth-only `StoredCode::from_backend` restores four separate metadata fields:
+canonical unpadded base64url `code_hash` (43 characters/32 bytes), `issuer` (a validated
+HTTPS origin, at most 2048 UTF-8 bytes), positive representable `expiry` through year
+9999, and nonempty `payload` (at most 96 KiB). Bounds are checked before copying;
+grant parsing and proof checks still occur on access. Read-only hash, issuer, payload
+and expiry getters support the next shared-backend slice without public serde or
+mutable fields. Restoring these metadata fields does not assert current eligibility.
+A changed issuer or trailing-slash variant returns fixed Unavailable and cannot rebind
+an unexpired code; successful Memory redemption copies the **cached** issuer into its
+proof. Trusted-storage compromise can forge metadata: this is not a MAC. Shared
+namespaces still require coherent issuer/config snapshots. Shared Valkey code
+persistence and its atomic consent transition remain the next reviewed increment.
 
 `max_authorization_codes` sets a separate Memory code count cap, default 1024 and range
 1–100000. At the maximum, 96 KiB payloads alone permit 9.8304 GB (about 9.15 GiB), plus
@@ -582,7 +596,7 @@ Unavailable, preserving unexpired records. Time before issuance is rejected; tim
 at the effective deadline is expired. Effective expiry tightening also fails closed.
 
 The result has private fields, no public constructor, Debug, Clone or serde, and only
-OAuth-internal grant/issuer readers. It retains the store's literal issuer spelling
+OAuth-internal grant/issuer readers. It retains the cached originating issuer spelling
 (including a trailing slash) for the signing bridge to bind exactly. The bridge
 rechecks its active policy/freshness and issuer; redemption itself neither signs
 nor issues a token. One use and capacity reclamation are per Memory instance only,

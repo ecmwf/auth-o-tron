@@ -249,10 +249,9 @@ impl MemoryTransactionStore {
         }
         codes.retain(|_, code| code.expires_at_ms() > now);
         let key = code.hash();
-        let grant = codes
-            .get(&key)
-            .ok_or(Missing)?
-            .grant(code, &self.config, now)?;
+        let stored = codes.get(&key).ok_or(Missing)?;
+        let grant = stored.grant(code, &self.config, now)?;
+        let issuer = stored.issuer().to_owned();
         let (client, callback, resource, verifier) = inputs;
         grant
             .validate_redemption(client, callback, resource, verifier, &self.config, now)
@@ -260,7 +259,6 @@ impl MemoryTransactionStore {
                 CodeGrantError::InvalidRedemption | CodeGrantError::Expired => Missing,
                 _ => Unavailable,
             })?;
-        let issuer = self.config.issuer.as_ref().ok_or(Unavailable)?.clone();
         codes.remove(&key).ok_or(Missing)?;
         // This proof is constructed only after successful removal under the same lock.
         Ok(RedeemedAuthorization { grant, issuer })
@@ -317,7 +315,8 @@ impl MemoryTransactionStore {
             let code = generate()?;
             if let Entry::Vacant(slot) = codes.entry(code.hash()) {
                 let issued = IssuedCode::new(code, &grant);
-                let record = StoredCode::new(issued.code(), grant)?;
+                let issuer = self.config.issuer.as_deref().ok_or(Unavailable)?;
+                let record = StoredCode::new(issued.code(), grant, issuer)?;
                 // All expected failures precede mutation; both maps remain locked.
                 slot.insert(record);
                 entries.remove(&key);
@@ -745,6 +744,28 @@ pub(super) mod tests {
                 .err(),
             Some(CodeStoreError::Missing)
         );
+        assert!(store.codes.lock().unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn cached_code_issuer_cannot_be_rebound_by_reader_configuration() {
+        let mut store = code_store(1);
+        let code = redeemable(&store).await;
+        let original = store.config.clone();
+        for issuer in ["https://other.example.org", "https://login.example.org/"] {
+            let mut cfg = (*original).clone();
+            cfg.issuer = Some(issuer.into());
+            store.config = Arc::new(cfg);
+            assert_eq!(
+                store.redeem_code_at(code.code(), REDEMPTION, now_ms).err(),
+                Some(CodeStoreError::Unavailable)
+            );
+            assert_eq!(store.codes.lock().unwrap().len(), 1);
+        }
+        store.config = original;
+        let proof = store
+            .redeem_code_at(code.code(), REDEMPTION, now_ms)
+            .unwrap();
+        assert_eq!(proof.issuer(), "https://login.example.org");
         assert!(store.codes.lock().unwrap().is_empty());
     }
     #[tokio::test]
