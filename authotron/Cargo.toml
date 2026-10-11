@@ -12,7 +12,10 @@ categories = ["authentication", "network-programming"]
 rust-version = "1.88"
 include = [
     "src/**/*.rs",
+    "src/**/*.lua",
     "src/static/**",
+    "schema.json",
+    "examples/login-ui/**",
     "Cargo.toml",
     "LICENSE.txt",
     "README.md",
@@ -26,6 +29,9 @@ authotron-types = { path = "../authotron-types", version = "0.1.0" }
 aide = { version = "~0.15", features = ["axum", "axum-multipart"] }
 axum = "~0.8"
 http = "~1.4"
+maud = "~0.27"
+cookie = "~0.18"
+subtle = "~2.6"
 tokio = { version = "~1.50", features = ["full"] }
 
 # Authentication & crypto
@@ -41,6 +47,7 @@ serde_json = "~1.0"
 # Storage & caching
 cached = { version = "~0.58", features = ["async", "tokio"] }
 mongodb = "~3.7"
+redis = { version = "=0.32.7", features = ["tokio-rustls-comp", "tls-rustls-webpki-roots", "connection-manager"] }
 
 # Configuration
 figment = { version = "~0.10", features = ["yaml", "env"] }
@@ -54,7 +61,8 @@ tracing-subscriber = { version = "~0.3", features = ["env-filter", "json"] }
 async-trait = "~0.1"
 chrono = "~0.4"
 futures = "~0.3"
-reqwest = { version = "~0.13", features = ["form", "json"] }
+reqwest = { version = "~0.13", features = ["form", "json", "query"] }
+url = "~2.5"
 uuid = { version = "~1.22", features = ["v4"] }
 
 [dev-dependencies]
