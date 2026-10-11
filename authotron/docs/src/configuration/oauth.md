@@ -239,6 +239,12 @@ explicit consent and code/S256 exchange; no separate production demo or deployme
 
 ## Self-contained verification
 
+For an SDK-backed resource server and native client, see the repository example
+[`authotron/examples/mcp-local`](https://github.com/ecmwf/auth-o-tron/tree/main/authotron/examples/mcp-local).
+It demonstrates local HTTPS, protected-resource metadata, Bearer-token validation,
+and a scope-protected synthetic MCP tool. Its disposable credentials and keys are
+generated outside the repository; it is not a production deployment template.
+
 `cargo test -p authotron --test oauth_http_integration -- --test-threads=1` runs
 Basic and mocked ECMWF API-key HTTP flows, checks signatures from the HTTP JWKS,
 tests replay and non-consuming bad-verifier handling, stale hidden-ID/cookie swaps,

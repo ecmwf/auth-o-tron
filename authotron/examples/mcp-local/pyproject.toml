@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "authotron-mcp-local"
+version = "0.1.0"
+description = "Disposable local Auth-O-Tron OAuth and official MCP SDK demo"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp==1.26.0",
+  "PyJWT[crypto]>=2.10.1,<3",
+  "uvicorn>=0.30,<1",
+  "httpx>=0.27,<1",
+  "aiohttp>=3.10,<4",
+  "cryptography>=44,<49",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10", "jsonschema>=4.23,<5"]
+
+[tool.setuptools]
+# Run the scripts from the checkout; installation supplies their dependencies only.
+py-modules = []
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
