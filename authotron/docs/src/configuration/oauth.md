@@ -240,8 +240,7 @@ Wall-clock rollback can lengthen elapsed lifetime for unpruned records; removed
 records cannot reappear.
 Memory is per instance, cannot support cross-replica transactions, and has no
 restart persistence. Tune capacity to process budgets (up to 16 KiB per record;
-100000 records can approach 1.6 GiB of payload, plus overhead). Shared Valkey
-contracts are future work. Transactions prove input validation only, never login,
+100000 records can approach 1.6 GiB of payload, plus overhead). Transactions prove input validation only, never login,
 consent or grants. No backend is wired at startup; OAuth remains Unsupported.
 
 ### Shared Valkey connector foundation
@@ -255,8 +254,33 @@ It supports one primary endpoint, with verified `rediss` TLS and no memory fallb
 Connector errors expose only Configuration/Unavailable classes. Connection-manager
 reconnect is distinct from command replay: commands are issued once, and timeout
 or lost-response mutation outcomes may be ambiguous; callers must not blindly retry.
-OAuth transaction Lua, dedicated namespaces and cross-replica persistence remain
-the next separately reviewed slice. No OAuth backend or connection is initialized at startup.
+No OAuth backend or connection is initialized at startup.
+
+### Shared Valkey authorization transactions
+
+`oauth::valkey_transactions::ValkeyTransactionStore::new(config, &backend)` is an
+explicit connection call requiring Valkey settings. Async `create`, `lookup`, and
+`consume` use the memory store's ID/handle/record contracts, without local cache or
+fallback. Namespace: `<key_prefix>:oauth:authorization-transactions:v1:`, with only
+hashed-ID record keys and an expiry sorted-set index, separate from UI state.
+Replicas sharing a namespace must use consistent policy snapshots, TTL and capacity.
+Creation obtains server `TIME`, encodes/revalidates the record, then Lua checks the
+current server time and expiry window, prunes expired index members, checks shared
+capacity, and uses `SET NX PXAT` plus `ZADD`. No client/replica clock determines expiry.
+Lookup checks types, metadata and `STRLEN` before a bounded `GET`, returning exact
+bytes and server time for Rust codec/config/binding checks. Reads never refresh TTL.
+Consume validates that read in Rust, then Lua compares exact bytes and expiry at
+current server time before `DEL`/`ZREM`; changed data or another winner fail closed.
+Wrong binding or invalid current policy/record cannot burn an unexpired transaction.
+Lua checks key types and mutation ACL permissions before writes. Atomic execution
+is not rollback: unexpected write failures/OOM or lost responses can leave ambiguous
+outcomes; operations are not automatically replayed. Invalid data yields fixed
+Unavailable errors, not raw backend diagnostics. The index is bounded to 100000
+members and uses no `KEYS` scans; record reads are capped at 16 KiB. Expired members
+are pruned in one atomic script: a large expired batch can occupy the shared
+server and exceed a caller's operation deadline, so tune capacity and timeouts.
+This remains
+authorization-input storage only, not login/consent proof or atomic code issuance.
 
 Authorization codes, HTTP token issuance, discovery/JWKS, browser CORS,
 and MCP integration remain future capabilities. No HTTP tokens are issued and

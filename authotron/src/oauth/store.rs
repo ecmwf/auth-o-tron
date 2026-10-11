@@ -33,6 +33,13 @@ pub enum StoreError {
 /// Bearer-like identifier, deliberately not Debug/Serialize. Browser binding is also required.
 pub struct TransactionId(String);
 impl TransactionId {
+    pub(super) fn generate() -> Result<Self, StoreError> {
+        let mut random = [0; 32];
+        OsRng
+            .try_fill_bytes(&mut random)
+            .map_err(|_| StoreError::Unavailable)?;
+        Ok(Self(URL_SAFE_NO_PAD.encode(random)))
+    }
     pub fn parse(value: &str) -> Result<Self, StoreError> {
         if value.len() != 43 {
             return Err(StoreError::Missing);
@@ -48,7 +55,7 @@ impl TransactionId {
     pub fn as_secret_str(&self) -> &str {
         &self.0
     }
-    fn hash(&self) -> [u8; 32] {
+    pub(super) fn hash(&self) -> [u8; 32] {
         Sha256::digest(self.0.as_bytes()).into()
     }
 }
@@ -141,11 +148,7 @@ impl MemoryTransactionStore {
             return Err(StoreError::Limited);
         }
         for _ in 0..4 {
-            let mut random = [0; 32];
-            OsRng
-                .try_fill_bytes(&mut random)
-                .map_err(|_| StoreError::Unavailable)?;
-            let id = TransactionId(URL_SAFE_NO_PAD.encode(random));
+            let id = TransactionId::generate()?;
             if let Entry::Vacant(slot) = entries.entry(id.hash()) {
                 slot.insert(Stored {
                     bytes,
@@ -188,17 +191,17 @@ impl MemoryTransactionStore {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::oauth::authorization::validate_authorization_request;
     use serde_json::json;
 
-    fn config() -> Arc<OAuthConfig> {
+    pub(in crate::oauth) fn config() -> Arc<OAuthConfig> {
         Arc::new(serde_json::from_value(json!({"issuer": "https://login.example.org", "authorization_transaction_ttl_seconds": 30, "max_authorization_transactions": 1,
             "clients": [{"client_id": "desktop", "display_name": "Desktop", "redirect_uris": ["https://app.example.org/cb"], "resources": [{"resource": "https://mcp.example.org/mcp", "scopes": ["read"]}]}],
             "resources": [{"resource": "https://mcp.example.org/mcp", "allowed_realms": ["local"], "scopes": [{"name": "read", "required_roles": ["reader"]}]}]})).unwrap())
     }
-    fn request(config: &OAuthConfig) -> ValidatedAuthorizationRequest {
+    pub(in crate::oauth) fn request(config: &OAuthConfig) -> ValidatedAuthorizationRequest {
         validate_authorization_request(config, b"client_id=desktop&redirect_uri=https://app.example.org/cb&response_type=code&resource=https://mcp.example.org/mcp&scope=read&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256").unwrap()
     }
     fn at(now: u64) -> impl FnOnce() -> Result<u64, StoreError> {
