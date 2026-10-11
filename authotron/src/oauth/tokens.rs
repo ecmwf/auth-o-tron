@@ -8,7 +8,7 @@
 
 //! Typed, policy-checked access tokens; authentication and consent are caller responsibilities.
 
-use super::keys::KeyManager;
+use super::{code_grant::CodeGrant, keys::KeyManager, store::RedeemedAuthorization};
 use crate::config::{OAuthConfig, OAuthPolicyError};
 use authotron_types::User;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -25,6 +25,7 @@ pub enum TokenError {
     Time,
     Signing,
     Size,
+    Redemption,
 }
 impl std::fmt::Display for TokenError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -80,6 +81,42 @@ impl<'a> TokenIssuer<'a> {
             return Err(TokenError::Configuration);
         }
         Ok(Self { config, keys })
+    }
+    /// Consumes atomic code-redemption proof, with no request-selected grant overrides.
+    pub fn issue_from_redeemed(
+        &self,
+        redeemed: RedeemedAuthorization,
+    ) -> Result<TokenResponse, TokenError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| TokenError::Time)?
+            .as_millis()
+            .try_into()
+            .map_err(|_| TokenError::Time)?;
+        self.issue_from_redeemed_at(redeemed, now)
+    }
+    fn issue_from_redeemed_at(
+        &self,
+        redeemed: RedeemedAuthorization,
+        now_ms: u64,
+    ) -> Result<TokenResponse, TokenError> {
+        if Some(redeemed.issuer()) != self.config.issuer.as_deref() {
+            return Err(TokenError::Redemption);
+        }
+        let bytes = redeemed
+            .grant()
+            .encode()
+            .map_err(|_| TokenError::Redemption)?;
+        let grant =
+            CodeGrant::decode(&bytes, self.config, now_ms).map_err(|_| TokenError::Redemption)?;
+        // Reuse the fixed signer, identity bounds and required-role projection at this same time.
+        self.issue_at(
+            grant.client_id(),
+            grant.resource(),
+            grant.scopes(),
+            grant.as_user(),
+            now_ms / 1000,
+        )
     }
     /// Requires fresh verification, trusted successful augmentation and upstream consent/grant checks.
     /// This helper does not authenticate, obtain consent or validate an authorization-code proof.
@@ -230,6 +267,139 @@ mod tests {
     fn decoding(keys: &KeyManager) -> DecodingKey {
         let public = &keys.jwks().keys[0];
         DecodingKey::from_rsa_components(&public.n, &public.e).unwrap()
+    }
+    async fn redeemed(
+        config: &OAuthConfig,
+    ) -> (
+        super::super::store::MemoryTransactionStore,
+        super::super::codes::IssuedCode,
+        RedeemedAuthorization,
+    ) {
+        use super::super::{
+            codes::CodeIssueOutcome,
+            context::AuthenticatedAuthorization,
+            store::{MemoryTransactionStore, tests::request},
+        };
+        let (_, _, identity) = super::super::context::tests::fixture().await;
+        let store = MemoryTransactionStore::new(std::sync::Arc::new(config.clone())).unwrap();
+        let created = store.create(request(config), [7; 32]).await.unwrap();
+        let source = store.lookup_bound(&created.id, &[7; 32]).await.unwrap();
+        let now = identity.verified_at_ms();
+        let context =
+            AuthenticatedAuthorization::new_bound(source, identity, &[7; 32], config, now).unwrap();
+        store
+            .promote_authenticated(&created.id, &[7; 32], context)
+            .await
+            .unwrap();
+        let csrf = store.prepare_consent(&created.id, &[7; 32]).await.unwrap();
+        let CodeIssueOutcome::Issued(code) = store
+            .issue_code(&created.id, &[7; 32], csrf.as_secret_str(), "approve")
+            .await
+            .unwrap()
+        else {
+            panic!("issued code required")
+        };
+        let proof = redeem(&store, &code).await.unwrap();
+        (store, code, proof)
+    }
+    async fn redeem(
+        store: &super::super::store::MemoryTransactionStore,
+        code: &super::super::codes::IssuedCode,
+    ) -> Result<RedeemedAuthorization, super::super::codes::CodeStoreError> {
+        store
+            .redeem_code(
+                code.code(),
+                "desktop",
+                code.redirect_uri(),
+                RESOURCE,
+                "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+            )
+            .await
+    }
+    #[tokio::test]
+    async fn redeemed_bridge_signs_only_stored_grant_and_keeps_code_consumed() {
+        let (_file, mut config, keys, _) = fixture();
+        config.resources[0].scopes[0].required_roles = vec!["reader".into()];
+        let (store, code, proof) = redeemed(&config).await;
+        let ceiling = proof.grant().expires_at_ms();
+        let response = TokenIssuer::new(&config, &keys)
+            .unwrap()
+            .issue_from_redeemed(proof)
+            .unwrap();
+        let header = decode_header(response.access_token()).unwrap();
+        assert_eq!(header.alg, Algorithm::RS256);
+        assert_eq!(header.typ.as_deref(), Some("at+jwt"));
+        assert_eq!(header.kid.as_deref(), Some(keys.active_kid()));
+        let claims = decode::<Value>(response.access_token(), &decoding(&keys), &validation())
+            .unwrap()
+            .claims;
+        assert_eq!(claims["iss"], ISS);
+        assert_eq!(claims["aud"], RESOURCE);
+        assert_eq!(claims["client_id"], "desktop");
+        assert_eq!(claims["scope"], "read");
+        assert_eq!(claims["roles"], json!(["reader"]));
+        assert_eq!(claims["sub"], subject(ISS, "local", "alice"));
+        assert_eq!(
+            claims["exp"].as_u64().unwrap() - claims["iat"].as_u64().unwrap(),
+            config.access_token_ttl_seconds
+        );
+        assert!(claims["exp"].as_u64().unwrap() * 1000 > ceiling);
+        assert_eq!(
+            redeem(&store, &code).await.err(),
+            Some(super::super::codes::CodeStoreError::Missing)
+        );
+    }
+    #[tokio::test]
+    async fn redeemed_bridge_rechecks_literal_issuer_policy_ttl_freshness_and_time() {
+        let (_file, config, keys, _) = fixture();
+        for case in 0..8 {
+            let (store, code, proof) = redeemed(&config).await;
+            let mut current = config.clone();
+            let mut now = proof.grant().issued_at_ms();
+            match case {
+                0 => current.issuer = Some("https://other.example.org/".into()),
+                1 => current.issuer = Some(ISS.trim_end_matches('/').into()),
+                2 => current.resources[0].scopes[0]
+                    .required_roles
+                    .push("revoked".into()),
+                3 => current.clients[0].resources.clear(),
+                4 => {
+                    current.authorization_code_ttl_seconds = 30;
+                    now += 30_000;
+                }
+                5 => {
+                    current.max_authentication_age_seconds = 1;
+                    now = proof.grant().verified_at_ms() + 1000;
+                }
+                6 => now -= 1,
+                _ => now = proof.grant().expires_at_ms(),
+            }
+            let issuer = TokenIssuer::new(&current, &keys).unwrap();
+            assert_eq!(
+                issuer.issue_from_redeemed_at(proof, now).err(),
+                Some(TokenError::Redemption)
+            );
+            assert_eq!(
+                redeem(&store, &code).await.err(),
+                Some(super::super::codes::CodeStoreError::Missing)
+            );
+        }
+    }
+    #[tokio::test]
+    async fn signing_failure_after_redemption_does_not_restore_code() {
+        let (_file, config, mut keys, _) = fixture();
+        let (store, code, proof) = redeemed(&config).await;
+        // Fault injection affects only the test key manager, after validated RSA loading.
+        super::super::keys::tests::break_signer(&mut keys);
+        let issuer = TokenIssuer::new(&config, &keys).unwrap();
+        assert_eq!(
+            issuer.issue_from_redeemed(proof).err(),
+            Some(TokenError::Signing)
+        );
+        assert_eq!(
+            redeem(&store, &code).await.err(),
+            Some(super::super::codes::CodeStoreError::Missing)
+        );
     }
     #[test]
     fn fixed_header_claims_projection_and_validation() {

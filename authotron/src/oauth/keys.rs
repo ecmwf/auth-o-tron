@@ -224,6 +224,9 @@ pub(super) mod tests {
             [2048, 2048, 1024].map(|bits| RsaPrivateKey::new(&mut OsRng, bits).unwrap())
         })
     }
+    pub(in crate::oauth) fn break_signer(manager: &mut KeyManager) {
+        manager.encoding = EncodingKey::from_rsa_der(b"invalid test signing key");
+    }
     fn write(dir: &Path, name: &str, bytes: &[u8]) -> std::path::PathBuf {
         let path = dir.join(name);
         OpenOptions::new()

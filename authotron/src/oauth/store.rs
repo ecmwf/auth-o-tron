@@ -98,12 +98,10 @@ pub struct RedeemedAuthorization {
     issuer: String,
 }
 impl RedeemedAuthorization {
-    // Reserved for the OAuth-internal signing bridge; not public issuance authority.
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Only OAuth capabilities may inspect the consumed-code proof.
     pub(super) fn grant(&self) -> &CodeGrant {
         &self.grant
     }
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn issuer(&self) -> &str {
         &self.issuer
     }

@@ -223,8 +223,8 @@ in-process policy eligibility only: development-memory persistence is described
 below alongside explicit shared Valkey authenticated persistence. Durability
 depends on backend configuration. Explicit consent and atomic decision completion
 in memory and shared Valkey are described below, alongside Memory code issuance.
-Memory redemption is described below; signed-token bridging and HTTP/startup
-integration remain unimplemented.
+Memory redemption and its signing bridge are described below; HTTP/startup
+integration remains unimplemented.
 
 ### OAuth-internal authenticated-context codec
 
@@ -315,8 +315,8 @@ InvalidContext, Expired and InvalidRedemption, without submitted values. Checks 
 not consume the grant and supply no token-signing proof: a future backend must
 atomically consume a one-use code before returning issuance authority. Code handles
 and stored envelopes are described below; Memory issuance is available explicitly,
-alongside one-use Memory redemption; signed-token bridging and HTTP integration
-are future slices.
+alongside one-use Memory redemption and its signing bridge; HTTP integration
+remains a future slice.
 This capability is explicitly usable with OAuth disabled; startup remains Unsupported.
 
 ### OAuth-internal code-grant codec
@@ -370,6 +370,36 @@ expiry (through year 9999); `jti` is UUIDv4. Wire limit: 32 KiB. Non-Debug respo
 serialize only `access_token`, `token_type: Bearer`, `expires_in`, `scope`; no refresh.
 Errors are fixed configuration/identity/policy/time/signing/size classes. Consumers
 must enforce `at+jwt`, RS256, expected issuer/audience; a complete MCP validator is future work.
+
+### Signing from atomic code redemption
+
+`TokenIssuer::issue_from_redeemed(redeemed)` consumes opaque `RedeemedAuthorization`
+returned only after successful atomic code removal. It accepts no client, resource,
+scope, User or expiry overrides. The proof's literal store issuer must equal the
+issuer's configured spelling exactly, including any trailing slash. The existing
+constructor's borrowed validated keys and signing-reference matching remain required.
+
+After redemption, the bridge samples current trusted server time in milliseconds
+and revalidates the private grant codec against the issuer's current config. It
+enforces tightened code TTLs, rejecting at or beyond the resulting deadline.
+Time before issuance, stale identity, and revoked registry/callback/resource/scope/role
+policy are also rejected. Proof issuer
+or grant revalidation failures return fixed `TokenError::Redemption`; clock acquisition
+and existing issuance failures retain Time/Identity/Policy/Signing/Size classes.
+The common signer rechecks identity bounds and shared scope policy, preserves the
+exact stored client/resource/scopes and required-role-only projection, and emits the
+existing RS256 `at+jwt` response with active `kid`, stable subject and 32 KiB wire cap.
+Failures return no token: the code remains consumed and the owned proof is not retryable.
+Neither the raw code nor its verifier is retained by the bridge.
+
+Access-token expiry uses configured access TTL, independently of the short code,
+consent and authentication deadlines checked before issuance. A valid access token
+can therefore outlive those deadlines; verified-role snapshots and token lifetime
+remain revocation windows, not fresh upstream provider checks. Future OAuth endpoints
+must use atomic redemption followed by this bridge, rather than the trusted-caller
+`issue_access_token` helper. Upstream Origin, consent, binding and fresh-verification
+checks remain required. This capability is explicitly in-process with OAuth disabled;
+no HTTP endpoint, refresh token or startup enablement is added.
 
 ## Authorization-request input gate
 
@@ -506,7 +536,7 @@ for redemption.
 1–100000. At the maximum, 96 KiB payloads alone permit 9.8304 GB (about 9.15 GiB), plus
 overhead. CodeStoreError classes are Missing, Limited, InvalidToken, InvalidDecision
 and Unavailable. Memory persistence and redemption are described below; shared Valkey
-code storage, signed-token bridging and HTTP/startup integration remain future work. OAuth enablement remains
+code storage and HTTP/startup integration remain future work. OAuth enablement remains
 Unsupported.
 
 ### Development-memory atomic code issuance
@@ -553,8 +583,8 @@ at the effective deadline is expired. Effective expiry tightening also fails clo
 
 The result has private fields, no public constructor, Debug, Clone or serde, and only
 OAuth-internal grant/issuer readers. It retains the store's literal issuer spelling
-(including a trailing slash) for the next signing bridge to bind exactly. That bridge
-must recheck its active policy/freshness and issuer; redemption itself neither signs
+(including a trailing slash) for the signing bridge to bind exactly. The bridge
+rechecks its active policy/freshness and issuer; redemption itself neither signs
 nor issues a token. One use and capacity reclamation are per Memory instance only,
 without restart or distributed guarantees. HTTP and shared Valkey redemption remain
 future work; OAuth enablement remains Unsupported.
@@ -663,7 +693,7 @@ of an authorization code. A future ConsentReady-to-Code transition must atomical
 persist the code while consuming consent; the current method only deletes the
 session and returns an opaque consent proof. No HTTP or startup integration is added.
 
-Shared Valkey codes/redemption, signed-token bridging, HTTP token issuance, discovery/JWKS, browser CORS,
+Shared Valkey codes/redemption, HTTP token issuance, discovery/JWKS, browser CORS,
 and MCP integration remain future capabilities. No HTTP tokens are issued and
 `enabled: true` still fails startup as Unsupported. The legacy HMAC `jwt.secret`
 must never be published through
