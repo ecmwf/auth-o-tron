@@ -1,0 +1,482 @@
+#!/usr/bin/env python3
+"""Render and validate a disposable, namespace-confined login preview.
+
+This program never invokes kubectl, publishes an image, or applies resources.
+"""
+
+import argparse
+import base64
+import copy
+import gzip
+import hashlib
+import io
+import re
+import subprocess
+import tarfile
+from pathlib import Path
+
+import yaml
+
+NAMESPACE = "authotron-palyground"
+RELEASE = "authotron-login-preview"
+ARCHIVE_KEY = "source.tar.gz"
+WORK_DIR = "/work"
+SOURCE_DIR = "/source"
+TARGET_DIR = f"{WORK_DIR}/target"
+EXECUTABLE = f"{TARGET_DIR}/debug/authotron"
+BUILD_JOBS = 2
+# NGINX admission rejects dotted filenames with Exact/Prefix path types.
+# Keep API paths unexposed: only the login page and public image/CSS assets route.
+PATH_RULES = (
+    ("/login", "Exact"),
+    ("/static/", "Prefix"),
+    ("/favicon.ico", "ImplementationSpecific"),
+)
+ANNOTATIONS = {
+    "cert-manager.io/cluster-issuer": "letsencrypt-production",
+    "dns.operators.ecmwf.int/on-transport-server": "vs-transport-https",
+}
+SOURCE_FILES = (
+    "Cargo.toml",
+    "Cargo.lock",
+    "authotron/Cargo.toml",
+    "authotron/README.md",
+    "authotron/schema.json",
+    "authotron-types/Cargo.toml",
+    "authotron-client/Cargo.toml",
+)
+SOURCE_DIRS = ("authotron/src", "authotron-types/src", "authotron-client/src")
+ALLOWED_API_KIND_PAIRS = {
+    ("v1", "ConfigMap"),
+    ("v1", "Service"),
+    ("apps/v1", "Deployment"),
+    ("networking.k8s.io/v1", "Ingress"),
+}
+BUILD_SCRIPT = f"""mkdir -p {WORK_DIR}/source {WORK_DIR}/cargo {TARGET_DIR} {WORK_DIR}/tmp
+tar -xzf {SOURCE_DIR}/{ARCHIVE_KEY} -C {WORK_DIR}/source
+cd {WORK_DIR}/source
+cargo build --locked -p authotron --jobs {BUILD_JOBS}
+test -x {EXECUTABLE}
+"""
+
+
+def checked_source_path(project, path):
+    """Reject symlink ancestry before reading any source or fixture."""
+    current = project
+    for component in path.relative_to(project).parts:
+        current = current / component
+        if current.is_symlink():
+            raise ValueError(f"source symlink is not allowed: {current}")
+    if not path.resolve().is_relative_to(project.resolve()):
+        raise ValueError("source path escapes the project")
+    return path
+
+
+def source_archive(project):
+    """Archive only build inputs; exclude local config, tooling and credentials."""
+    files = [project / name for name in SOURCE_FILES]
+    for name in SOURCE_DIRS:
+        directory = checked_source_path(project, project / name)
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError(f"not a regular source directory: {name}")
+        for path in directory.rglob("*"):
+            if path.is_symlink():
+                raise ValueError(f"source symlink is not allowed: {path}")
+            if not path.is_dir():
+                files.append(path)
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w", format=tarfile.GNU_FORMAT) as archive:
+        for path in sorted(files):
+            checked_source_path(project, path)
+            if path.is_symlink() or not path.is_file():
+                raise ValueError(f"not a regular source file: {path}")
+            data = path.read_bytes()
+            entry = tarfile.TarInfo(path.relative_to(project).as_posix())
+            entry.size = len(data)
+            entry.mode = 0o644
+            archive.addfile(entry, io.BytesIO(data))
+    compressed = gzip.compress(buffer.getvalue(), mtime=0)
+    if len(compressed) > 700 * 1024:
+        raise ValueError("source archive exceeds the preview ConfigMap size budget")
+    return compressed
+
+
+def validate_inputs(host, image):
+    # Valid: preview.example.org. Invalid: a URL, wildcard or whitespace.
+    if (
+        len(host) > 253
+        or not re.fullmatch(
+            r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+",
+            host,
+        )
+        or any(len(label) > 63 for label in host.split("."))
+    ):
+        raise ValueError("host must be a concrete DNS hostname")
+    if not re.fullmatch(r"docker\.io/library/rust@sha256:[0-9a-f]{64}", image):
+        raise ValueError("build image must be the official Rust image pinned by digest")
+
+
+def preview_values(project, host, sign_in_actions=None):
+    config = yaml.safe_load(
+        checked_source_path(
+            project, project / "authotron/examples/login-ui/aviso.yaml"
+        ).read_text()
+    )
+    if config["providers"] or config["store"]["enabled"] or not config["ui"]["enabled"]:
+        raise ValueError("the preview fixture must enable only the branding shell")
+    config["server"]["host"] = "0.0.0.0"
+    config["metrics"]["enabled"] = False
+    if sign_in_actions is not None:
+        config["ui"]["sign_in_actions"] = copy.deepcopy(sign_in_actions)
+    port = config["server"]["port"]
+    return {
+        "nameOverride": RELEASE,
+        "fullnameOverride": RELEASE,
+        "config": config,
+        "service": {"type": "ClusterIP", "port": port, "targetPort": port},
+        "metrics": {"enabled": False, "serviceMonitor": {"enabled": False}},
+        "mongodb": {"enabled": False},
+        "pullSecret": {"enabled": False},
+        "extraEnv": [],
+        "ingress": {
+            "enabled": True,
+            "className": "nginx",
+            "annotations": ANNOTATIONS,
+            "hosts": [
+                {
+                    "host": host,
+                    "paths": [
+                        {"path": path, "pathType": path_type}
+                        for path, path_type in PATH_RULES
+                    ],
+                }
+            ],
+            "tls": [{"hosts": [host], "secretName": f"{RELEASE}-tls"}],
+        },
+    }
+
+
+def preview_pod(image, source_name, port, probes):
+    security = {
+        "readOnlyRootFilesystem": True,
+        "allowPrivilegeEscalation": False,
+        "capabilities": {"drop": ["ALL"]},
+    }
+    return {
+        "automountServiceAccountToken": False,
+        "securityContext": {
+            "runAsNonRoot": True,
+            "runAsUser": 1000,
+            "runAsGroup": 1000,
+            "fsGroup": 1000,
+            "seccompProfile": {"type": "RuntimeDefault"},
+        },
+        "initContainers": [
+            {
+                "name": "build-login-ui",
+                "image": image,
+                "imagePullPolicy": "IfNotPresent",
+                "command": ["sh", "-ec"],
+                "args": [BUILD_SCRIPT],
+                "env": [
+                    {"name": name, "value": value}
+                    for name, value in {
+                        "CARGO_HOME": f"{WORK_DIR}/cargo",
+                        "CARGO_TARGET_DIR": TARGET_DIR,
+                        "TMPDIR": f"{WORK_DIR}/tmp",
+                        "HOME": WORK_DIR,
+                    }.items()
+                ],
+                "securityContext": security,
+                "resources": {
+                    "requests": {"cpu": "500m", "memory": "1Gi"},
+                    "limits": {"cpu": str(BUILD_JOBS), "memory": "4Gi"},
+                },
+                "volumeMounts": [
+                    {"name": "preview-work", "mountPath": WORK_DIR},
+                    {
+                        "name": "preview-source",
+                        "mountPath": SOURCE_DIR,
+                        "readOnly": True,
+                    },
+                ],
+            }
+        ],
+        "containers": [
+            {
+                "name": "authotron",
+                "image": image,
+                "imagePullPolicy": "IfNotPresent",
+                "command": [EXECUTABLE],
+                "workingDir": WORK_DIR,
+                "env": [{"name": "AOT_CONFIG_PATH", "value": "/app/config.yaml"}],
+                "ports": [
+                    {"name": "http-auth", "containerPort": port, "protocol": "TCP"}
+                ],
+                "securityContext": security,
+                "resources": {
+                    "requests": {"cpu": "50m", "memory": "128Mi"},
+                    "limits": {"cpu": "500m", "memory": "512Mi"},
+                },
+                "volumeMounts": [
+                    {
+                        "name": "config-volume",
+                        "mountPath": "/app/config.yaml",
+                        "subPath": "config.yaml",
+                        "readOnly": True,
+                    },
+                    {"name": "preview-work", "mountPath": WORK_DIR, "readOnly": True},
+                ],
+                **probes,
+            }
+        ],
+        "volumes": [
+            {"name": "config-volume", "configMap": {"name": f"{RELEASE}-config"}},
+            {"name": "preview-work", "emptyDir": {"sizeLimit": "8Gi"}},
+            {"name": "preview-source", "configMap": {"name": source_name}},
+        ],
+    }
+
+
+def checked_resources(documents):
+    """Accept only known namespaced kinds; never overwrite a foreign namespace.
+
+    A missing namespace is filled in. `namespace: aviso2-dev` is rejected.
+    Namespace objects are intentionally excluded and rendered separately.
+    """
+    resources = []
+    seen = set()
+    for document in documents:
+        if document is None:
+            continue
+        if (
+            not isinstance(document, dict)
+            or (document.get("apiVersion"), document.get("kind"))
+            not in ALLOWED_API_KIND_PAIRS
+        ):
+            raise ValueError("unexpected resource kind or API version")
+        document = copy.deepcopy(document)
+        metadata = document.get("metadata")
+        if not isinstance(metadata, dict) or not metadata.get("name"):
+            raise ValueError("resource metadata must include a name")
+        if metadata.get("namespace", NAMESPACE) != NAMESPACE:
+            raise ValueError("foreign namespace is not allowed")
+        metadata["namespace"] = NAMESPACE
+        identity = (document["apiVersion"], document["kind"], metadata["name"])
+        if identity in seen:
+            raise ValueError("duplicate resource identity")
+        seen.add(identity)
+        resources.append(document)
+    return resources
+
+
+def render_preview(project, chart, host, image, sign_in_actions=None):
+    validate_inputs(host, image)
+    archive = source_archive(project)
+    source_hash = hashlib.sha256(archive).hexdigest()
+    source_name = f"{RELEASE}-source-{source_hash[:12]}"
+    values = preview_values(project, host, sign_in_actions)
+    rendered = subprocess.run(
+        [
+            "helm",
+            "template",
+            RELEASE,
+            str(chart),
+            "--namespace",
+            NAMESPACE,
+            "--kube-version",
+            "1.34.0",
+            "-f",
+            "-",
+        ],
+        input=yaml.safe_dump(values),
+        text=True,
+        check=True,
+        capture_output=True,
+    ).stdout
+    resources = checked_resources(yaml.safe_load_all(rendered))
+    expected = {
+        ("ConfigMap", f"{RELEASE}-config"),
+        ("Deployment", RELEASE),
+        ("Service", RELEASE),
+        ("Ingress", RELEASE),
+    }
+    if {(doc["kind"], doc["metadata"]["name"]) for doc in resources} != expected:
+        raise ValueError(
+            "the chart must render exactly the four expected preview resources"
+        )
+    config = next(doc for doc in resources if doc["kind"] == "ConfigMap")
+    # Use only the public fixture, not additional configuration inherited from chart defaults.
+    config["data"] = {"config.yaml": yaml.safe_dump(values["config"])}
+    deployment = next(doc for doc in resources if doc["kind"] == "Deployment")
+    containers = deployment["spec"]["template"]["spec"]["containers"]
+    if len(containers) != 1:
+        raise ValueError("expected one application container")
+    probes = {key: containers[0][key] for key in ("livenessProbe", "readinessProbe")}
+    probe_fields = {
+        "httpGet",
+        "initialDelaySeconds",
+        "periodSeconds",
+        "timeoutSeconds",
+        "failureThreshold",
+        "successThreshold",
+    }
+    if any(
+        set(probe) - probe_fields
+        or probe.get("httpGet") != {"path": "/health", "port": "http-auth"}
+        for probe in probes.values()
+    ):
+        raise ValueError("expected application-port HTTP health probes")
+    pod = preview_pod(image, source_name, values["config"]["server"]["port"], probes)
+    expected_pod = copy.deepcopy(pod)
+    deployment["spec"]["replicas"] = 1
+    deployment["spec"]["template"]["spec"] = pod
+    annotations = deployment["spec"]["template"]["metadata"].get("annotations", {})
+    if set(annotations) != {"checksum/config"}:
+        raise ValueError("expected only the chart's configuration rollout checksum")
+    annotations["authotron.ecmwf.int/source-sha256"] = source_hash
+    deployment["spec"]["template"]["metadata"]["annotations"] = annotations
+    resources.append(
+        {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "immutable": True,
+            "metadata": {"name": source_name, "namespace": NAMESPACE},
+            "binaryData": {ARCHIVE_KEY: base64.b64encode(archive).decode("ascii")},
+        }
+    )
+    validate_preview(resources, values, expected_pod)
+    return resources, archive
+
+
+def validate_preview(resources, values, expected_pod):
+    """Fail closed on unexpected exposure or changed executable/volume/identity."""
+    resources = checked_resources(resources)
+    config = next(
+        doc
+        for doc in resources
+        if doc["kind"] == "ConfigMap" and doc["metadata"]["name"] == f"{RELEASE}-config"
+    )
+    if (
+        set(config) != {"apiVersion", "kind", "metadata", "data"}
+        or set(config.get("data", {})) != {"config.yaml"}
+        or yaml.safe_load(config["data"]["config.yaml"]) != values["config"]
+    ):
+        raise ValueError(
+            "rendered application configuration differs from the preview fixture"
+        )
+    service = next(doc for doc in resources if doc["kind"] == "Service")
+    port = values["config"]["server"]["port"]
+    if (
+        set(service["spec"]) != {"type", "ports", "selector"}
+        or service["spec"]["type"] != "ClusterIP"
+        or service["metadata"].get("annotations") not in (None, {})
+    ):
+        raise ValueError("only the internal preview Service is allowed")
+    if service["spec"]["ports"] != [
+        {"name": "http-auth", "port": port, "targetPort": port, "protocol": "TCP"}
+    ]:
+        raise ValueError("unexpected Service port")
+    ingress = next(doc for doc in resources if doc["kind"] == "Ingress")
+    host = values["ingress"]["hosts"][0]["host"]
+    expected_ingress = {
+        "ingressClassName": "nginx",
+        "tls": values["ingress"]["tls"],
+        "rules": [
+            {
+                "host": host,
+                "http": {
+                    "paths": [
+                        {
+                            "path": path,
+                            "pathType": path_type,
+                            "backend": {
+                                "service": {"name": RELEASE, "port": {"number": port}}
+                            },
+                        }
+                        for path, path_type in PATH_RULES
+                    ]
+                },
+            }
+        ],
+    }
+    if (
+        ingress["spec"] != expected_ingress
+        or ingress["metadata"].get("annotations") != ANNOTATIONS
+    ):
+        raise ValueError("unexpected ingress host, paths, backend, TLS or annotations")
+    deployment = next(doc for doc in resources if doc["kind"] == "Deployment")
+    if deployment["spec"]["template"]["spec"] != expected_pod:
+        raise ValueError("unexpected Pod configuration")
+    labels = deployment["spec"]["template"]["metadata"]["labels"]
+    expected_selector = {
+        "app.kubernetes.io/name": RELEASE,
+        "app.kubernetes.io/instance": RELEASE,
+    }
+    if service["spec"]["selector"] != expected_selector or any(
+        labels.get(key) != value for key, value in expected_selector.items()
+    ):
+        raise ValueError("Service selector does not match the preview Pod")
+    sources = [
+        doc for doc in resources if doc["kind"] == "ConfigMap" and doc is not config
+    ]
+    if (
+        len(sources) != 1
+        or set(sources[0])
+        != {"apiVersion", "kind", "metadata", "immutable", "binaryData"}
+        or sources[0].get("immutable") is not True
+        or set(sources[0].get("binaryData", {})) != {ARCHIVE_KEY}
+    ):
+        raise ValueError("expected one immutable source archive")
+    archive = base64.b64decode(sources[0]["binaryData"][ARCHIVE_KEY], validate=True)
+    source_hash = hashlib.sha256(archive).hexdigest()
+    annotations = deployment["spec"]["template"]["metadata"].get("annotations", {})
+    if (
+        sources[0]["metadata"]["name"] != f"{RELEASE}-source-{source_hash[:12]}"
+        or annotations.get("authotron.ecmwf.int/source-sha256") != source_hash
+        or not annotations.get("checksum/config")
+    ):
+        raise ValueError(
+            "archive identity or configuration rollout checksum is inconsistent"
+        )
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--chart", type=Path, required=True)
+    parser.add_argument("--host", required=True)
+    parser.add_argument("--build-image", required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    args = parser.parse_args()
+    project = Path(__file__).resolve().parents[3]
+    resources, archive = render_preview(
+        project, args.chart, args.host, args.build_image
+    )
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    (args.output_dir / "resources.yaml").write_text(
+        yaml.safe_dump_all(resources, sort_keys=False)
+    )
+    (args.output_dir / "namespace.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {"name": NAMESPACE},
+            }
+        )
+    )
+    (args.output_dir / ARCHIVE_KEY).write_bytes(archive)
+    (args.output_dir / "build.sh").write_text(BUILD_SCRIPT)
+    config = next(
+        doc for doc in resources if doc["kind"] == "ConfigMap" and "data" in doc
+    )
+    (args.output_dir / "application.yaml").write_text(config["data"]["config.yaml"])
+    print(
+        f"Validated {len(resources)} resources for {NAMESPACE}; source archive {len(archive)} bytes."
+    )
+    print(f"Preview URL: https://{args.host}/login")
+    print("No Kubernetes resources were applied and no images were published.")
+
+
+if __name__ == "__main__":
+    main()
