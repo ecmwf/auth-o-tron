@@ -167,7 +167,28 @@ serialize only `access_token`, `token_type: Bearer`, `expires_in`, `scope`; no r
 Errors are fixed configuration/identity/policy/time/signing/size classes. Consumers
 must enforce `at+jwt`, RS256, expected issuer/audience; a complete MCP validator is future work.
 
-Authorization codes, PKCE S256, HTTP token issuance, discovery/JWKS, browser CORS,
+## Authorization-request input gate
+
+`oauth::authorization::validate_authorization_request(&config, raw_query_bytes)`
+is a pure gate usable while OAuth is disabled, requiring valid config and an issuer.
+Queries are bounded to 8 KiB/32 parameters, with strict percent escapes/UTF-8 and
+`+` decoded as space. Unknown parameters are ignored and never retained as identity,
+roles, scopes or redirects. Known duplicates fail, including multiple `resource` values.
+Required: explicit `client_id`, exact `redirect_uri` (even for one callback),
+`response_type=code`, one exact registered/bound `resource`, `scope`, challenge and S256 method.
+No URI normalization/aliases. Scope: 1–32 unique RFC 6749 tokens separated by single
+ASCII spaces, client/resource-bound; role eligibility requires fresh identity later.
+Optional opaque `state` retains decoded text, ≤1024 UTF-8 bytes without controls.
+It remains untrusted client text: do not log it or interpret it as identity or
+authorization metadata.
+Challenge: canonical unpadded base64url SHA-256 (43 characters/32 bytes). Immutable
+`challenge().verify` requires 43–128 unreserved ASCII verifier bytes and compares
+digests in constant time. Successful requests have immutable getters, not login,
+consent or grant proof. Fixed-error failures **stay local; never redirect to raw
+submitted callbacks**. Error-redirect routing, extensions, authorization HTTP routes,
+transaction storage and code issuance are future work.
+
+Authorization codes, HTTP token issuance, discovery/JWKS, browser CORS,
 and MCP integration remain future capabilities. No HTTP tokens are issued and
 `enabled: true` still fails startup as Unsupported. The legacy HMAC `jwt.secret`
 must never be published through
