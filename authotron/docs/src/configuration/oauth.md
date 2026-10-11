@@ -203,7 +203,7 @@ attributes. No HTTP integration or startup enablement is implemented.
 `oauth::context::AuthenticatedAuthorization::new` consumes an owned transaction and
 opaque `VerifiedOAuthIdentity`, with the browser-binding hash, current OAuth config,
 and trusted server/backend time in Unix milliseconds. It accepts no raw User and
-has no Debug, Clone, serialization or public field mutation. The codec revalidates
+has no Debug, Clone, public serialization or field mutation. The transaction codec revalidates
 the unexpired transaction/current request; binding and all requested-scope role/realm
 policy must pass before construction. It owns the existing bounded proof without
 copying identity fields or retaining attributes/scopes from credentials.
@@ -219,6 +219,24 @@ StaleIdentity and AccessDenied, without identity data. Callers still enforce
 Origin/CSRF, and must recheck current policy/freshness at future issuance. This is
 in-process policy eligibility only: no persistence, consent flag, grant, code or
 HTTP/startup integration is implemented.
+
+### OAuth-internal authenticated-context codec
+
+`AuthenticatedAuthorization::encode/decode` are restricted to sibling OAuth modules,
+not external callers or request JSON. Version-1 private JSON accepts only username,
+realm, roles, verification time, and a canonical unpadded base64url transaction blob.
+There are no attributes, user scopes, consent flags, stored authorized-scope lists,
+or derived expiry claims. The wire limit is 64 KiB, checked before JSON parsing;
+decoded transaction bytes are capped at 16 KiB before the transaction codec runs.
+Identity bounds use the fresh-verification projection validator before allocating
+the restored User. Decode recomputes binding, current request/realm/role eligibility,
+age/skew and minimum expiry through the context constructor.
+This requires trusted authenticated backend storage: it is not a MAC or proof of
+fresh provider execution. OAuth-internal snapshot restoration does not rerun
+providers/augmenters, so verification-time roles remain a revocation window until
+authentication age expires; current policy is still rechecked. Deserialization
+allocations are wire-bounded, not an end-to-end hard memory guarantee. Fixed codec
+errors add TooLarge, InvalidRecord and UnsupportedVersion. No state-store hook is wired.
 
 ## Typed access-token capability
 

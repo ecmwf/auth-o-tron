@@ -25,7 +25,8 @@ pub enum AuthenticationError {
     Unavailable,
 }
 
-/// Only this module can construct a proof. No Debug, Clone, Serialize or Deserialize.
+/// Constructed by verification or OAuth-internal trusted snapshot restoration only.
+/// No Debug, Clone, Serialize or Deserialize.
 pub struct VerifiedOAuthIdentity {
     user: User,
     verified_at_ms: u64,
@@ -85,16 +86,7 @@ pub async fn verify_identity(
 }
 
 fn projection(user: &User) -> Result<User, BrowserVerifyError> {
-    let bounded = |value: &str| {
-        !value.trim().is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)
-    };
-    if !bounded(&user.username)
-        || !bounded(&user.realm)
-        || user.roles.len() > 64
-        || !user.roles.iter().all(|role| bounded(role))
-    {
-        return Err(BrowserVerifyError::Rejected);
-    }
+    validate_identity_fields(&user.username, &user.realm, &user.roles)?;
     Ok(User::new(
         user.realm.clone(),
         user.username.clone(),
@@ -103,6 +95,46 @@ fn projection(user: &User) -> Result<User, BrowserVerifyError> {
         None,
         None,
     ))
+}
+
+fn validate_identity_fields(
+    username: &str,
+    realm: &str,
+    roles: &[String],
+) -> Result<(), BrowserVerifyError> {
+    let bounded = |value: &str| {
+        !value.trim().is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)
+    };
+    if !bounded(username)
+        || !bounded(realm)
+        || roles.len() > 64
+        || !roles.iter().all(|role| bounded(role))
+    {
+        return Err(BrowserVerifyError::Rejected);
+    }
+    Ok(())
+}
+
+/// Trusted OAuth cache snapshots only: no provider or augmenter is re-executed.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "OAuth-internal context persistence is not wired")
+)]
+pub(super) fn restore_from_trusted_storage(
+    username: String,
+    realm: String,
+    roles: Vec<String>,
+    verified_at_ms: u64,
+) -> Result<VerifiedOAuthIdentity, AuthenticationError> {
+    validate_identity_fields(&username, &realm, &roles)
+        .map_err(|_| AuthenticationError::Rejected)?;
+    if !valid_time(verified_at_ms) {
+        return Err(AuthenticationError::Unavailable);
+    }
+    Ok(VerifiedOAuthIdentity {
+        user: User::new(realm, username, Some(roles), None, None, None),
+        verified_at_ms,
+    })
 }
 
 #[cfg(test)]

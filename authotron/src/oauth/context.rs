@@ -9,10 +9,18 @@
 //! Fresh, browser-bound policy eligibility for later consent; no grant or code issuance.
 
 use super::{
-    authentication::VerifiedOAuthIdentity,
-    records::{AuthorizationTransaction, valid_time},
+    authentication::{AuthenticationError, VerifiedOAuthIdentity, restore_from_trusted_storage},
+    records::{AuthorizationTransaction, MAX_TRANSACTION_BYTES, valid_time},
 };
 use crate::{config::OAuthConfig, models::user::User};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use serde::{Deserialize, Serialize};
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "OAuth-internal context persistence is not wired")
+)]
+pub(super) const MAX_AUTHENTICATED_CONTEXT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextError {
@@ -22,9 +30,27 @@ pub enum ContextError {
     Binding,
     StaleIdentity,
     AccessDenied,
+    TooLarge,
+    InvalidRecord,
+    UnsupportedVersion,
 }
 
-/// Owns opaque verification proof and validated input. No Debug, Clone or serialization.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "OAuth-internal context persistence is not wired")
+)]
+struct ContextDto {
+    version: u8,
+    username: String,
+    realm: String,
+    roles: Vec<String>,
+    verified_at_ms: u64,
+    transaction: String,
+}
+
+/// Owns verification proof/snapshot and validated input. No Debug, Clone or public serialization.
 pub struct AuthenticatedAuthorization {
     transaction: AuthorizationTransaction,
     identity: VerifiedOAuthIdentity,
@@ -108,6 +134,72 @@ impl AuthenticatedAuthorization {
     pub fn expires_at_ms(&self) -> u64 {
         self.expires_at_ms
     }
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "OAuth-internal context persistence is not wired")
+    )]
+    pub(super) fn encode(&self) -> Result<Vec<u8>, ContextError> {
+        let user = self.as_user();
+        let transaction = self
+            .transaction
+            .encode()
+            .map_err(|_| ContextError::InvalidTransaction)?;
+        let dto = ContextDto {
+            version: 1,
+            username: user.username.clone(),
+            realm: user.realm.clone(),
+            roles: user.roles.clone(),
+            verified_at_ms: self.verified_at_ms(),
+            transaction: URL_SAFE_NO_PAD.encode(transaction),
+        };
+        let bytes = serde_json::to_vec(&dto).map_err(|_| ContextError::InvalidRecord)?;
+        if bytes.len() > MAX_AUTHENTICATED_CONTEXT_BYTES {
+            return Err(ContextError::TooLarge);
+        }
+        Ok(bytes)
+    }
+    /// Trusted storage only, not request JSON or a MAC. Restores verification-time roles;
+    /// current eligibility is rechecked, but live upstream revocation is not queried.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "OAuth-internal context persistence is not wired")
+    )]
+    pub(super) fn decode(
+        bytes: &[u8],
+        config: &OAuthConfig,
+        browser_hash: &[u8; 32],
+        server_now_ms: u64,
+    ) -> Result<Self, ContextError> {
+        use ContextError::*;
+        if bytes.len() > MAX_AUTHENTICATED_CONTEXT_BYTES {
+            return Err(TooLarge);
+        }
+        let dto: ContextDto = serde_json::from_slice(bytes).map_err(|_| InvalidRecord)?;
+        if dto.version != 1 {
+            return Err(UnsupportedVersion);
+        }
+        if dto.transaction.len() > (MAX_TRANSACTION_BYTES * 4).div_ceil(3) {
+            return Err(TooLarge);
+        }
+        let transaction = URL_SAFE_NO_PAD
+            .decode(&dto.transaction)
+            .map_err(|_| InvalidRecord)?;
+        if transaction.len() > MAX_TRANSACTION_BYTES {
+            return Err(TooLarge);
+        }
+        if URL_SAFE_NO_PAD.encode(&transaction) != dto.transaction {
+            return Err(InvalidRecord);
+        }
+        let transaction = AuthorizationTransaction::decode(&transaction, config, server_now_ms)
+            .map_err(|_| InvalidTransaction)?;
+        let identity =
+            restore_from_trusted_storage(dto.username, dto.realm, dto.roles, dto.verified_at_ms)
+                .map_err(|error| match error {
+                    AuthenticationError::Unavailable => InvalidTime,
+                    _ => InvalidRecord,
+                })?;
+        Self::new(transaction, identity, browser_hash, config, server_now_ms)
+    }
 }
 
 #[cfg(test)]
@@ -150,6 +242,141 @@ mod tests {
             AuthorizationTransaction::new(request, [7; 32], identity.verified_at_ms() + 300000)
                 .unwrap();
         (*config.oauth, transaction, identity)
+    }
+    #[tokio::test]
+    async fn private_codec_round_trips_and_recomputes_policy_and_expiry() {
+        let (mut config, transaction, identity) = fixture().await;
+        let now = identity.verified_at_ms();
+        let context =
+            AuthenticatedAuthorization::new(transaction, identity, &[7; 32], &config, now).unwrap();
+        let bytes = context.encode().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let mut names = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(
+            names.join(" "),
+            "realm roles transaction username verified_at_ms version"
+        );
+        let restored = AuthenticatedAuthorization::decode(&bytes, &config, &[7; 32], now).unwrap();
+        assert_eq!(restored.encode().unwrap(), bytes);
+        assert!(restored.as_user().attributes.is_empty() && restored.as_user().scopes.is_empty());
+        config.max_authentication_age_seconds = 1;
+        let restored =
+            AuthenticatedAuthorization::decode(&bytes, &config, &[7; 32], now + 999).unwrap();
+        assert_eq!(restored.expires_at_ms(), now + 1000);
+        assert_eq!(
+            AuthenticatedAuthorization::decode(&bytes, &config, &[7; 32], now + 1000).err(),
+            Some(ContextError::StaleIdentity)
+        );
+        config.resources[0].scopes[0]
+            .required_roles
+            .push("absent".into());
+        assert_eq!(
+            AuthenticatedAuthorization::decode(&bytes, &config, &[7; 32], now).err(),
+            Some(ContextError::AccessDenied)
+        );
+    }
+    #[tokio::test]
+    async fn private_codec_rejects_malformed_snapshots_extensions_and_transactions() {
+        use ContextError::*;
+        let (config, transaction, identity) = fixture().await;
+        let now = identity.verified_at_ms();
+        let context =
+            AuthenticatedAuthorization::new(transaction, identity, &[7; 32], &config, now).unwrap();
+        let bytes = context.encode().unwrap();
+        let original: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for (field, replacement, error) in [
+            ("version", json!(2), UnsupportedVersion),
+            ("username", json!(" "), InvalidRecord),
+            ("realm", json!("local\n"), InvalidRecord),
+            ("roles", json!(["x".repeat(129)]), InvalidRecord),
+            ("roles", json!(vec!["reader"; 65]), InvalidRecord),
+            ("roles", json!([""]), InvalidRecord),
+            ("verified_at_ms", json!(u64::MAX), InvalidTime),
+            ("verified_at_ms", json!(now + 30001), StaleIdentity),
+            ("transaction", json!("%%%"), InvalidRecord),
+            (
+                "transaction",
+                json!(format!("{}=", original["transaction"].as_str().unwrap())),
+                InvalidRecord,
+            ),
+            (
+                "transaction",
+                json!(URL_SAFE_NO_PAD.encode(b"bad JSON")),
+                InvalidTransaction,
+            ),
+            (
+                "transaction",
+                json!(URL_SAFE_NO_PAD.encode(vec![b'x'; MAX_TRANSACTION_BYTES + 1])),
+                TooLarge,
+            ),
+            ("attributes", json!({"email": "hidden"}), InvalidRecord),
+            ("consent", json!(true), InvalidRecord),
+            ("scopes", json!(["read"]), InvalidRecord),
+            ("authorized_scopes", json!(["read"]), InvalidRecord),
+            ("expires_at_ms", json!(now + 999999), InvalidRecord),
+        ] {
+            let mut value = original.clone();
+            value[field] = replacement;
+            assert_eq!(
+                AuthenticatedAuthorization::decode(
+                    &serde_json::to_vec(&value).unwrap(),
+                    &config,
+                    &[7; 32],
+                    now
+                )
+                .err(),
+                Some(error),
+                "{field}"
+            );
+        }
+        let mut padded = bytes.clone();
+        padded.resize(MAX_AUTHENTICATED_CONTEXT_BYTES, b' ');
+        assert!(AuthenticatedAuthorization::decode(&padded, &config, &[7; 32], now).is_ok());
+        padded.push(b' ');
+        assert_eq!(
+            AuthenticatedAuthorization::decode(&padded, &config, &[7; 32], now).err(),
+            Some(TooLarge)
+        );
+        assert_eq!(
+            AuthenticatedAuthorization::decode(b"\xff", &config, &[7; 32], now).err(),
+            Some(InvalidRecord)
+        );
+        assert_eq!(
+            AuthenticatedAuthorization::decode(&bytes, &config, &[8; 32], now).err(),
+            Some(Binding)
+        );
+        assert_eq!(
+            AuthenticatedAuthorization::decode(&bytes, &config, &[7; 32], u64::MAX).err(),
+            Some(InvalidTransaction)
+        );
+        let mut revoked = config.clone();
+        revoked.clients.clear();
+        assert_eq!(
+            AuthenticatedAuthorization::decode(&bytes, &revoked, &[7; 32], now).err(),
+            Some(InvalidTransaction)
+        );
+        let mut changed = config.clone();
+        changed.clients[0].redirect_uris[0] = "https://other.example.org/cb".into();
+        assert_eq!(
+            AuthenticatedAuthorization::decode(&bytes, &changed, &[7; 32], now).err(),
+            Some(InvalidTransaction)
+        );
+        assert_eq!(
+            AuthenticatedAuthorization::decode(
+                &bytes,
+                &config,
+                &[7; 32],
+                context.transaction().expires_at_ms()
+            )
+            .err(),
+            Some(InvalidTransaction)
+        );
     }
     #[tokio::test]
     async fn context_owns_real_proof_and_bounds_eligibility_to_freshness_and_transaction() {
