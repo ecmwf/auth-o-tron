@@ -53,6 +53,52 @@ services: []
 }
 
 #[tokio::test]
+async fn oauth_fails_closed_before_browser_initialization() {
+    let mut config = base_config(0, false, 0);
+    config.ui = serde_json::from_value(serde_json::json!({
+        "enabled": true, "basic": {"provider_name": "missing"}
+    }))
+    .unwrap();
+    config.oauth.enabled = true;
+    let error = startup::build_app(Arc::new(config)).await.err().unwrap();
+    assert!(error.to_string().contains("oauth.issuer is required"));
+
+    let mut config = base_config(0, false, 0);
+    config.ui = serde_json::from_value(serde_json::json!({
+        "enabled": true, "basic": {"provider_name": "missing"}
+    }))
+    .unwrap();
+    config.oauth.enabled = true;
+    config.oauth.issuer = Some("https://login.example.org".into());
+    let error = startup::build_app(Arc::new(config)).await.err().unwrap();
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::Unsupported
+    );
+    assert!(error.to_string().contains("configuration foundation"));
+}
+
+#[tokio::test]
+async fn disabled_oauth_does_not_advertise_endpoints() {
+    let config = base_config(0, false, 0);
+    assert!(!config.oauth.enabled);
+    let (app, _) = common::build_app(config).await;
+    for path in [
+        "/.well-known/oauth-authorization-server",
+        "/oauth/authorize",
+        "/oauth/token",
+        "/oauth/jwks",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(Request::get(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+}
+
+#[tokio::test]
 async fn startup_rejects_port_collision() {
     let config = Arc::new(base_config(9500, true, 9500));
     let result = startup::run(config).await;

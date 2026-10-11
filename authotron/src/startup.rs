@@ -29,6 +29,15 @@ use crate::store::create_store;
 pub async fn build_app(
     config: Arc<ConfigV2>,
 ) -> Result<(axum::Router, AppState), Box<dyn std::error::Error>> {
+    config.oauth.validate()?;
+    // Configuration alone cannot provide an OAuth authorization server.
+    if config.oauth.enabled {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "OAuth enablement is unsupported: only the configuration foundation is implemented",
+        )
+        .into());
+    }
     let mut browser = crate::browser::BrowserLoginState::new(&config)?;
     browser
         .initialize(config.ui.enabled && config.ui.has_direct_login())

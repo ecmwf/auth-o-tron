@@ -9,11 +9,13 @@
 //! Configuration loading, versioning (v1/v2), and environment variable overrides.
 
 pub mod logging;
+pub mod oauth;
 pub mod store;
 pub mod types;
 pub mod ui;
 
 pub use logging::*;
+pub use oauth::*;
 pub use store::*;
 pub use types::*;
 pub use ui::*;

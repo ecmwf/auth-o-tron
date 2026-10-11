@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 
 use super::logging::LoggingConfig;
+use super::oauth::OAuthConfig;
 use super::store::StoreConfig;
 use super::ui::UiConfig;
 use crate::augmenters::AugmenterConfig;
@@ -59,6 +60,8 @@ pub struct ConfigV2 {
     pub auth: AuthConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub oauth: Box<OAuthConfig>,
 }
 
 fn default_host() -> String {
@@ -141,6 +144,7 @@ fn convert_v1_to_v2(v1: ConfigV1) -> Result<ConfigV2, String> {
         logging: v1.logging,
         auth: v1.auth,
         ui: UiConfig::default(),
+        oauth: Box::default(),
     })
 }
 
@@ -224,6 +228,9 @@ mod tests {
         let schema = schema_for!(Config);
         let schema_str = serde_json::to_string_pretty(&schema).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&schema_str).unwrap();
+        let checked_in: serde_json::Value =
+            serde_json::from_str(include_str!("../../schema.json")).unwrap();
+        assert_eq!(parsed, checked_in, "regenerate schema with --schema");
         assert!(
             parsed.is_object(),
             "Schema should be a JSON object, got: {}",
@@ -264,6 +271,8 @@ services: []
         assert_eq!(c.jwt.iss, "issuer");
         assert_eq!(c.auth.timeout_in_ms, 5000);
         assert!(!c.ui.enabled);
+        assert!(!c.oauth.enabled);
+        assert!(c.oauth.validate().is_ok());
     }
 
     #[test]
@@ -465,6 +474,8 @@ services: []
         assert_eq!(v2.metrics.port, 9090);
         assert_eq!(v2.jwt.iss, "issuer");
         assert!(!v2.ui.enabled);
+        assert!(!v2.oauth.enabled);
+        assert!(v2.oauth.validate().is_ok());
     }
 
     #[test]

@@ -843,38 +843,80 @@
           "maximum": 86400,
           "default": 300
         },
-        "backend": { "$ref": "#/$defs/BrowserBackendConfig" },
+        "backend": {
+          "$ref": "#/$defs/BrowserBackendConfig"
+        },
         "transaction_ttl_seconds": {
-          "type": "integer", "format": "uint64", "minimum": 30, "maximum": 900, "default": 300
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 30,
+          "maximum": 900,
+          "default": 300
         },
         "max_forms": {
-          "type": "integer", "format": "uint", "minimum": 1, "maximum": 100000, "default": 1024
+          "type": "integer",
+          "format": "uint",
+          "minimum": 1,
+          "maximum": 100000,
+          "default": 1024
         },
         "max_sessions": {
-          "type": "integer", "format": "uint", "minimum": 1, "maximum": 100000, "default": 1024
+          "type": "integer",
+          "format": "uint",
+          "minimum": 1,
+          "maximum": 100000,
+          "default": 1024
         },
         "max_forms_per_window": {
-          "type": "integer", "format": "uint", "minimum": 1, "maximum": 100000, "default": 120
+          "type": "integer",
+          "format": "uint",
+          "minimum": 1,
+          "maximum": 100000,
+          "default": 120
         },
         "max_logins_per_window": {
-          "type": "integer", "format": "uint", "minimum": 1, "maximum": 100000, "default": 60
+          "type": "integer",
+          "format": "uint",
+          "minimum": 1,
+          "maximum": 100000,
+          "default": 60
         },
         "rate_window_seconds": {
-          "type": "integer", "format": "uint64", "minimum": 1, "maximum": 3600, "default": 60
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1,
+          "maximum": 3600,
+          "default": 60
         },
         "max_inflight_logins": {
-          "type": "integer", "format": "uint", "minimum": 1, "maximum": 256, "default": 8
+          "type": "integer",
+          "format": "uint",
+          "minimum": 1,
+          "maximum": 256,
+          "default": 8
         },
         "max_shared_inflight_logins": {
-          "type": ["integer", "null"], "format": "uint", "minimum": 1, "maximum": 65536, "default": null
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 1,
+          "maximum": 65536,
+          "default": null
         },
         "verification_timeout_seconds": {
-          "type": "integer", "format": "uint64", "minimum": 1, "maximum": 30, "default": 10
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1,
+          "maximum": 30,
+          "default": 10
         }
       },
       "additionalProperties": false,
       "required": [
-        "public_origin", "backend"
+        "public_origin",
+        "backend"
       ]
     },
     "BrowserBackendConfig": {
@@ -882,28 +924,89 @@
       "oneOf": [
         {
           "type": "object",
-          "properties": { "type": { "type": "string", "const": "memory" } },
-          "required": ["type"],
-          "additionalProperties": false
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "memory"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ]
         },
         {
           "type": "object",
           "properties": {
-            "url": { "type": "string" },
-            "key_prefix": { "type": "string" },
-            "password": { "type": "string", "writeOnly": true },
+            "url": {
+              "type": "string"
+            },
+            "key_prefix": {
+              "type": "string"
+            },
+            "password": {
+              "type": "string",
+              "writeOnly": true
+            },
             "connect_timeout_ms": {
-              "type": "integer", "format": "uint64", "minimum": 1, "maximum": 30000, "default": 2000
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 1,
+              "maximum": 30000,
+              "default": 2000
             },
             "operation_timeout_ms": {
-              "type": "integer", "format": "uint64", "minimum": 1, "maximum": 10000, "default": 1000
+              "type": "integer",
+              "format": "uint64",
+              "minimum": 1,
+              "maximum": 10000,
+              "default": 1000
             },
-            "type": { "type": "string", "const": "valkey" }
+            "type": {
+              "type": "string",
+              "const": "valkey"
+            }
           },
           "additionalProperties": false,
-          "required": ["type", "url", "key_prefix", "password"]
+          "required": [
+            "type",
+            "url",
+            "key_prefix",
+            "password"
+          ]
         }
       ]
+    },
+    "OAuthConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "issuer": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "authorization_code_ttl_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 30,
+          "maximum": 300,
+          "default": 60
+        },
+        "access_token_ttl_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 60,
+          "maximum": 3600,
+          "default": 300
+        }
+      },
+      "additionalProperties": false
     },
     "ConfigV2": {
       "type": "object",
@@ -969,6 +1072,15 @@
               "description": null
             },
             "sign_in_actions": []
+          }
+        },
+        "oauth": {
+          "$ref": "#/$defs/OAuthConfig",
+          "default": {
+            "enabled": false,
+            "issuer": null,
+            "authorization_code_ttl_seconds": 60,
+            "access_token_ttl_seconds": 300
           }
         }
       },
