@@ -222,8 +222,8 @@ Origin/CSRF, and must recheck current policy/freshness at future issuance. This 
 in-process policy eligibility only: development-memory persistence is described
 below alongside explicit shared Valkey authenticated persistence. Durability
 depends on backend configuration. Explicit consent and atomic decision completion
-in memory and shared Valkey are described below; grants, codes, and HTTP/startup
-integration remain unimplemented.
+in memory and shared Valkey are described below, alongside Memory code issuance.
+Code redemption and HTTP/startup integration remain unimplemented.
 
 ### OAuth-internal authenticated-context codec
 
@@ -313,8 +313,8 @@ time at or after code expiry is Expired. Errors are fixed Configuration, Invalid
 InvalidContext, Expired and InvalidRedemption, without submitted values. Checks do
 not consume the grant and supply no token-signing proof: a future backend must
 atomically consume a one-use code before returning issuance authority. Code handles
-and stored envelopes are described below; issuance, redemption and HTTP integration
-are future slices.
+and stored envelopes are described below; Memory issuance is available explicitly,
+while redemption and HTTP integration are future slices.
 This capability is explicitly usable with OAuth disabled; startup remains Unsupported.
 
 ### OAuth-internal code-grant codec
@@ -388,7 +388,7 @@ Challenge: canonical unpadded base64url SHA-256 (43 characters/32 bytes). Immuta
 digests in constant time. Successful requests have immutable getters, not login,
 consent or grant proof. Fixed-error failures **stay local; never redirect to raw
 submitted callbacks**. Error-redirect routing, extensions, authorization HTTP routes,
-and code issuance remain future work. Explicit development-memory and shared Valkey
+and HTTP code issuance remain future work. Explicit development-memory and shared Valkey
 transaction APIs are described below; neither is wired into an HTTP flow.
 
 ## Authorization-transaction record codec
@@ -479,7 +479,7 @@ are Unavailable, without diagnostics or identity data. Preparation keeps StoreEr
 classes; an Authenticated-state binding mismatch is Missing. Expired entries are pruned.
 The shared configured count cap includes all three memory kinds, with no TTL refresh
 or extension. This gives atomic one-use decisions only within one memory instance;
-no distributed consent, atomic code persistence, HTTP or startup hook is added.
+`decide_consent` alone does not persist a code or add HTTP/startup integration.
 
 ### Authorization-code identity and stored-envelope foundation
 
@@ -488,7 +488,7 @@ canonical 43-character unpadded base64url. Generation and SHA-256 hashing are
 OAuth-internal; public `parse` rejects wrong lengths, padding and noncanonical
 aliases as fixed Missing errors. The type has no Debug, Clone or serde. Wire text
 is exposed only through `as_secret_str` for future callback delivery, not logging.
-No redirect or operational code generation is wired yet.
+Explicit Memory issuance generates codes; no redirect or HTTP delivery is wired.
 
 The private stored envelope consumes a typed CodeGrant, retaining only its bounded
 96 KiB codec bytes, expiry and its own actual code-handle hash. Raw code values are
@@ -500,14 +500,35 @@ code consumption or token-issuance proof. Code expiry still follows the grant's
 code/consent/context minimum (code TTL defaults to 60 seconds), with PKCE required
 for future redemption.
 
-`max_authorization_codes` reserves a separate code count cap, default 1024 and range
+`max_authorization_codes` sets a separate Memory code count cap, default 1024 and range
 1–100000. At the maximum, 96 KiB payloads alone permit 9.8304 GB (about 9.15 GiB), plus
 overhead. CodeStoreError classes are Missing, Limited, InvalidToken, InvalidDecision
-and Unavailable; issuance-specific classes are reserved for the next slice. The
-next Memory increment must atomically persist a code and remove ConsentReady state,
-rather than call `decide_consent` followed by separate persistence. Backend code
-storage, issuance, redemption and HTTP/startup integration remain future work;
-OAuth enablement remains Unsupported.
+and Unavailable. Memory persistence is described below; shared Valkey code storage,
+redemption and HTTP/startup integration remain future work. OAuth enablement remains
+Unsupported.
+
+### Development-memory atomic code issuance
+
+`MemoryTransactionStore::issue_code(id, browser_hash, submitted_csrf, decision)`
+locks transactions then codes and samples trusted server time after both locks.
+No guard crosses an await, and no path locks them in reverse. ConsentReady decoding
+rechecks source, binding, freshness and current policy; only valid canonical CSRF
+and an exact approve/deny decision proceed. Denial removes only the source, even
+when code capacity is full. Approval prunes expired code entries, checks the separate
+code cap, constructs the bounded grant, generates a random handle with up to four
+collision attempts and encodes its envelope. It inserts the code before removing
+the source while both locks are held, then returns `CodeIssueOutcome::Issued`.
+Expected validation, capacity, codec and entropy failures preserve unexpired source
+state and its nonce. Allocation panics are not rollback. Expired records may be pruned.
+
+`IssuedCode` exposes only read-only code, expiry, registered callback and opaque client
+state getters, with no Debug, Clone or serde. Denial returns a marker. Expiry is the
+code-TTL/approval/context minimum; no raw code, CSRF or credential is stored in the
+envelope. This is per-instance development Memory atomicity, without restart
+persistence or distributed guarantees. Pruning and validation are synchronous under
+locks; no background cleanup runs. Existing `decide_consent` consumes consent alone;
+future code-delivery callers must use `issue_code`, never decide then persist in
+separate calls. Issuance supplies no redemption or token-signing proof.
 
 ### Store-provided source witnesses
 
@@ -613,7 +634,7 @@ of an authorization code. A future ConsentReady-to-Code transition must atomical
 persist the code while consuming consent; the current method only deletes the
 session and returns an opaque consent proof. No HTTP or startup integration is added.
 
-Authorization codes, HTTP token issuance, discovery/JWKS, browser CORS,
+Shared Valkey codes, code redemption, HTTP token issuance, discovery/JWKS, browser CORS,
 and MCP integration remain future capabilities. No HTTP tokens are issued and
 `enabled: true` still fails startup as Unsupported. The legacy HMAC `jwt.secret`
 must never be published through

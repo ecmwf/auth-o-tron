@@ -19,8 +19,6 @@ use crate::{config::OAuthConfig, models::user::User};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
-// Awaiting explicit code-backend integration; these are not public restoration APIs.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) const MAX_CODE_GRANT_BYTES: usize = 96 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,7 +42,6 @@ pub struct CodeGrant {
     expires_at_ms: u64,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CodeGrantDto {
@@ -88,7 +85,6 @@ fn checked_context(
 }
 
 impl CodeGrant {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn encode(&self) -> Result<Vec<u8>, CodeGrantError> {
         let context = self
             .context

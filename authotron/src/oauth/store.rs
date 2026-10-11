@@ -10,6 +10,8 @@
 
 use super::{
     authorization::ValidatedAuthorizationRequest,
+    code_grant::CodeGrant,
+    codes::{AuthorizationCode, CodeIssueOutcome, CodeStoreError, IssuedCode, StoredCode},
     consent::{ConsentError, ConsentOutcome, ConsentSession, ConsentToken},
     context::AuthenticatedAuthorization,
     records::{AuthorizationTransaction, BoundAuthorizationTransaction, valid_time},
@@ -87,6 +89,7 @@ struct Stored {
 pub struct MemoryTransactionStore {
     config: Arc<OAuthConfig>,
     entries: Mutex<HashMap<[u8; 32], Stored>>,
+    codes: Mutex<HashMap<[u8; 32], StoredCode>>,
 }
 
 fn now_ms() -> Result<u64, StoreError> {
@@ -112,6 +115,7 @@ impl MemoryTransactionStore {
         Ok(Self {
             config,
             entries: Mutex::new(HashMap::new()),
+            codes: Mutex::new(HashMap::new()),
         })
     }
     pub async fn create(
@@ -183,6 +187,83 @@ impl MemoryTransactionStore {
         decision: &str,
     ) -> Result<ConsentOutcome, ConsentStoreError> {
         self.decide_consent_at(id, browser_hash, submitted_csrf, decision, now_ms)
+    }
+    /// Atomically persist an approved code and consume its ConsentReady source.
+    pub async fn issue_code(
+        &self,
+        id: &TransactionId,
+        browser_hash: &[u8; 32],
+        submitted_csrf: &str,
+        decision: &str,
+    ) -> Result<CodeIssueOutcome, CodeStoreError> {
+        self.issue_code_at(
+            id,
+            browser_hash,
+            submitted_csrf,
+            decision,
+            (now_ms, AuthorizationCode::generate),
+        )
+    }
+    fn issue_code_at(
+        &self,
+        id: &TransactionId,
+        binding: &[u8; 32],
+        submitted: &str,
+        decision: &str,
+        sources: (
+            impl FnOnce() -> Result<u64, StoreError>,
+            impl FnMut() -> Result<AuthorizationCode, CodeStoreError>,
+        ),
+    ) -> Result<CodeIssueOutcome, CodeStoreError> {
+        use CodeStoreError::*;
+        // Lock entries then codes, never in reverse. Sample time after both; no await.
+        let mut entries = self.entries.lock().map_err(|_| Unavailable)?;
+        let mut codes = self.codes.lock().map_err(|_| Unavailable)?;
+        let (clock, mut generate) = sources;
+        let now = clock().map_err(|_| Unavailable)?;
+        if !valid_time(now) {
+            return Err(Unavailable);
+        }
+        entries.retain(|_, entry| entry.expires_at_ms > now);
+        let key = id.hash();
+        let stored = entries.get(&key).ok_or(Missing)?;
+        if !matches!(stored.kind, StoredKind::ConsentReady) {
+            return Err(Missing);
+        }
+        let session = ConsentSession::decode(&stored.bytes, id, &self.config, binding, now)
+            .map_err(|_| Unavailable)?;
+        if session.expires_at_ms() > stored.expires_at_ms {
+            return Err(Unavailable);
+        }
+        let outcome = session
+            .decide(submitted, decision, id, binding, &self.config, now)
+            .map_err(|error| match error {
+                ConsentError::InvalidToken => InvalidToken,
+                ConsentError::InvalidDecision => InvalidDecision,
+                _ => Unavailable,
+            })?;
+        let ConsentOutcome::Approved(approval) = outcome else {
+            entries.remove(&key);
+            return Ok(CodeIssueOutcome::Denied);
+        };
+        codes.retain(|_, code| code.expires_at_ms() > now);
+        if codes.len() >= self.config.max_authorization_codes {
+            return Err(Limited);
+        }
+        let grant = CodeGrant::from_consent(*approval, &self.config, id, binding, now)
+            .map_err(|_| Unavailable)?;
+        for _ in 0..4 {
+            let code = generate()?;
+            if let Entry::Vacant(slot) = codes.entry(code.hash()) {
+                let issued = IssuedCode::new(code, &grant);
+                let record = StoredCode::new(issued.code(), grant)?;
+                // All expected failures precede mutation; both maps remain locked.
+                slot.insert(record);
+                entries.remove(&key);
+                return Ok(CodeIssueOutcome::Issued(issued));
+            }
+        }
+        Err(Unavailable)
     }
     fn create_at(
         &self,
@@ -441,6 +522,212 @@ pub(super) mod tests {
     }
     fn at(now: u64) -> impl FnOnce() -> Result<u64, StoreError> {
         move || Ok(now)
+    }
+    fn code_store(cap: usize) -> MemoryTransactionStore {
+        let mut cfg = (*config()).clone();
+        cfg.authorization_transaction_ttl_seconds = 300;
+        cfg.authorization_code_ttl_seconds = 30;
+        cfg.max_authorization_codes = cap;
+        MemoryTransactionStore::new(Arc::new(cfg)).unwrap()
+    }
+    async fn ready(store: &MemoryTransactionStore) -> (TransactionId, ConsentToken, u64) {
+        let (_, _, identity) = super::super::context::tests::fixture().await;
+        let request = validate_authorization_request(&store.config, b"client_id=desktop&redirect_uri=https://app.example.org/cb&response_type=code&resource=https://mcp.example.org/mcp&scope=read&state=opaque%2Bclient&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256").unwrap();
+        let created = store.create(request, [7; 32]).await.unwrap();
+        let witness = store.lookup_bound(&created.id, &[7; 32]).await.unwrap();
+        let now = identity.verified_at_ms();
+        let context =
+            AuthenticatedAuthorization::new_bound(witness, identity, &[7; 32], &store.config, now)
+                .unwrap();
+        store
+            .promote_authenticated(&created.id, &[7; 32], context)
+            .await
+            .unwrap();
+        let token = store.prepare_consent(&created.id, &[7; 32]).await.unwrap();
+        (created.id, token, now_ms().unwrap())
+    }
+    fn issued(outcome: CodeIssueOutcome) -> IssuedCode {
+        let CodeIssueOutcome::Issued(code) = outcome else {
+            panic!("issued code required")
+        };
+        code
+    }
+    #[tokio::test]
+    async fn issued_codes_release_source_slots_and_capacity_failures_preserve_consent() {
+        use CodeStoreError::*;
+        let store = code_store(1);
+        let (id, token, now) = ready(&store).await;
+        let first = issued(
+            store
+                .issue_code(&id, &[7; 32], token.as_secret_str(), "approve")
+                .await
+                .unwrap(),
+        );
+        assert_eq!(first.redirect_uri(), "https://app.example.org/cb");
+        assert_eq!(first.state(), Some("opaque+client"));
+        assert!(first.expires_at_ms() >= now + 30_000);
+        assert!(store.entries.lock().unwrap().is_empty());
+        assert_eq!(
+            store
+                .issue_code(&id, &[7; 32], token.as_secret_str(), "approve")
+                .await
+                .err(),
+            Some(Missing)
+        );
+        assert_eq!(
+            store.lookup(&id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        assert_eq!(
+            store.lookup_authenticated(&id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        assert_eq!(
+            store.prepare_consent(&id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        {
+            let codes = store.codes.lock().unwrap();
+            assert_eq!(codes.len(), 1);
+            let grant = codes[&first.code().hash()]
+                .grant(first.code(), &store.config, first.expires_at_ms() - 1)
+                .unwrap();
+            assert_eq!(grant.expires_at_ms(), first.expires_at_ms());
+            assert!(
+                !std::str::from_utf8(&grant.encode().unwrap())
+                    .unwrap()
+                    .contains(first.code().as_secret_str())
+            );
+        }
+        let (id, token, now) = ready(&store).await;
+        let original = store.entries.lock().unwrap()[&id.hash()].bytes.clone();
+        let attempt = |csrf, decision, binding, time| {
+            store.issue_code_at(
+                &id,
+                &binding,
+                csrf,
+                decision,
+                (at(time), AuthorizationCode::generate),
+            )
+        };
+        for (csrf, decision, binding, expected) in [
+            ("bad", "approve", [7; 32], InvalidToken),
+            (token.as_secret_str(), "other", [7; 32], InvalidDecision),
+            (token.as_secret_str(), "approve", [8; 32], Unavailable),
+            (token.as_secret_str(), "approve", [7; 32], Limited),
+        ] {
+            assert_eq!(attempt(csrf, decision, binding, now).err(), Some(expected));
+            assert_eq!(store.entries.lock().unwrap()[&id.hash()].bytes, original);
+        }
+        let second = issued(
+            attempt(
+                token.as_secret_str(),
+                "approve",
+                [7; 32],
+                first.expires_at_ms(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(second.expires_at_ms(), first.expires_at_ms() + 30_000);
+        assert_eq!(store.codes.lock().unwrap().len(), 1);
+        let (id, token, _) = ready(&store).await;
+        assert!(matches!(
+            store
+                .issue_code(&id, &[7; 32], token.as_secret_str(), "deny")
+                .await
+                .unwrap(),
+            CodeIssueOutcome::Denied
+        ));
+        assert!(store.entries.lock().unwrap().is_empty());
+        assert_eq!(store.codes.lock().unwrap().len(), 1);
+    }
+    #[tokio::test]
+    async fn entropy_collision_and_corrupt_snapshot_failures_leave_unexpired_source() {
+        let store = code_store(2);
+        let (id, token, _) = ready(&store).await;
+        let first = issued(
+            store
+                .issue_code(&id, &[7; 32], token.as_secret_str(), "approve")
+                .await
+                .unwrap(),
+        );
+        let (id, token, now) = ready(&store).await;
+        let original = store.entries.lock().unwrap()[&id.hash()].bytes.clone();
+        let failed = store.issue_code_at(
+            &id,
+            &[7; 32],
+            token.as_secret_str(),
+            "approve",
+            (at(now), || Err(CodeStoreError::Unavailable)),
+        );
+        assert_eq!(failed.err(), Some(CodeStoreError::Unavailable));
+        let mut attempts = 0;
+        let failed = store.issue_code_at(
+            &id,
+            &[7; 32],
+            token.as_secret_str(),
+            "approve",
+            (at(now), || {
+                attempts += 1;
+                AuthorizationCode::parse(first.code().as_secret_str())
+            }),
+        );
+        assert_eq!(failed.err(), Some(CodeStoreError::Unavailable));
+        assert_eq!(attempts, 4);
+        assert_eq!(store.entries.lock().unwrap()[&id.hash()].bytes, original);
+        store
+            .entries
+            .lock()
+            .unwrap()
+            .get_mut(&id.hash())
+            .unwrap()
+            .bytes = b"{}".to_vec();
+        assert_eq!(
+            store
+                .issue_code(&id, &[7; 32], token.as_secret_str(), "approve")
+                .await
+                .err(),
+            Some(CodeStoreError::Unavailable)
+        );
+        assert!(store.entries.lock().unwrap().contains_key(&id.hash()));
+        assert_eq!(store.codes.lock().unwrap().len(), 1);
+    }
+    #[tokio::test]
+    async fn competing_code_issuance_has_one_winner_under_both_locks() {
+        let store = code_store(1);
+        let (id, token, _) = ready(&store).await;
+        let barrier = std::sync::Barrier::new(2);
+        let issue = || {
+            barrier.wait();
+            store.issue_code_at(
+                &id,
+                &[7; 32],
+                token.as_secret_str(),
+                "approve",
+                (now_ms, AuthorizationCode::generate),
+            )
+        };
+        let results = std::thread::scope(|scope| {
+            let a = scope.spawn(issue);
+            let b = scope.spawn(issue);
+            [a.join().unwrap(), b.join().unwrap()]
+        });
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Ok(CodeIssueOutcome::Issued(_))))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(CodeStoreError::Missing)))
+                .count(),
+            1
+        );
+        assert!(store.entries.lock().unwrap().is_empty());
+        assert_eq!(store.codes.lock().unwrap().len(), 1);
     }
     async fn authenticated_fixture() -> (
         MemoryTransactionStore,

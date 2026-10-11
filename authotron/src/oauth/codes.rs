@@ -24,7 +24,6 @@ pub enum CodeStoreError {
 /// Secret 32-byte random handle; no Debug, Clone, serde or public generation.
 pub struct AuthorizationCode(TransactionId);
 impl AuthorizationCode {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn generate() -> Result<Self, CodeStoreError> {
         TransactionId::generate()
             .map(Self)
@@ -39,25 +38,56 @@ impl AuthorizationCode {
     pub fn as_secret_str(&self) -> &str {
         self.0.as_secret_str()
     }
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn hash(&self) -> [u8; 32] {
         self.0.hash()
     }
 }
 
-// Awaiting atomic code-store integration; record validation does not consume a code.
-#[cfg_attr(not(test), allow(dead_code))]
+pub enum CodeIssueOutcome {
+    Issued(IssuedCode),
+    Denied,
+}
+
+/// Persisted code delivery data, with no Debug, Clone or serde.
+pub struct IssuedCode {
+    code: AuthorizationCode,
+    expires_at_ms: u64,
+    redirect_uri: String,
+    state: Option<String>,
+}
+impl IssuedCode {
+    pub(super) fn new(code: AuthorizationCode, grant: &CodeGrant) -> Self {
+        Self {
+            code,
+            expires_at_ms: grant.expires_at_ms(),
+            redirect_uri: grant.redirect_uri().into(),
+            state: grant.state().map(str::to_owned),
+        }
+    }
+    pub fn code(&self) -> &AuthorizationCode {
+        &self.code
+    }
+    pub fn expires_at_ms(&self) -> u64 {
+        self.expires_at_ms
+    }
+    pub fn redirect_uri(&self) -> &str {
+        &self.redirect_uri
+    }
+    /// Untrusted client text, never identity or a logging field.
+    pub fn state(&self) -> Option<&str> {
+        self.state.as_deref()
+    }
+}
+
 pub(super) struct StoredCode {
     code_hash: [u8; 32],
     bytes: Vec<u8>,
     expires_at_ms: u64,
 }
 impl StoredCode {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn expires_at_ms(&self) -> u64 {
         self.expires_at_ms
     }
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn new(code: &AuthorizationCode, grant: CodeGrant) -> Result<Self, CodeStoreError> {
         let bytes = grant.encode().map_err(|_| CodeStoreError::Unavailable)?;
         Ok(Self {
