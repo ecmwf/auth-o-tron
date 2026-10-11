@@ -10,11 +10,14 @@
 
 use super::{
     authorization::ValidatedAuthorizationRequest,
+    consent::{
+        ConsentError, ConsentOutcome, ConsentSession, ConsentToken, MAX_CONSENT_SESSION_BYTES,
+    },
     context::{AuthenticatedAuthorization, ContextError, MAX_AUTHENTICATED_CONTEXT_BYTES},
     records::{
         AuthorizationTransaction, BoundAuthorizationTransaction, MAX_TRANSACTION_BYTES, valid_time,
     },
-    store::{CreatedTransaction, StoreError, TransactionId},
+    store::{ConsentStoreError, CreatedTransaction, StoreError, TransactionId},
 };
 use crate::{
     config::{OAuthConfig, ui::BrowserBackendConfig},
@@ -36,6 +39,11 @@ enum Operation {
     Promote,
     ReadAuthenticated,
     ConsumeAuthenticated,
+    ReadForConsent,
+    PrepareConsent,
+    RenewConsent,
+    ReadConsent,
+    ConsumeConsent,
 }
 fn number(bytes: &[u8]) -> Result<u64, StoreError> {
     std::str::from_utf8(bytes)
@@ -68,7 +76,7 @@ impl ValkeyTransactionStore {
         Ok(Self {
             config,
             connection,
-            prefix: format!("{key_prefix}:oauth:authorization-transactions:v2:"),
+            prefix: format!("{key_prefix}:oauth:authorization-transactions:v3:"),
         })
     }
     fn keys(&self, id: &TransactionId) -> [String; 2] {
@@ -100,11 +108,21 @@ impl ValkeyTransactionStore {
             Operation::ConsumeAuthenticated => {
                 ("consume", "authenticated", MAX_AUTHENTICATED_CONTEXT_BYTES)
             }
+            Operation::ReadForConsent => ("read", "prepare", MAX_CONSENT_SESSION_BYTES),
+            Operation::PrepareConsent => ("prepare", "authenticated", MAX_CONSENT_SESSION_BYTES),
+            Operation::RenewConsent => ("prepare", "consent", MAX_CONSENT_SESSION_BYTES),
+            Operation::ReadConsent => ("read", "consent", MAX_CONSENT_SESSION_BYTES),
+            Operation::ConsumeConsent => ("consume", "consent", MAX_CONSENT_SESSION_BYTES),
         };
-        // Promotion guards the old pending record; authenticated consumption instead
-        // guards the recomputed freshness deadline, in addition to the stored expiry.
+        // Transitions guard the original snapshot; typed consumption instead guards
+        // the recomputed freshness deadline, in addition to the stored expiry.
         let (guard_deadline, guard_payload) = transition_guard.unwrap_or((0, &[]));
-        if payload.len() > limit || guard_payload.len() > MAX_TRANSACTION_BYTES {
+        let guard_limit = match op {
+            Operation::PrepareConsent => MAX_AUTHENTICATED_CONTEXT_BYTES,
+            Operation::RenewConsent => MAX_CONSENT_SESSION_BYTES,
+            _ => MAX_TRANSACTION_BYTES,
+        };
+        if payload.len() > limit || guard_payload.len() > guard_limit {
             return Err(StoreError::Unavailable);
         }
         self.connection
@@ -122,7 +140,8 @@ impl ValkeyTransactionStore {
                     .arg(kind)
                     .arg(MAX_AUTHENTICATED_CONTEXT_BYTES)
                     .arg(guard_deadline)
-                    .arg(guard_payload),
+                    .arg(guard_payload)
+                    .arg(MAX_CONSENT_SESSION_BYTES),
             )
             .await
             .map_err(|_| StoreError::Unavailable)
@@ -175,7 +194,7 @@ impl ValkeyTransactionStore {
         id: &TransactionId,
         browser_hash: &[u8; 32],
     ) -> Result<(AuthorizationTransaction, Vec<u8>, u64), StoreError> {
-        let (now, expiry, bytes) = self.raw_read(id, Operation::Read).await?;
+        let (now, expiry, bytes, _) = self.raw_read(id, Operation::Read).await?;
         let record = AuthorizationTransaction::decode(&bytes, &self.config, now)
             .map_err(|_| StoreError::Unavailable)?;
         if record.expires_at_ms() != expiry {
@@ -190,11 +209,11 @@ impl ValkeyTransactionStore {
         &self,
         id: &TransactionId,
         op: Operation,
-    ) -> Result<(u64, u64, Vec<u8>), StoreError> {
+    ) -> Result<(u64, u64, Vec<u8>, Vec<u8>), StoreError> {
         let reply = self.call(op, id, 0, &[], None).await?;
         match reply.as_slice() {
-            [status, now, expiry, bytes] if status == b"ok" => {
-                Ok((number(now)?, number(expiry)?, bytes.clone()))
+            [status, now, expiry, bytes, kind] if status == b"ok" => {
+                Ok((number(now)?, number(expiry)?, bytes.clone(), kind.clone()))
             }
             [status] if status == b"missing" => Err(StoreError::Missing),
             _ => Err(StoreError::Unavailable),
@@ -281,7 +300,7 @@ impl ValkeyTransactionStore {
         id: &TransactionId,
         browser_hash: &[u8; 32],
     ) -> Result<(AuthenticatedAuthorization, u64, Vec<u8>), StoreError> {
-        let (now, expiry, bytes) = self.raw_read(id, Operation::ReadAuthenticated).await?;
+        let (now, expiry, bytes, _) = self.raw_read(id, Operation::ReadAuthenticated).await?;
         let context = AuthenticatedAuthorization::decode(&bytes, &self.config, browser_hash, now)
             .map_err(|error| match error {
             ContextError::Binding => StoreError::Missing,
@@ -319,6 +338,127 @@ impl ValkeyTransactionStore {
         )?;
         Ok(context)
     }
+    async fn consent_candidate(
+        &self,
+        id: &TransactionId,
+        browser_hash: &[u8; 32],
+    ) -> Result<(Operation, ConsentSession, ConsentToken, u64, Vec<u8>), StoreError> {
+        let (now, expiry, original, kind) = self.raw_read(id, Operation::ReadForConsent).await?;
+        let (op, result) = if kind == b"authenticated" {
+            let context =
+                AuthenticatedAuthorization::decode(&original, &self.config, browser_hash, now)
+                    .map_err(|error| match error {
+                        ContextError::Binding => StoreError::Missing,
+                        _ => StoreError::Unavailable,
+                    })?;
+            if !context.matches_source(&id.hash()) {
+                return Err(StoreError::Unavailable);
+            }
+            (
+                Operation::PrepareConsent,
+                ConsentSession::from_stored_context(
+                    context,
+                    id,
+                    &self.config,
+                    browser_hash,
+                    now,
+                    expiry,
+                ),
+            )
+        } else if kind == b"consent" {
+            let session = ConsentSession::decode(&original, id, &self.config, browser_hash, now)
+                .map_err(|_| StoreError::Unavailable)?;
+            if session.expires_at_ms() > expiry {
+                return Err(StoreError::Unavailable);
+            }
+            (
+                Operation::RenewConsent,
+                session.renew(id, &self.config, browser_hash, now),
+            )
+        } else {
+            return Err(StoreError::Missing);
+        };
+        let (session, token) = result.map_err(|_| StoreError::Unavailable)?;
+        Ok((op, session, token, expiry, original))
+    }
+    pub async fn prepare_consent(
+        &self,
+        id: &TransactionId,
+        browser_hash: &[u8; 32],
+    ) -> Result<ConsentToken, StoreError> {
+        let (op, session, token, expiry, original) =
+            self.consent_candidate(id, browser_hash).await?;
+        let bytes = session.encode().map_err(|_| StoreError::Unavailable)?;
+        Self::mutation(
+            self.call(
+                op,
+                id,
+                session.expires_at_ms(),
+                &bytes,
+                Some((expiry, &original)),
+            )
+            .await?,
+        )?;
+        Ok(token)
+    }
+    async fn consent_decision(
+        &self,
+        id: &TransactionId,
+        browser_hash: &[u8; 32],
+        submitted: &str,
+        decision: &str,
+    ) -> Result<(ConsentOutcome, u64, Vec<u8>, u64), ConsentStoreError> {
+        use ConsentStoreError::*;
+        let (now, expiry, bytes, _) =
+            self.raw_read(id, Operation::ReadConsent)
+                .await
+                .map_err(|error| match error {
+                    StoreError::Missing => Missing,
+                    _ => Unavailable,
+                })?;
+        let session = ConsentSession::decode(&bytes, id, &self.config, browser_hash, now)
+            .map_err(|_| Unavailable)?;
+        let effective = session.expires_at_ms();
+        if effective > expiry {
+            return Err(Unavailable);
+        }
+        let outcome = session
+            .decide(submitted, decision, id, browser_hash, &self.config, now)
+            .map_err(|error| match error {
+                ConsentError::InvalidToken => InvalidToken,
+                ConsentError::InvalidDecision => InvalidDecision,
+                _ => Unavailable,
+            })?;
+        Ok((outcome, expiry, bytes, effective))
+    }
+    pub async fn decide_consent(
+        &self,
+        id: &TransactionId,
+        browser_hash: &[u8; 32],
+        submitted_csrf: &str,
+        decision: &str,
+    ) -> Result<ConsentOutcome, ConsentStoreError> {
+        let (outcome, expiry, bytes, effective) = self
+            .consent_decision(id, browser_hash, submitted_csrf, decision)
+            .await?;
+        Self::mutation(
+            self.call(
+                Operation::ConsumeConsent,
+                id,
+                expiry,
+                &bytes,
+                Some((effective, &[])),
+            )
+            .await
+            .map_err(|_| ConsentStoreError::Unavailable)?,
+        )
+        .map_err(|error| match error {
+            StoreError::Missing => ConsentStoreError::Missing,
+            _ => ConsentStoreError::Unavailable,
+        })?;
+        // An already computed capability is returned only after the atomic delete succeeds.
+        Ok(outcome)
+    }
 }
 
 #[cfg(test)]
@@ -353,6 +493,235 @@ mod tests {
         command: &redis::Cmd,
     ) -> T {
         store.connection.query(command).await.unwrap()
+    }
+    async fn consent_cases(backend: &BrowserBackendConfig) {
+        let (mut cfg, _, identity) = super::super::context::tests::fixture().await;
+        cfg.max_authorization_transactions = 1;
+        cfg.authorization_transaction_ttl_seconds = 30;
+        let cfg = Arc::new(cfg);
+        let a = ValkeyTransactionStore::new(cfg.clone(), backend)
+            .await
+            .unwrap();
+        let b = ValkeyTransactionStore::new(cfg.clone(), backend)
+            .await
+            .unwrap();
+        let created = a.create(request(&cfg), [7; 32]).await.unwrap();
+        let keys = a.keys(&created.id);
+        let witness = b.lookup_bound(&created.id, &[7; 32]).await.unwrap();
+        let (sec, micro): (u64, u64) = command(&a, &redis::cmd("TIME")).await;
+        let context = AuthenticatedAuthorization::new_bound(
+            witness,
+            identity,
+            &[7; 32],
+            &cfg,
+            sec * 1000 + micro / 1000,
+        )
+        .unwrap();
+        a.promote_authenticated(&created.id, &[7; 32], context)
+            .await
+            .unwrap();
+        let first = b.prepare_consent(&created.id, &[7; 32]).await.unwrap();
+        let second = a.prepare_consent(&created.id, &[7; 32]).await.unwrap();
+        let (_, expiry, bytes, _) = a
+            .raw_read(&created.id, Operation::ReadConsent)
+            .await
+            .unwrap();
+        assert!(
+            !std::str::from_utf8(&bytes)
+                .unwrap()
+                .contains(second.as_secret_str())
+        );
+        assert!(expiry <= created.expires_at_ms);
+        let kind: String = command(&a, redis::cmd("HGET").arg(&keys[1]).arg("kind")).await;
+        assert_eq!(kind, "consent");
+        let ttl: i64 = command(&a, redis::cmd("PTTL").arg(&keys[1])).await;
+        assert!(ttl > 0);
+        let score: u64 = command(&a, redis::cmd("ZSCORE").arg(&keys[0]).arg(&keys[1])).await;
+        assert_eq!(score, expiry);
+        assert_eq!(
+            a.lookup(&created.id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        assert_eq!(
+            a.lookup_authenticated(&created.id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        assert_eq!(
+            a.create(request(&cfg), [7; 32]).await.err(),
+            Some(StoreError::Limited)
+        );
+        for (token, decision, binding, expected) in [
+            (
+                first.as_secret_str(),
+                "approve",
+                [7; 32],
+                ConsentStoreError::InvalidToken,
+            ),
+            (
+                second.as_secret_str(),
+                "other",
+                [7; 32],
+                ConsentStoreError::InvalidDecision,
+            ),
+            (
+                second.as_secret_str(),
+                "approve",
+                [8; 32],
+                ConsentStoreError::Unavailable,
+            ),
+        ] {
+            assert_eq!(
+                b.decide_consent(&created.id, &binding, token, decision)
+                    .await
+                    .err(),
+                Some(expected)
+            );
+        }
+        let (_, _, unchanged, _) = a
+            .raw_read(&created.id, Operation::ReadConsent)
+            .await
+            .unwrap();
+        assert!(unchanged == bytes);
+        let _: String = command(&a, redis::cmd("ACL").arg(&["SETUSER", "default", "-hset"])).await;
+        assert_eq!(
+            a.prepare_consent(&created.id, &[7; 32]).await.err(),
+            Some(StoreError::Unavailable)
+        );
+        let (_, _, unchanged, _) = a
+            .raw_read(&created.id, Operation::ReadConsent)
+            .await
+            .unwrap();
+        assert!(unchanged == bytes);
+        let _: String = command(&a, redis::cmd("ACL").arg(&["SETUSER", "default", "+hset"])).await;
+        let (left_op, left_session, left_token, left_exp, left_bytes) =
+            a.consent_candidate(&created.id, &[7; 32]).await.unwrap();
+        let (right_op, right_session, right_token, right_exp, right_bytes) =
+            b.consent_candidate(&created.id, &[7; 32]).await.unwrap();
+        assert!(left_bytes == right_bytes && left_exp == right_exp);
+        let left_wire = left_session.encode().unwrap();
+        let right_wire = right_session.encode().unwrap();
+        let (left, right) = tokio::join!(
+            a.call(
+                left_op,
+                &created.id,
+                left_session.expires_at_ms(),
+                &left_wire,
+                Some((left_exp, &left_bytes))
+            ),
+            b.call(
+                right_op,
+                &created.id,
+                right_session.expires_at_ms(),
+                &right_wire,
+                Some((right_exp, &right_bytes))
+            )
+        );
+        let left = left.unwrap();
+        let right = right.unwrap();
+        let left_won = matches!(left.as_slice(), [status] if status == b"ok");
+        let right_won = matches!(right.as_slice(), [status] if status == b"ok");
+        assert_ne!(left_won, right_won);
+        let loser = if left_won { &right } else { &left };
+        assert!(matches!(loser.as_slice(), [status] if status == b"missing"));
+        let second = if left_won { left_token } else { right_token };
+        // Force both validations to finish before competing CAS deletes.
+        let (left, exp, payload, effective) = a
+            .consent_decision(&created.id, &[7; 32], second.as_secret_str(), "approve")
+            .await
+            .unwrap();
+        let (right, other_exp, other_payload, other_effective) = b
+            .consent_decision(&created.id, &[7; 32], second.as_secret_str(), "approve")
+            .await
+            .unwrap();
+        assert!(
+            matches!(left, ConsentOutcome::Approved(_))
+                && matches!(right, ConsentOutcome::Approved(_))
+        );
+        let (left, right) = tokio::join!(
+            a.call(
+                Operation::ConsumeConsent,
+                &created.id,
+                exp,
+                &payload,
+                Some((effective, &[]))
+            ),
+            b.call(
+                Operation::ConsumeConsent,
+                &created.id,
+                other_exp,
+                &other_payload,
+                Some((other_effective, &[]))
+            )
+        );
+        let replies = [left.unwrap(), right.unwrap()];
+        assert_eq!(
+            replies
+                .iter()
+                .filter(|reply| matches!(reply.as_slice(), [status] if status == b"ok"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            replies
+                .iter()
+                .filter(|reply| matches!(reply.as_slice(), [status] if status == b"missing"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            a.decide_consent(&created.id, &[7; 32], second.as_secret_str(), "approve")
+                .await
+                .err(),
+            Some(ConsentStoreError::Missing)
+        );
+        // Fresh identities exercise public approval races and denial, releasing the same slot.
+        for decision in ["approve", "deny"] {
+            let (_, _, identity) = super::super::context::tests::fixture().await;
+            let created = a.create(request(&cfg), [7; 32]).await.unwrap();
+            let witness = a.lookup_bound(&created.id, &[7; 32]).await.unwrap();
+            let (sec, micro): (u64, u64) = command(&a, &redis::cmd("TIME")).await;
+            let context = AuthenticatedAuthorization::new_bound(
+                witness,
+                identity,
+                &[7; 32],
+                &cfg,
+                sec * 1000 + micro / 1000,
+            )
+            .unwrap();
+            a.promote_authenticated(&created.id, &[7; 32], context)
+                .await
+                .unwrap();
+            let token = b.prepare_consent(&created.id, &[7; 32]).await.unwrap();
+            if decision == "approve" {
+                let (left, right) = tokio::join!(
+                    a.decide_consent(&created.id, &[7; 32], token.as_secret_str(), decision),
+                    b.decide_consent(&created.id, &[7; 32], token.as_secret_str(), decision)
+                );
+                let outcomes = [left, right];
+                assert_eq!(
+                    outcomes
+                        .iter()
+                        .filter(|result| matches!(result, Ok(ConsentOutcome::Approved(_))))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    outcomes
+                        .iter()
+                        .filter(|result| matches!(result, Err(ConsentStoreError::Missing)))
+                        .count(),
+                    1
+                );
+            } else {
+                assert!(matches!(
+                    a.decide_consent(&created.id, &[7; 32], token.as_secret_str(), decision)
+                        .await,
+                    Ok(ConsentOutcome::Denied)
+                ));
+            }
+        }
+        let count: usize = command(&a, &redis::cmd("DBSIZE")).await;
+        assert_eq!(count, 0);
     }
     async fn effective_deadline_and_hash_shape_cases(backend: &BrowserBackendConfig) {
         let (mut cfg, _, identity) = super::super::context::tests::fixture().await;
@@ -875,6 +1244,7 @@ mod tests {
         let count: usize = command(&a, &redis::cmd("DBSIZE")).await;
         assert_eq!(count, 0);
         let _: String = command(&a, redis::cmd("ACL").arg(&["SETUSER", "default", "+zadd"])).await;
+        consent_cases(&backend).await;
         effective_deadline_and_hash_shape_cases(&backend).await;
         authenticated_cases(&backend).await;
         docker(&["stop", &container.0]);

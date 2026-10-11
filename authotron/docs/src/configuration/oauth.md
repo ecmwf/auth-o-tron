@@ -219,9 +219,9 @@ StaleIdentity and AccessDenied, without identity data. Callers still enforce
 Origin/CSRF, and must recheck current policy/freshness at future issuance. This is
 in-process policy eligibility only: development-memory persistence is described
 below alongside explicit shared Valkey authenticated persistence. Durability
-depends on backend configuration. Explicit consent and per-instance decision
-completion are described below; grants, codes, and HTTP/startup integration remain
-unimplemented.
+depends on backend configuration. Explicit consent and atomic decision completion
+in memory and shared Valkey are described below; grants, codes, and HTTP/startup
+integration remain unimplemented.
 
 ### OAuth-internal authenticated-context codec
 
@@ -261,10 +261,10 @@ if policy is relaxed later. These types have no public raw constructors, Clone,
 Debug or serde traits. Fixed errors are InvalidToken, InvalidDecision, InvalidContext,
 Unavailable. Callers still enforce Origin, strict duplicate/unknown-field request
 parsing and bound request context. Standalone sessions use Rust ownership for single
-use; the memory store below adds atomic decision completion within one instance.
-No cross-pod consent replay guarantee or remote fencing is provided. Consent is
-not an authorization code, grant issuance or token mint. Memory ConsentReady state
-is implemented below; no HTTP or startup hook is wired.
+use; the stores below add atomic decision completion within one memory instance or
+across replicas sharing Valkey. Standalone sessions provide no cross-pod replay
+guarantee or remote fencing. Consent is not an authorization code, grant issuance
+or token mint. No HTTP or startup hook is wired.
 
 ### OAuth-internal consent-session codec
 
@@ -281,9 +281,8 @@ session ceiling and recomputed context expiry. Relaxing policy never renews that
 Fixed codec errors add TooLarge, InvalidRecord, UnsupportedVersion. This assumes
 trusted authenticated storage, not a MAC or fresh provider re-verification. No
 approved capability is decoded. Repeated trusted restores can recreate sessions;
-CSRF does not supply distributed single use. A future backend must atomically
-transition/consume the stored session. Development-memory wiring is described below;
-shared consent persistence is not implemented.
+CSRF does not supply distributed single use. The memory and shared Valkey stores
+below atomically transition/consume the stored session.
 
 ## Typed access-token capability
 
@@ -453,15 +452,15 @@ No OAuth backend or connection is initialized at startup.
 `oauth::valkey_transactions::ValkeyTransactionStore::new(config, &backend)` is an
 explicit connection call requiring Valkey settings. Async `create`, `lookup`, and
 `consume` use the memory store's ID/handle/record contracts, without local cache or
-fallback. Namespace: `<key_prefix>:oauth:authorization-transactions:v2:`, with only
+fallback. Namespace: `<key_prefix>:oauth:authorization-transactions:v3:`, with only
 hashed-ID record keys and an expiry sorted-set index, separate from UI state.
 Replicas sharing a namespace must use consistent policy snapshots, TTL and capacity.
 Creation obtains server `TIME`, encodes/revalidates the record, then Lua checks the
 current server time and expiry window, prunes expired index members, checks shared
 capacity, and creates an absent hash with `HSET`, `PEXPIREAT` and `ZADD` in one script.
 No client/replica clock determines expiry. Each hash has exactly `kind`, `expiry`
-and `payload` fields; kind is Pending or Authenticated. Version-1 string records
-are not migrated or decoded in this namespace; old keys expire independently.
+and `payload` fields; kind is Pending, Authenticated or ConsentReady. Earlier
+namespaces are not migrated or decoded; old keys expire independently.
 Lookup checks types/metadata and `HSTRLEN` before bounded `HGET`, returning exact
 bytes and server time for Rust codec/config/binding checks. Reads never refresh TTL.
 Consume validates that read in Rust, then Lua compares exact bytes and expiry at
@@ -471,12 +470,11 @@ Lua checks key types and mutation ACL permissions before writes. Atomic executio
 is not rollback: unexpected write failures/OOM or lost responses can leave ambiguous
 outcomes; operations are not automatically replayed. Invalid data yields fixed
 Unavailable errors, not raw backend diagnostics. The index is bounded to 100000
-members and uses no `KEYS` scans; Pending reads are capped at 16 KiB and Authenticated
-reads at 64 KiB. Expired members
+members and uses no `KEYS` scans; Pending reads are capped at 16 KiB, Authenticated
+reads at 64 KiB and ConsentReady reads at 96 KiB. Expired members
 are pruned in one atomic script: a large expired batch can occupy the shared
 server and exceed a caller's operation deadline, so tune capacity and timeouts.
-This remains
-transaction/context storage only, not consent/grant proof or atomic code issuance.
+Storage transitions and consent decisions do not provide atomic code issuance.
 
 `promote_authenticated` requires a source-bound context matching the actual ID,
 exact Pending bytes and expiry. Rust revalidates the private context against current
@@ -493,6 +491,35 @@ deadline even when current policy makes it earlier than stored metadata. Wrong
 binding preserves state as Missing; corrupt/oversized/unknown-kind/source-mismatched
 data stays unconsumed as fixed Unavailable. Cross-replica snapshots still require
 trusted storage and coherent config; restoration is not fresh provider execution.
+
+### Shared Valkey consent state
+
+Async `prepare_consent(id, browser_hash)` validates an Authenticated or ConsentReady
+snapshot against the source ID, browser binding, current policy and server `TIME`.
+It generates a fresh render token and stores only its hash in the private session
+codec. Lua compares the original kind, payload, expiry and index score at current
+server time before converting or renewing the same hash. HSET/PEXPIREAT/ZADD
+permissions are preflighted, and expiry cannot extend the stored or session ceiling.
+The token is returned only after successful CAS; competing snapshots have one winner.
+Renewal invalidates the previous token, so two tabs share one active challenge.
+All three states share one capacity slot. Pending and authenticated lookup/consume
+APIs return Missing for ConsentReady.
+
+Async `decide_consent` privately computes a validated approve/deny outcome in Rust,
+then Lua compares the exact ConsentReady snapshot and checks its effective freshness
+deadline before atomic `DEL`/`ZREM`. The outcome is exposed only after successful
+deletion; competing consumers have one winner across replicas. Invalid tokens,
+decisions, source/binding, policy or codec data preserve unexpired state. Decision
+errors are fixed Missing, InvalidToken, InvalidDecision and Unavailable; context,
+codec and ConsentReady binding failures map to Unavailable. Preparation retains
+StoreError classes, including Missing for Authenticated binding mismatch.
+Lost responses can leave an ambiguous consumed or renewed state; no automatic
+mutation replay or local fallback is provided. Callers still enforce Origin and
+strict duplicate/unknown-field parsing. Trusted authenticated storage and coherent
+policy snapshots remain required, and approval deletion is not atomic persistence
+of an authorization code. A future ConsentReady-to-Code transition must atomically
+persist the code while consuming consent; the current method only deletes the
+session and returns an opaque consent proof. No HTTP or startup integration is added.
 
 Authorization codes, HTTP token issuance, discovery/JWKS, browser CORS,
 and MCP integration remain future capabilities. No HTTP tokens are issued and
