@@ -1,0 +1,24 @@
+version: "2.0.0"
+server:
+  host: "127.0.0.1"
+  port: 8080
+metrics:
+  enabled: false
+logging:
+  level: info
+  format: console
+store:
+  enabled: false
+providers: []
+services: []
+jwt:
+  iss: login-ui-example
+  exp: 300
+  secret: public-demo-value-not-for-production
+ui:
+  enabled: true
+  branding:
+    application_name: Aviso
+    logo_url: https://aviso-playground.ecmwf.int/static/logo.png
+    title: Sign in to Aviso
+    description: Access your notifications and subscriptions.
