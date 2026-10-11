@@ -354,6 +354,104 @@ mod tests {
     ) -> T {
         store.connection.query(command).await.unwrap()
     }
+    async fn effective_deadline_and_hash_shape_cases(backend: &BrowserBackendConfig) {
+        let (mut cfg, _, identity) = super::super::context::tests::fixture().await;
+        cfg.max_authorization_transactions = 1;
+        cfg.authorization_transaction_ttl_seconds = 30;
+        let cfg = Arc::new(cfg);
+        let a = ValkeyTransactionStore::new(cfg.clone(), backend)
+            .await
+            .unwrap();
+        let created = a.create(request(&cfg), [7; 32]).await.unwrap();
+        let keys = a.keys(&created.id);
+        let witness = a.lookup_bound(&created.id, &[7; 32]).await.unwrap();
+        let (seconds, micros): (u64, u64) = command(&a, &redis::cmd("TIME")).await;
+        let context = AuthenticatedAuthorization::new_bound(
+            witness,
+            identity,
+            &[7; 32],
+            &cfg,
+            seconds * 1000 + micros / 1000,
+        )
+        .unwrap();
+        a.promote_authenticated(&created.id, &[7; 32], context)
+            .await
+            .unwrap();
+        let mut stricter = (*cfg).clone();
+        stricter.max_authentication_age_seconds = 1;
+        let b = ValkeyTransactionStore::new(Arc::new(stricter), backend)
+            .await
+            .unwrap();
+        let (snapshot, stored_expiry, bytes) =
+            b.read_authenticated(&created.id, &[7; 32]).await.unwrap();
+        let effective = snapshot.expires_at_ms();
+        assert!(effective < stored_expiry);
+        assert_eq!(stored_expiry, created.expires_at_ms);
+        let (seconds, micros): (u64, u64) = command(&a, &redis::cmd("TIME")).await;
+        let before = seconds * 1000 + micros / 1000;
+        assert!(before < effective);
+        tokio::time::sleep(Duration::from_millis(effective - before + 20)).await;
+        let (seconds, micros): (u64, u64) = command(&a, &redis::cmd("TIME")).await;
+        let after = seconds * 1000 + micros / 1000;
+        assert!(after >= effective && after < stored_expiry);
+        let reply = b
+            .call(
+                Operation::ConsumeAuthenticated,
+                &created.id,
+                stored_expiry,
+                &bytes,
+                Some((effective, &[])),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(reply.as_slice(), [status] if status == b"missing"));
+        let payload: Vec<u8> = command(&a, redis::cmd("HGET").arg(&keys[1]).arg("payload")).await;
+        assert!(payload == bytes);
+        let kind: String = command(&a, redis::cmd("HGET").arg(&keys[1]).arg("kind")).await;
+        assert_eq!(kind, "authenticated");
+        let ttl: i64 = command(&a, redis::cmd("PTTL").arg(&keys[1])).await;
+        assert!(ttl > 0);
+        let score: u64 = command(&a, redis::cmd("ZSCORE").arg(&keys[0]).arg(&keys[1])).await;
+        assert_eq!(score, stored_expiry);
+        assert_eq!(
+            b.lookup_authenticated(&created.id, &[7; 32]).await.err(),
+            Some(StoreError::Unavailable)
+        );
+        assert!(a.lookup_authenticated(&created.id, &[7; 32]).await.is_ok());
+        let _: usize = command(
+            &a,
+            redis::cmd("HSET")
+                .arg(&keys[1])
+                .arg("extra")
+                .arg("invalid-shape"),
+        )
+        .await;
+        assert_eq!(
+            a.lookup_authenticated(&created.id, &[7; 32]).await.err(),
+            Some(StoreError::Unavailable)
+        );
+        let _: usize = command(&a, redis::cmd("HDEL").arg(&keys[1]).arg("extra")).await;
+        for field in ["kind", "expiry", "payload"] {
+            let _: usize = command(&a, redis::cmd("HDEL").arg(&keys[1]).arg(field)).await;
+            assert_eq!(
+                a.lookup_authenticated(&created.id, &[7; 32]).await.err(),
+                Some(StoreError::Unavailable)
+            );
+            let _: usize = command(
+                &a,
+                redis::cmd("HSET")
+                    .arg(&keys[1])
+                    .arg("kind")
+                    .arg("authenticated")
+                    .arg("expiry")
+                    .arg(stored_expiry)
+                    .arg("payload")
+                    .arg(&bytes),
+            )
+            .await;
+        }
+        assert!(a.consume_authenticated(&created.id, &[7; 32]).await.is_ok());
+    }
     async fn authenticated_cases(backend: &BrowserBackendConfig) {
         let (mut cfg, _, identity) = super::super::context::tests::fixture().await;
         cfg.max_authorization_transactions = 1;
@@ -777,6 +875,7 @@ mod tests {
         let count: usize = command(&a, &redis::cmd("DBSIZE")).await;
         assert_eq!(count, 0);
         let _: String = command(&a, redis::cmd("ACL").arg(&["SETUSER", "default", "+zadd"])).await;
+        effective_deadline_and_hash_shape_cases(&backend).await;
         authenticated_cases(&backend).await;
         docker(&["stop", &container.0]);
         assert_eq!(
