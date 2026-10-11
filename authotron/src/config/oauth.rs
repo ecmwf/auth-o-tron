@@ -22,6 +22,10 @@ pub struct OAuthConfig {
     pub authorization_code_ttl_seconds: u64,
     #[schemars(range(min = 60, max = 3600))]
     pub access_token_ttl_seconds: u64,
+    #[schemars(range(min = 30, max = 900))]
+    pub authorization_transaction_ttl_seconds: u64,
+    #[schemars(range(min = 1, max = 100000))]
+    pub max_authorization_transactions: usize,
     #[schemars(length(max = 64))]
     pub clients: Vec<OAuthClient>,
     #[schemars(length(max = 64))]
@@ -36,6 +40,8 @@ impl Default for OAuthConfig {
             issuer: None,
             authorization_code_ttl_seconds: 60,
             access_token_ttl_seconds: 300,
+            authorization_transaction_ttl_seconds: 300,
+            max_authorization_transactions: 1024,
             clients: Vec::new(),
             resources: Vec::new(),
             signing: None,
@@ -59,6 +65,12 @@ impl OAuthConfig {
         }
         if !(60..=3600).contains(&self.access_token_ttl_seconds) {
             return Err("oauth.access_token_ttl_seconds must be between 60 and 3600");
+        }
+        if !(30..=900).contains(&self.authorization_transaction_ttl_seconds) {
+            return Err("oauth.authorization_transaction_ttl_seconds must be between 30 and 900");
+        }
+        if !(1..=100000).contains(&self.max_authorization_transactions) {
+            return Err("oauth.max_authorization_transactions must be between 1 and 100000");
         }
         if self.clients.len() > 64 {
             return Err("oauth.clients must contain at most 64 clients");
@@ -263,12 +275,14 @@ mod tests {
     }
 
     #[test]
-    fn ttl_bounds_match_schema() {
+    fn numeric_bounds_match_schema() {
         let schema = serde_json::to_value(schemars::schema_for!(OAuthConfig)).unwrap();
         assert_eq!(schema["additionalProperties"], false);
         for (field, min, max, default) in [
             ("authorization_code_ttl_seconds", 30, 300, 60),
             ("access_token_ttl_seconds", 60, 3600, 300),
+            ("authorization_transaction_ttl_seconds", 30, 900, 300),
+            ("max_authorization_transactions", 1, 100000, 1024),
         ] {
             let property = &schema["properties"][field];
             assert_eq!(property["minimum"], min);

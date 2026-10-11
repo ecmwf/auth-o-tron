@@ -71,7 +71,7 @@ impl TransactionDto {
     }
 }
 
-fn valid_time(ms: u64) -> bool {
+pub(super) fn valid_time(ms: u64) -> bool {
     ms <= 253402300799999
         && i64::try_from(ms)
             .ok()

@@ -13,6 +13,8 @@ oauth:
   issuer: "https://login.example.org"
   authorization_code_ttl_seconds: 60
   access_token_ttl_seconds: 300
+  authorization_transaction_ttl_seconds: 300
+  max_authorization_transactions: 1024
   clients: []
   resources: []
 ```
@@ -23,6 +25,8 @@ oauth:
 | `issuer` | absent | Required when enabled; absolute HTTPS origin only |
 | `authorization_code_ttl_seconds` | `60` | 30–300 seconds inclusive |
 | `access_token_ttl_seconds` | `300` | 60–3600 seconds inclusive |
+| `authorization_transaction_ttl_seconds` | `300` | 30–900 seconds inclusive |
+| `max_authorization_transactions` | `1024` | 1–100000 records inclusive |
 
 Unknown OAuth fields are rejected. Supplied issuers and TTLs are validated even
 when disabled. Issuers must have no userinfo, query, fragment, whitespace, or
@@ -186,7 +190,8 @@ Challenge: canonical unpadded base64url SHA-256 (43 characters/32 bytes). Immuta
 digests in constant time. Successful requests have immutable getters, not login,
 consent or grant proof. Fixed-error failures **stay local; never redirect to raw
 submitted callbacks**. Error-redirect routing, extensions, authorization HTTP routes,
-transaction storage and code issuance are future work.
+shared transaction storage and code issuance are future work. The explicit
+development-memory API is described below; it is not wired into an HTTP flow.
 
 ## Authorization-transaction record codec
 
@@ -205,8 +210,39 @@ Expiry must be positive and representable through year 9999. Browser digest
 matching is constant-time. Callers supply trusted server/backend time and enforce
 TTL computation; timestamps are never request-selected. This codec is not a MAC
 or cache authenticator and assumes trusted storage. Role eligibility, login and
-consent still require later fresh identity checks. No backend, nonce generation,
-atomic consumption, HTTP route or startup hook is implemented; startup remains Unsupported.
+consent still require later fresh identity checks. The codec itself supplies no
+backend, nonce generation or atomic consumption; the memory API below adds those
+capabilities. No HTTP route or startup hook is implemented; startup remains Unsupported.
+
+## Explicit development-memory transaction store
+
+`oauth::store::MemoryTransactionStore::new(Arc<OAuthConfig>)` requires valid config
+and an issuer. It is an explicit development-only choice, never a default or
+fallback, and is distinct from the legacy token store and browser-session state.
+Async `create(validated_request, browser_hash)` returns a secret `TransactionId`
+and absolute expiry; `lookup` and `consume` require that ID and binding hash.
+IDs contain 32 cryptographically random bytes, use canonical unpadded base64url,
+and expose wire text only through `as_secret_str`; they and handles have no Debug
+or serialization. Only SHA-256 ID hashes index stored versioned codec bytes.
+Expiry uses trusted server time captured under lock plus the transaction TTL, with checked arithmetic;
+it never extends on reads. Valid operations prune expired entries and enforce the
+configured count cap. Capacity errors are fixed `Limited`; missing/expired IDs and
+binding mismatches are `Missing`; config failures are `Configuration`, and codec,
+clock, entropy or poisoned-lock failures are fixed `Unavailable` errors.
+Consume validates codec/current config and binding before removing under one lock:
+wrong binding does not burn an unexpired transaction, and concurrent consumers have
+one winner. Invalid records provide no proof and remain until expiry cleanup.
+No guard spans an await. Idle expired data is count-bounded; no cleanup task runs.
+These async APIs perform synchronous O(n) pruning and codec validation under a
+mutex. The cap bounds logical records, not retained map allocation. Revalidation
+uses the store's retained immutable configuration, not automatic hot reload.
+Wall-clock rollback can lengthen elapsed lifetime for unpruned records; removed
+records cannot reappear.
+Memory is per instance, cannot support cross-replica transactions, and has no
+restart persistence. Tune capacity to process budgets (up to 16 KiB per record;
+100000 records can approach 1.6 GiB of payload, plus overhead). Shared Valkey
+contracts are future work. Transactions prove input validation only, never login,
+consent or grants. No backend is wired at startup; OAuth remains Unsupported.
 
 Authorization codes, HTTP token issuance, discovery/JWKS, browser CORS,
 and MCP integration remain future capabilities. No HTTP tokens are issued and

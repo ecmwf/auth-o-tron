@@ -1005,6 +1005,20 @@
           "maximum": 3600,
           "default": 300
         },
+        "authorization_transaction_ttl_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 30,
+          "maximum": 900,
+          "default": 300
+        },
+        "max_authorization_transactions": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 1,
+          "maximum": 100000,
+          "default": 1024
+        },
         "clients": {
           "type": "array",
           "items": {
@@ -1280,6 +1294,8 @@
             "issuer": null,
             "authorization_code_ttl_seconds": 60,
             "access_token_ttl_seconds": 300,
+            "authorization_transaction_ttl_seconds": 300,
+            "max_authorization_transactions": 1024,
             "clients": [],
             "resources": [],
             "signing": null
