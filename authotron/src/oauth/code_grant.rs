@@ -290,7 +290,7 @@ impl CodeGrant {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::oauth::{
         authorization::validate_authorization_request, consent::ConsentOutcome,
@@ -306,7 +306,7 @@ mod tests {
     const CALLBACK: &str = "http://127.0.0.1:49152/cb";
     const RESOURCE: &str = "https://mcp.example.org/mcp";
 
-    async fn approved(
+    pub(in crate::oauth) async fn approved(
         tx_ttl: u64,
         age: u64,
     ) -> (OAuthConfig, TransactionId, ConsentedAuthorization, u64) {

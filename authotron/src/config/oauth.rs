@@ -26,6 +26,8 @@ pub struct OAuthConfig {
     pub authorization_transaction_ttl_seconds: u64,
     #[schemars(range(min = 1, max = 100000))]
     pub max_authorization_transactions: usize,
+    #[schemars(range(min = 1, max = 100000))]
+    pub max_authorization_codes: usize,
     #[schemars(range(min = 1, max = 3600))]
     pub max_authentication_age_seconds: u64,
     #[schemars(range(min = 0, max = 60))]
@@ -46,6 +48,7 @@ impl Default for OAuthConfig {
             access_token_ttl_seconds: 300,
             authorization_transaction_ttl_seconds: 300,
             max_authorization_transactions: 1024,
+            max_authorization_codes: 1024,
             max_authentication_age_seconds: 300,
             authentication_clock_skew_seconds: 30,
             clients: Vec::new(),
@@ -77,6 +80,9 @@ impl OAuthConfig {
         }
         if !(1..=100000).contains(&self.max_authorization_transactions) {
             return Err("oauth.max_authorization_transactions must be between 1 and 100000");
+        }
+        if !(1..=100000).contains(&self.max_authorization_codes) {
+            return Err("oauth.max_authorization_codes must be between 1 and 100000");
         }
         if !(1..=3600).contains(&self.max_authentication_age_seconds) {
             return Err("oauth.max_authentication_age_seconds must be between 1 and 3600");
@@ -289,12 +295,23 @@ mod tests {
     #[test]
     fn numeric_bounds_match_schema() {
         let schema = serde_json::to_value(schemars::schema_for!(OAuthConfig)).unwrap();
+        let checked: serde_json::Value =
+            serde_json::from_str(include_str!("../../schema.json")).unwrap();
+        assert_eq!(
+            schema["properties"]["max_authorization_codes"],
+            checked["$defs"]["OAuthConfig"]["properties"]["max_authorization_codes"]
+        );
+        assert_eq!(
+            checked["$defs"]["ConfigV2"]["properties"]["oauth"]["default"]["max_authorization_codes"],
+            1024
+        );
         assert_eq!(schema["additionalProperties"], false);
         for (field, min, max, default) in [
             ("authorization_code_ttl_seconds", 30, 300, 60),
             ("access_token_ttl_seconds", 60, 3600, 300),
             ("authorization_transaction_ttl_seconds", 30, 900, 300),
             ("max_authorization_transactions", 1, 100000, 1024),
+            ("max_authorization_codes", 1, 100000, 1024),
             ("max_authentication_age_seconds", 1, 3600, 300),
             ("authentication_clock_skew_seconds", 0, 60, 30),
         ] {

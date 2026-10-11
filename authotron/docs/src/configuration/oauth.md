@@ -15,6 +15,7 @@ oauth:
   access_token_ttl_seconds: 300
   authorization_transaction_ttl_seconds: 300
   max_authorization_transactions: 1024
+  max_authorization_codes: 1024
   max_authentication_age_seconds: 300
   authentication_clock_skew_seconds: 30
   clients: []
@@ -29,6 +30,7 @@ oauth:
 | `access_token_ttl_seconds` | `300` | 60–3600 seconds inclusive |
 | `authorization_transaction_ttl_seconds` | `300` | 30–900 seconds inclusive |
 | `max_authorization_transactions` | `1024` | 1–100000 records inclusive |
+| `max_authorization_codes` | `1024` | 1–100000 code records inclusive, separate from transactions |
 | `max_authentication_age_seconds` | `300` | 1–3600 seconds inclusive |
 | `authentication_clock_skew_seconds` | `30` | 0–60 seconds inclusive |
 
@@ -310,8 +312,9 @@ scope policy and freshness. Time before issuance is InvalidTime (no skew allowan
 time at or after code expiry is Expired. Errors are fixed Configuration, InvalidTime,
 InvalidContext, Expired and InvalidRedemption, without submitted values. Checks do
 not consume the grant and supply no token-signing proof: a future backend must
-atomically consume a one-use code before returning issuance authority. Code IDs,
-backend code storage and HTTP integration are future slices.
+atomically consume a one-use code before returning issuance authority. Code handles
+and stored envelopes are described below; issuance, redemption and HTTP integration
+are future slices.
 This capability is explicitly usable with OAuth disabled; startup remains Unsupported.
 
 ### OAuth-internal code-grant codec
@@ -340,9 +343,10 @@ are server data, not token-request parameters; redemption requires no browser co
 or source ID. Decode does not reconstruct `ConsentedAuthorization` and grants no
 code-minting, one-use or token-issuance authority. Repeated trusted restores remain
 possible: redemption validation and successful atomic backend code consumption must
-precede token issuance. The future backend must bind the submitted code handle's
-hash to this exact payload and its metadata; this codec contains no code-ID hash
-and cannot establish that association. Namespaces require coherent issuer/config snapshots.
+precede token issuance. The grant codec itself contains no code-handle hash.
+`StoredCode` supplies that association for the trusted in-memory envelope; future
+persistence must preserve it with the exact payload and expiry metadata.
+Namespaces require coherent issuer/config snapshots.
 
 ## Typed access-token capability
 
@@ -476,6 +480,34 @@ classes; an Authenticated-state binding mismatch is Missing. Expired entries are
 The shared configured count cap includes all three memory kinds, with no TTL refresh
 or extension. This gives atomic one-use decisions only within one memory instance;
 no distributed consent, atomic code persistence, HTTP or startup hook is added.
+
+### Authorization-code identity and stored-envelope foundation
+
+`oauth::codes::AuthorizationCode` is a secret handle: 32 OS-random bytes encoded as
+canonical 43-character unpadded base64url. Generation and SHA-256 hashing are
+OAuth-internal; public `parse` rejects wrong lengths, padding and noncanonical
+aliases as fixed Missing errors. The type has no Debug, Clone or serde. Wire text
+is exposed only through `as_secret_str` for future callback delivery, not logging.
+No redirect or operational code generation is wired yet.
+
+The private stored envelope consumes a typed CodeGrant, retaining only its bounded
+96 KiB codec bytes, expiry and its own actual code-handle hash. Raw code values are
+not stored. Internal restoration compares that hash in constant time before decoding,
+rejects an expired envelope, and rechecks grant codec/current-policy constraints
+without extending the envelope ceiling. A copied envelope cannot be accepted under
+another code handle. This assumes trusted storage, not a MAC; restoration is not
+code consumption or token-issuance proof. Code expiry still follows the grant's
+code/consent/context minimum (code TTL defaults to 60 seconds), with PKCE required
+for future redemption.
+
+`max_authorization_codes` reserves a separate code count cap, default 1024 and range
+1–100000. At the maximum, 96 KiB payloads alone permit 9.8304 GB (about 9.15 GiB), plus
+overhead. CodeStoreError classes are Missing, Limited, InvalidToken, InvalidDecision
+and Unavailable; issuance-specific classes are reserved for the next slice. The
+next Memory increment must atomically persist a code and remove ConsentReady state,
+rather than call `decide_consent` followed by separate persistence. Backend code
+storage, issuance, redemption and HTTP/startup integration remain future work;
+OAuth enablement remains Unsupported.
 
 ### Store-provided source witnesses
 
