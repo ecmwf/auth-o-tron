@@ -489,7 +489,7 @@ impl Auth {
         }
     }
 
-    async fn check_augmenters(&self, user: User, metrics: &Metrics) -> Option<User> {
+    pub(crate) async fn check_augmenters(&self, user: User, metrics: &Metrics) -> Option<User> {
         debug!(
             event_name = "auth.augmenters.started",
             event_domain = "auth",
@@ -520,7 +520,9 @@ impl Auth {
                 .await;
         }
 
-        Some(user.lock().await.clone())
+        // All augmenter futures have completed; take ownership without copying an
+        // unbounded identity before the browser can apply its projection limits.
+        Arc::try_unwrap(user).ok().map(Mutex::into_inner)
     }
 }
 
