@@ -116,10 +116,6 @@ fn validate_identity_fields(
 }
 
 /// Trusted OAuth cache snapshots only: no provider or augmenter is re-executed.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "OAuth-internal context persistence is not wired")
-)]
 pub(super) fn restore_from_trusted_storage(
     username: String,
     realm: String,

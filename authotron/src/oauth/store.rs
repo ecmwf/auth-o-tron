@@ -10,6 +10,7 @@
 
 use super::{
     authorization::ValidatedAuthorizationRequest,
+    context::AuthenticatedAuthorization,
     records::{AuthorizationTransaction, valid_time},
 };
 use crate::config::OAuthConfig;
@@ -64,7 +65,12 @@ pub struct CreatedTransaction {
     pub id: TransactionId,
     pub expires_at_ms: u64,
 }
+enum StoredKind {
+    Pending,
+    Authenticated,
+}
 struct Stored {
+    kind: StoredKind,
     bytes: Vec<u8>,
     expires_at_ms: u64,
 }
@@ -119,6 +125,28 @@ impl MemoryTransactionStore {
     ) -> Result<AuthorizationTransaction, StoreError> {
         self.access_at(id, browser_hash, now_ms, true)
     }
+    pub async fn promote_authenticated(
+        &self,
+        id: &TransactionId,
+        browser_hash: &[u8; 32],
+        context: AuthenticatedAuthorization,
+    ) -> Result<(), StoreError> {
+        self.promote_at(id, browser_hash, context, now_ms)
+    }
+    pub async fn lookup_authenticated(
+        &self,
+        id: &TransactionId,
+        browser_hash: &[u8; 32],
+    ) -> Result<AuthenticatedAuthorization, StoreError> {
+        self.authenticated_at(id, browser_hash, now_ms, false)
+    }
+    pub async fn consume_authenticated(
+        &self,
+        id: &TransactionId,
+        browser_hash: &[u8; 32],
+    ) -> Result<AuthenticatedAuthorization, StoreError> {
+        self.authenticated_at(id, browser_hash, now_ms, true)
+    }
     fn create_at(
         &self,
         request: ValidatedAuthorizationRequest,
@@ -151,6 +179,7 @@ impl MemoryTransactionStore {
             let id = TransactionId::generate()?;
             if let Entry::Vacant(slot) = entries.entry(id.hash()) {
                 slot.insert(Stored {
+                    kind: StoredKind::Pending,
                     bytes,
                     expires_at_ms: expiry,
                 });
@@ -177,6 +206,9 @@ impl MemoryTransactionStore {
         entries.retain(|_, record| record.expires_at_ms > now);
         let key = id.hash();
         let stored = entries.get(&key).ok_or(StoreError::Missing)?;
+        if !matches!(stored.kind, StoredKind::Pending) {
+            return Err(StoreError::Missing);
+        }
         let record = AuthorizationTransaction::decode(&stored.bytes, &self.config, now)
             .map_err(|_| StoreError::Unavailable)?;
         if !record.matches_browser_binding(binding) {
@@ -187,6 +219,80 @@ impl MemoryTransactionStore {
             entries.remove(&key);
         }
         Ok(record)
+    }
+    fn promote_at(
+        &self,
+        id: &TransactionId,
+        binding: &[u8; 32],
+        context: AuthenticatedAuthorization,
+        clock: impl FnOnce() -> Result<u64, StoreError>,
+    ) -> Result<(), StoreError> {
+        let mut entries = self.entries.lock().map_err(|_| StoreError::Unavailable)?;
+        let now = clock()?;
+        if !valid_time(now) {
+            return Err(StoreError::Unavailable);
+        }
+        entries.retain(|_, entry| entry.expires_at_ms > now);
+        let stored = entries.get_mut(&id.hash()).ok_or(StoreError::Missing)?;
+        if !matches!(stored.kind, StoredKind::Pending) {
+            return Err(StoreError::Missing);
+        }
+        let pending = AuthorizationTransaction::decode(&stored.bytes, &self.config, now)
+            .map_err(|_| StoreError::Unavailable)?;
+        if !pending.matches_browser_binding(binding) {
+            return Err(StoreError::Missing);
+        }
+        let source = context
+            .transaction()
+            .encode()
+            .map_err(|_| StoreError::Unavailable)?;
+        if source != stored.bytes || pending.expires_at_ms() != stored.expires_at_ms {
+            return Err(StoreError::Unavailable);
+        }
+        let bytes = context.encode().map_err(|_| StoreError::Unavailable)?;
+        let checked = AuthenticatedAuthorization::decode(&bytes, &self.config, binding, now)
+            .map_err(|_| StoreError::Unavailable)?;
+        if checked.expires_at_ms() > stored.expires_at_ms {
+            return Err(StoreError::Unavailable);
+        }
+        // All checks precede replacement; the hashed key and capacity slot remain unchanged.
+        *stored = Stored {
+            kind: StoredKind::Authenticated,
+            bytes,
+            expires_at_ms: checked.expires_at_ms(),
+        };
+        Ok(())
+    }
+    fn authenticated_at(
+        &self,
+        id: &TransactionId,
+        binding: &[u8; 32],
+        clock: impl FnOnce() -> Result<u64, StoreError>,
+        consume: bool,
+    ) -> Result<AuthenticatedAuthorization, StoreError> {
+        let mut entries = self.entries.lock().map_err(|_| StoreError::Unavailable)?;
+        let now = clock()?;
+        if !valid_time(now) {
+            return Err(StoreError::Unavailable);
+        }
+        entries.retain(|_, entry| entry.expires_at_ms > now);
+        let key = id.hash();
+        let stored = entries.get(&key).ok_or(StoreError::Missing)?;
+        if !matches!(stored.kind, StoredKind::Authenticated) {
+            return Err(StoreError::Missing);
+        }
+        let context = AuthenticatedAuthorization::decode(&stored.bytes, &self.config, binding, now)
+            .map_err(|error| match error {
+                super::context::ContextError::Binding => StoreError::Missing,
+                _ => StoreError::Unavailable,
+            })?;
+        if context.expires_at_ms() > stored.expires_at_ms {
+            return Err(StoreError::Unavailable);
+        }
+        if consume {
+            entries.remove(&key);
+        }
+        Ok(context)
     }
 }
 
@@ -206,6 +312,242 @@ pub(super) mod tests {
     }
     fn at(now: u64) -> impl FnOnce() -> Result<u64, StoreError> {
         move || Ok(now)
+    }
+    async fn authenticated_fixture() -> (
+        MemoryTransactionStore,
+        CreatedTransaction,
+        AuthenticatedAuthorization,
+        u64,
+    ) {
+        let (mut config, transaction, identity) = super::super::context::tests::fixture().await;
+        config.max_authorization_transactions = 1;
+        config.max_authentication_age_seconds = 1;
+        let now = identity.verified_at_ms();
+        let config = Arc::new(config);
+        let store = MemoryTransactionStore::new(config.clone()).unwrap();
+        let created = store.create_at(request(&config), [7; 32], at(now)).unwrap();
+        let context =
+            AuthenticatedAuthorization::new(transaction, identity, &[7; 32], &config, now).unwrap();
+        (store, created, context, now)
+    }
+    #[tokio::test]
+    async fn public_promotion_keeps_one_capacity_slot_and_typed_access() {
+        let (store, created, context, now) = authenticated_fixture().await;
+        assert_eq!(
+            store
+                .lookup_authenticated(&created.id, &[7; 32])
+                .await
+                .err(),
+            Some(StoreError::Missing)
+        );
+        store
+            .promote_authenticated(&created.id, &[7; 32], context)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.lookup(&created.id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        assert_eq!(
+            store.consume(&created.id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        let context = store
+            .lookup_authenticated(&created.id, &[7; 32])
+            .await
+            .unwrap();
+        assert_eq!(context.as_user().username, "alice");
+        assert_eq!(context.authorized_scopes(), &["read"]);
+        assert_eq!(context.expires_at_ms(), now + 1000);
+        assert_eq!(store.entries.lock().unwrap().len(), 1);
+        assert_eq!(
+            store.create(request(&store.config), [7; 32]).await.err(),
+            Some(StoreError::Limited)
+        );
+        assert_eq!(
+            store
+                .consume_authenticated(&created.id, &[8; 32])
+                .await
+                .err(),
+            Some(StoreError::Missing)
+        );
+        assert!(
+            store
+                .consume_authenticated(&created.id, &[7; 32])
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            store
+                .consume_authenticated(&created.id, &[7; 32])
+                .await
+                .err(),
+            Some(StoreError::Missing)
+        );
+        assert!(store.create(request(&store.config), [7; 32]).await.is_ok());
+    }
+    #[tokio::test]
+    async fn promotion_failures_preserve_pending_and_expiry_shrink_reclaims_capacity() {
+        let (store, created, context, now) = authenticated_fixture().await;
+        let pending = store.entries.lock().unwrap()[&created.id.hash()]
+            .bytes
+            .clone();
+        assert_eq!(
+            store
+                .promote_at(&created.id, &[8; 32], context, at(now))
+                .err(),
+            Some(StoreError::Missing)
+        );
+        assert!(
+            store
+                .access_at(&created.id, &[7; 32], at(now), false)
+                .is_ok()
+        );
+        assert!(store.entries.lock().unwrap()[&created.id.hash()].bytes == pending);
+        for corrupt in ["payload", "expiry"] {
+            let (store, created, context, now) = authenticated_fixture().await;
+            {
+                let mut entries = store.entries.lock().unwrap();
+                let entry = entries.get_mut(&created.id.hash()).unwrap();
+                if corrupt == "payload" {
+                    entry.bytes = b"invalid pending".to_vec();
+                } else {
+                    entry.expires_at_ms += 1;
+                }
+            }
+            assert_eq!(
+                store
+                    .promote_at(&created.id, &[7; 32], context, at(now))
+                    .err(),
+                Some(StoreError::Unavailable)
+            );
+            assert!(matches!(
+                store.entries.lock().unwrap()[&created.id.hash()].kind,
+                StoredKind::Pending
+            ));
+        }
+        let (mut config, transaction, identity) = super::super::context::tests::fixture().await;
+        config.max_authentication_age_seconds = 1;
+        let now = identity.verified_at_ms();
+        let store = MemoryTransactionStore::new(Arc::new(config.clone())).unwrap();
+        let created = store
+            .create_at(request(&config), [7; 32], at(now + 1))
+            .unwrap();
+        let mismatch =
+            AuthenticatedAuthorization::new(transaction, identity, &[7; 32], &config, now).unwrap();
+        assert_eq!(
+            store
+                .promote_at(&created.id, &[7; 32], mismatch, at(now + 1))
+                .err(),
+            Some(StoreError::Unavailable)
+        );
+        assert!(
+            store
+                .access_at(&created.id, &[7; 32], at(now + 1), false)
+                .is_ok()
+        );
+        let (store, created, context, now) = authenticated_fixture().await;
+        assert_eq!(
+            store
+                .promote_at(&created.id, &[7; 32], context, at(now + 1000))
+                .err(),
+            Some(StoreError::Unavailable)
+        );
+        assert!(
+            store
+                .access_at(&created.id, &[7; 32], at(now + 1000), false)
+                .is_ok()
+        );
+        let (original, _, context, now) = authenticated_fixture().await;
+        let mut denied = (*original.config).clone();
+        denied.resources[0].scopes[0]
+            .required_roles
+            .push("absent".into());
+        let denied = MemoryTransactionStore::new(Arc::new(denied)).unwrap();
+        let created = denied
+            .create_at(request(&denied.config), [7; 32], at(now))
+            .unwrap();
+        assert_eq!(
+            denied
+                .promote_at(&created.id, &[7; 32], context, at(now))
+                .err(),
+            Some(StoreError::Unavailable)
+        );
+        assert!(
+            denied
+                .access_at(&created.id, &[7; 32], at(now), false)
+                .is_ok()
+        );
+        let (store, created, context, now) = authenticated_fixture().await;
+        store
+            .promote_at(&created.id, &[7; 32], context, at(now))
+            .unwrap();
+        assert_eq!(
+            store
+                .authenticated_at(&created.id, &[7; 32], at(now + 999), false)
+                .unwrap()
+                .expires_at_ms(),
+            now + 1000
+        );
+        assert_eq!(
+            store
+                .authenticated_at(&created.id, &[7; 32], at(now + 1000), true)
+                .err(),
+            Some(StoreError::Missing)
+        );
+        assert!(
+            store
+                .create_at(request(&store.config), [7; 32], at(now + 1000))
+                .is_ok()
+        );
+    }
+    #[tokio::test]
+    async fn concurrent_promotion_has_one_winner_and_bad_authenticated_data_is_not_consumed() {
+        let (store, created, first, now) = authenticated_fixture().await;
+        let (_, _, identity) = super::super::context::tests::fixture().await;
+        let transaction = store
+            .access_at(&created.id, &[7; 32], at(now), false)
+            .unwrap();
+        let second =
+            AuthenticatedAuthorization::new(transaction, identity, &[7; 32], &store.config, now)
+                .unwrap();
+        let store = Arc::new(store);
+        let id = Arc::new(created.id);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let workers = [first, second]
+            .into_iter()
+            .map(|context| {
+                let (store, id, barrier) = (store.clone(), id.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.promote_at(&id, &[7; 32], context, at(now))
+                })
+            })
+            .collect::<Vec<_>>();
+        let outcomes = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| **result == Err(StoreError::Missing))
+                .count(),
+            1
+        );
+        store
+            .entries
+            .lock()
+            .unwrap()
+            .get_mut(&id.hash())
+            .unwrap()
+            .bytes = b"invalid context".to_vec();
+        assert_eq!(
+            store.authenticated_at(&id, &[7; 32], at(now), true).err(),
+            Some(StoreError::Unavailable)
+        );
+        assert_eq!(store.entries.lock().unwrap().len(), 1);
     }
     #[tokio::test]
     async fn explicit_public_api_uses_server_clock_and_one_use_ids() {

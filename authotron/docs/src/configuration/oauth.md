@@ -217,8 +217,9 @@ deadline and transaction expiry. Clocks must be synchronized across replicas.
 Fixed errors distinguish Configuration, InvalidTime, InvalidTransaction, Binding,
 StaleIdentity and AccessDenied, without identity data. Callers still enforce
 Origin/CSRF, and must recheck current policy/freshness at future issuance. This is
-in-process policy eligibility only: no persistence, consent flag, grant, code or
-HTTP/startup integration is implemented.
+in-process policy eligibility only: development-memory persistence is described
+below, but no shared/durable authenticated persistence, consent flag, grant, code,
+or HTTP/startup integration is implemented.
 
 ### OAuth-internal authenticated-context codec
 
@@ -236,7 +237,8 @@ fresh provider execution. OAuth-internal snapshot restoration does not rerun
 providers/augmenters, so verification-time roles remain a revocation window until
 authentication age expires; current policy is still rechecked. Deserialization
 allocations are wire-bounded, not an end-to-end hard memory guarantee. Fixed codec
-errors add TooLarge, InvalidRecord and UnsupportedVersion. No state-store hook is wired.
+errors add TooLarge, InvalidRecord and UnsupportedVersion. The development-memory
+store below uses this private codec; shared authenticated-context storage is future work.
 
 ## Typed access-token capability
 
@@ -327,9 +329,29 @@ uses the store's retained immutable configuration, not automatic hot reload.
 Wall-clock rollback can lengthen elapsed lifetime for unpruned records; removed
 records cannot reappear.
 Memory is per instance, cannot support cross-replica transactions, and has no
-restart persistence. Tune capacity to process budgets (up to 16 KiB per record;
-100000 records can approach 1.6 GiB of payload, plus overhead). Transactions prove input validation only, never login,
+restart persistence. Tune capacity to process budgets (pending records ≤16 KiB,
+authenticated records ≤64 KiB; 100000 authenticated records allow 6.5536 GB
+(approximately 6.10 GiB) of payload,
+plus overhead). Pending transactions prove input validation only, never login,
 consent or grants. No backend is wired at startup; OAuth remains Unsupported.
+
+### Development-memory authenticated promotion
+
+Async `promote_authenticated(id, browser_hash, context)` replaces a Pending entry
+exactly once with an Authenticated entry under the same hashed key/capacity slot.
+It samples trusted time under lock, decodes the pending record, checks binding and
+exact canonical source transaction bytes/expiry, then revalidates the context with
+the store's config snapshot before replacement. Expiry shrinks to context freshness
+or the original transaction deadline, never extends. Failures leave unexpired input
+unchanged; a second promotion returns Missing and cannot overwrite the earlier identity.
+`lookup`/`consume` are Pending-only. New `lookup_authenticated`/`consume_authenticated`
+return typed contexts via the private codec, without refreshing expiry; wrong kind,
+missing/expired IDs or wrong binding return Missing. Codec/metadata failures return
+Unavailable without consuming corrupt state. Both kinds share the configured count
+cap, and only successful typed consume removes an unexpired entry. No operation
+adds consent, grants or codes. Source matching binds request/expiry facts, not a new
+transaction-ID field inside the record. Valkey authenticated promotion and HTTP
+integration remain separate future slices.
 
 ### Shared Valkey connector foundation
 

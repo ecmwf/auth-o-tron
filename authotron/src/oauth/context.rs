@@ -16,10 +16,6 @@ use crate::{config::OAuthConfig, models::user::User};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "OAuth-internal context persistence is not wired")
-)]
 pub(super) const MAX_AUTHENTICATED_CONTEXT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,10 +33,6 @@ pub enum ContextError {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "OAuth-internal context persistence is not wired")
-)]
 struct ContextDto {
     version: u8,
     username: String,
@@ -134,10 +126,6 @@ impl AuthenticatedAuthorization {
     pub fn expires_at_ms(&self) -> u64 {
         self.expires_at_ms
     }
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "OAuth-internal context persistence is not wired")
-    )]
     pub(super) fn encode(&self) -> Result<Vec<u8>, ContextError> {
         let user = self.as_user();
         let transaction = self
@@ -160,10 +148,6 @@ impl AuthenticatedAuthorization {
     }
     /// Trusted storage only, not request JSON or a MAC. Restores verification-time roles;
     /// current eligibility is rechecked, but live upstream revocation is not queried.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "OAuth-internal context persistence is not wired")
-    )]
     pub(super) fn decode(
         bytes: &[u8],
         config: &OAuthConfig,
@@ -203,7 +187,7 @@ impl AuthenticatedAuthorization {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::{
         auth::Auth,
@@ -216,7 +200,8 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
 
-    async fn fixture() -> (OAuthConfig, AuthorizationTransaction, VerifiedOAuthIdentity) {
+    pub(in crate::oauth) async fn fixture()
+    -> (OAuthConfig, AuthorizationTransaction, VerifiedOAuthIdentity) {
         let config: ConfigV2 = serde_json::from_value(json!({"store": {"enabled": false}, "services": [], "augmenters": [],
             "providers": [{"type": "plain", "name": "basic", "realm": "local", "users": [{"username": "alice", "password": "päss:秘密", "roles": ["reader", "member"]}]}],
             "server": {"port": 0}, "jwt": {"iss": "fixture", "exp": 300, "secret": "fixture-only"}, "logging": {"level": "warn", "format": "console"},
