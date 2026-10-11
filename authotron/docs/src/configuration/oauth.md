@@ -166,8 +166,33 @@ third-party implementations remain responsible for their own log contents.
 Legacy best-effort augmentation retains its
 existing partial-mutation, logging and continuation behavior. Callers still own
 fresh credential verification, deadlines and bounded identity projection. This
-helper is not authentication, consent or grant proof and is not integrated into
-browser routes or OAuth credential handling yet; OAuth startup remains Unsupported.
+helper is not authentication, consent or grant proof. The OAuth verification
+capability below uses it, while browser routes remain best-effort and OAuth startup remains Unsupported.
+
+## Strict OAuth credential-verification capability
+
+`oauth::authentication::verify_identity(credentials, &browser_state, &auth, &metrics)`
+returns an opaque `VerifiedOAuthIdentity` or fixed Rejected/Limited/Timeout/Unavailable
+errors. Fresh selected Basic/API-key verification, strict augmentation and OAuth
+projection run through the existing single admission/deadline pipeline: local-first
+permits, shared quotas/optional leases and the in-flight RAII gauge are reused.
+One strict-helper deadline starts at entry and covers lease release and proof
+construction too. Late completion returns Timeout, not a proof or a cleanup error.
+Tokio deadlines are cooperative, not hard real-time. Cancellation releases local
+permits/gauge immediately; bounded detached cleanup or expiry may release shared
+leases later, so this is not remote-provider fencing. Legacy browser cleanup is unchanged.
+API-key verification is uncached; Basic credential encoding preserves Unicode passwords.
+Only server code selects strict mode; no submitted field controls provider or mode.
+OAuth names/realm are nonblank, control-free and ≤128 UTF-8 bytes; roles are at most
+64 entries of the same text bound. Attributes and existing user scopes are discarded.
+The proof has no public constructor, Deserialize, Serialize, Debug or Clone; `as_user`
+is read-only. `verified_at_ms` records checked trusted server time after verification
+completes, through year 9999; it is not a caller timestamp or a max-age decision.
+Callers must check Origin/CSRF and the bound OAuth transaction before invoking this.
+The proof is credential verification only: consent, resource policy, code/grant proof
+and future age checks remain separate. No session/cookie or code is created. Existing
+browser verification retains best-effort augmentation, 256-byte names and display
+attributes. No HTTP integration or startup enablement is implemented.
 
 ## Typed access-token capability
 

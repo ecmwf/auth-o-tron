@@ -594,12 +594,7 @@ impl BrowserLoginState {
         let _active = metrics.map(Metrics::browser_inflight_guard);
         // Admission time is part of the deadline, so a delayed lease response cannot
         // start a fresh verification deadline after the shared lease has aged.
-        let deadline = tokio::time::Instant::now()
-            + Duration::from_secs(
-                self.settings
-                    .as_ref()
-                    .map_or(10, |s| s.verification_timeout_seconds),
-            );
+        let deadline = tokio::time::Instant::now() + self.verification_timeout();
         let mut lease = if let Some(backend) = self.shared()? {
             let s = self
                 .settings
@@ -658,11 +653,42 @@ impl BrowserLoginState {
         self.admitted(self.verify_key(key)).await
     }
 
+    pub(crate) fn verification_timeout(&self) -> Duration {
+        Duration::from_secs(
+            self.settings
+                .as_ref()
+                .map_or(10, |s| s.verification_timeout_seconds),
+        )
+    }
+
     pub async fn verify_identity(
         &self,
         credentials: BrowserCredentials<'_>,
         auth: &Auth,
         metrics: &Metrics,
+    ) -> Result<User, BrowserVerifyError> {
+        self.verify_identity_with(credentials, auth, metrics, false, browser_identity)
+            .await
+    }
+
+    pub(crate) async fn verify_identity_strict(
+        &self,
+        credentials: BrowserCredentials<'_>,
+        auth: &Auth,
+        metrics: &Metrics,
+        projection: fn(&User) -> Result<User, BrowserVerifyError>,
+    ) -> Result<User, BrowserVerifyError> {
+        self.verify_identity_with(credentials, auth, metrics, true, projection)
+            .await
+    }
+
+    async fn verify_identity_with(
+        &self,
+        credentials: BrowserCredentials<'_>,
+        auth: &Auth,
+        metrics: &Metrics,
+        strict: bool,
+        projection: fn(&User) -> Result<User, BrowserVerifyError>,
     ) -> Result<User, BrowserVerifyError> {
         self.admitted_with_metrics(
             async {
@@ -690,11 +716,16 @@ impl BrowserLoginState {
                             .map_err(|_| BrowserVerifyError::Rejected)?
                     }
                 };
-                let user = auth
-                    .check_augmenters(user, metrics)
-                    .await
-                    .ok_or(BrowserVerifyError::Rejected)?;
-                browser_identity(&user)
+                let user = if strict {
+                    auth.check_augmenters_strict(user, metrics)
+                        .await
+                        .map_err(|_| BrowserVerifyError::Rejected)?
+                } else {
+                    auth.check_augmenters(user, metrics)
+                        .await
+                        .ok_or(BrowserVerifyError::Rejected)?
+                };
+                projection(&user)
             },
             Some(metrics),
         )
