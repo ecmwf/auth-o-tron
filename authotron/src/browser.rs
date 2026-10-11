@@ -102,6 +102,15 @@ pub enum LoginFlow {
     Basic,
 }
 
+impl LoginFlow {
+    pub(crate) fn metric_label(self) -> &'static str {
+        match self {
+            Self::ApiKey => "ecmwf-api-key",
+            Self::Basic => "basic",
+        }
+    }
+}
+
 fn valid_id(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|c| c.is_ascii_hexdigit())
 }
@@ -415,12 +424,13 @@ impl BrowserLoginState {
     async fn admitted_with_metrics(
         &self,
         operation: impl std::future::Future<Output = Result<User, BrowserVerifyError>>,
-        _metrics: Option<&Metrics>,
+        metrics: Option<&Metrics>,
     ) -> Result<User, BrowserVerifyError> {
         let _permit = self
             .inflight
             .try_acquire()
             .map_err(|_| BrowserVerifyError::Limited)?;
+        let _active = metrics.map(Metrics::browser_inflight_guard);
         // Admission time is part of the deadline, so a delayed lease response cannot
         // start a fresh verification deadline after the shared lease has aged.
         let deadline = tokio::time::Instant::now()

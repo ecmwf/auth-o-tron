@@ -68,6 +68,70 @@ pub trait MetricsRecorder: Clone + Send + Sync + 'static {
 /// disconnect, or cancellation), so the gauge cannot leak.
 pub struct HttpInFlightGuard(Option<IntGauge>);
 
+#[derive(Clone, Copy)]
+pub enum BrowserOutcome {
+    Success,
+    Rejected,
+    Malformed,
+    Origin,
+    Csrf,
+    Limited,
+    BackendUnavailable,
+    Capacity,
+    Timeout,
+    Cancelled,
+}
+impl BrowserOutcome {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Rejected => "rejected",
+            Self::Malformed => "malformed",
+            Self::Origin => "origin",
+            Self::Csrf => "csrf",
+            Self::Limited => "limited",
+            Self::BackendUnavailable => "backend_unavailable",
+            Self::Capacity => "capacity",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+/// Records exactly one POST outcome, including cancellation before response creation.
+pub struct BrowserAttemptGuard {
+    metrics: Metrics,
+    flow: &'static str,
+    started: std::time::Instant,
+    pub outcome: BrowserOutcome,
+    completed: bool,
+}
+impl BrowserAttemptGuard {
+    pub fn complete(&mut self) {
+        self.completed = true;
+    }
+}
+impl Drop for BrowserAttemptGuard {
+    fn drop(&mut self) {
+        let labels = [
+            self.flow,
+            if self.completed {
+                self.outcome.label()
+            } else {
+                BrowserOutcome::Cancelled.label()
+            },
+        ];
+        self.metrics
+            .browser_attempts
+            .with_label_values(&labels)
+            .inc();
+        self.metrics
+            .browser_duration
+            .with_label_values(&labels)
+            .observe(self.started.elapsed().as_secs_f64());
+    }
+}
+
 impl Drop for HttpInFlightGuard {
     fn drop(&mut self) {
         if let Some(gauge) = self.0.take() {
@@ -97,6 +161,9 @@ pub struct Metrics {
     http_requests_total: IntCounterVec,
     http_request_duration_seconds: HistogramVec,
     http_requests_in_flight: IntGaugeVec,
+    browser_inflight: IntGauge,
+    browser_attempts: IntCounterVec,
+    browser_duration: HistogramVec,
 }
 
 impl Metrics {
@@ -230,6 +297,29 @@ impl Metrics {
         )
         .expect("Failed to register authotron_http_requests_in_flight");
 
+        let browser_inflight = IntGauge::new(
+            "authotron_browser_logins_inflight",
+            "Locally admitted browser verifications including backend admission and augmentation",
+        )
+        .expect("static browser metric");
+        registry
+            .register(Box::new(browser_inflight.clone()))
+            .expect("register browser gauge");
+        let browser_attempts = register_int_counter_vec_with_registry!(
+            "authotron_browser_login_attempts_total",
+            "Browser form POST outcomes including session persistence",
+            &["flow", "outcome"],
+            registry.clone()
+        )
+        .expect("register browser attempts");
+        let browser_duration = register_histogram_vec_with_registry!(
+            "authotron_browser_login_duration_seconds",
+            "Browser form POST handler duration until response creation or cancellation",
+            &["flow", "outcome"],
+            vec![0.005, 0.025, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0],
+            registry.clone()
+        )
+        .expect("register browser duration");
         Metrics {
             registry,
             auth_requests_total,
@@ -241,6 +331,24 @@ impl Metrics {
             http_requests_total,
             http_request_duration_seconds,
             http_requests_in_flight,
+            browser_inflight,
+            browser_attempts,
+            browser_duration,
+        }
+    }
+
+    pub fn browser_inflight_guard(&self) -> HttpInFlightGuard {
+        self.browser_inflight.inc();
+        HttpInFlightGuard(Some(self.browser_inflight.clone()))
+    }
+
+    pub fn browser_attempt_guard(&self, flow: crate::browser::LoginFlow) -> BrowserAttemptGuard {
+        BrowserAttemptGuard {
+            metrics: self.clone(),
+            flow: flow.metric_label(),
+            started: std::time::Instant::now(),
+            outcome: BrowserOutcome::Cancelled,
+            completed: false,
         }
     }
 

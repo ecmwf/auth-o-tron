@@ -22,6 +22,81 @@ By default, this endpoint is available on port `9090`. The format follows the Pr
 | `auth_provider_duration_seconds` | Histogram | provider_name, provider_type, realm | Provider-specific latency |
 | `augmenter_attempts_total` | Counter | augmenter_name, augmenter_type, realm, result | Token augmentation attempts |
 | `augmenter_duration_seconds` | Histogram | augmenter_type, realm | Augmentation latency |
+| `authotron_browser_logins_inflight` | Gauge | none | Locally admitted browser verification operations, including backend admission and augmentation |
+| `authotron_browser_login_attempts_total` | Counter | flow, outcome | Completed/cancelled direct form POST attempts, including session persistence outcome |
+| `authotron_browser_login_duration_seconds` | Histogram | flow, outcome | Form POST handler duration in seconds, through response creation or cancellation |
+
+## Browser Login and HPA
+
+Browser metrics reuse the existing per-process registry and `metrics.enabled`
+endpoint behavior. They do not connect to Valkey for exporting metrics or change
+API/CLI `auth_requests_total` semantics. The unlabeled in-flight gauge is exposed
+at zero on idle processes, including pods with configured direct flows; no login
+is needed before an HPA scrape sees it.
+
+`flow` has exactly two values: `basic` and `ecmwf-api-key`. `outcome` has the fixed
+values `success`, `rejected`, `malformed`, `origin`, `csrf`, `limited`,
+`backend_unavailable`, `capacity`, `timeout`, `cancelled`. They describe the actual
+POST result: successful verification followed by a failed session write is a
+failure, not `success`. If a replacement form cannot be issued, its capacity,
+quota or backend failure becomes the final outcome. `timeout` means the total
+verification/augmentation deadline expired; upstream failures reported as generic
+credential rejection remain `rejected`. Cancellation is recorded when the handler
+future is dropped before creating a response.
+
+The counter counts attempts, the duration histogram measures seconds, and the
+gauge counts active operations. Histogram timing starts on entering the POST
+handler **after bounded form extraction**, includes Origin/CSRF checks, backend
+admission, verification/augmentation, session persistence and any replacement-form
+creation, and stops when a response is created or the handler is cancelled. It
+excludes body transport/extraction and streaming the response to the browser.
+The gauge covers only the local-admitted verification phase, starting before
+Valkey quota/optional lease admission and ending after verification/augmentation
+and optional lease release. It excludes session creation and locally rejected
+requests. RAII guards reset it on success, error, timeout and cancellation.
+
+No browser metric labels include credentials, usernames, session IDs, prefixes,
+URLs, provider names or raw diagnostic strings. There are at most 20 flow/outcome
+combinations per counter/histogram family. Histogram `le` labels are the fixed
+Prometheus bucket boundaries, not caller input. Prometheus attaches deployment
+identity such as `namespace` and `pod` as **target labels**, not application labels.
+
+`max_inflight_logins` is the per-pod budget; optional
+`max_shared_inflight_logins` is an aggregate Valkey lease cap. Global rate quotas
+and form/session capacities remain separate limits. The gauge is a useful custom
+HPA signal for local saturation; shared-cap or global-rate rejection can prevent
+added replicas from increasing throughput. Short admission failures may also be
+missed between scrapes: monitor `limited` attempts and backend errors alongside
+CPU, latency and the gauge. Longer session TTLs do not make this gauge rise, but
+increase retained-session memory and credential-revocation lag (up to 24 hours
+at the maximum configured TTL).
+
+Custom-metric HPA requires an external adapter exposing
+`authotron_browser_logins_inflight` through `custom.metrics.k8s.io` as a **Pods**
+metric. CPU-based HPA does not need this adapter; the chart does not install one.
+For a Prometheus Adapter, an illustrative rule preserving per-pod identity is:
+
+```yaml
+seriesQuery: 'authotron_browser_logins_inflight{namespace!="",pod!=""}'
+resources:
+  overrides:
+    namespace: {resource: namespace}
+    pod: {resource: pod}
+name:
+  matches: '^authotron_browser_logins_inflight$'
+  as: authotron_browser_logins_inflight
+metricsQuery: 'max(<<.Series>>{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
+```
+
+The HPA metric name must be `authotron_browser_logins_inflight`; its target is a
+per-pod `AverageValue` active-operation count. For example, a target below a tuned
+local budget of 64 leaves headroom; neither that budget nor any example target is
+a benchmark claim. Select the target, scrape interval, stabilization and scale
+policies using observed workload and upstream capacity. Normal request shutdown
+releases optional leases; crash/scale-down recovery uses their deadline plus the
+fixed two-second grace. This is expiry-based recovery, not perfect fencing for a
+suspended process. The live fixture is plaintext loopback Valkey; TLS and external
+HA deployment behavior still require deployment-specific verification.
 
 ## Label Values
 

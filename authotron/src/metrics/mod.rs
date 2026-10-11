@@ -12,4 +12,4 @@
 
 mod recorder;
 
-pub use recorder::{Metrics, MetricsRecorder};
+pub use recorder::{BrowserAttemptGuard, BrowserOutcome, Metrics, MetricsRecorder};
