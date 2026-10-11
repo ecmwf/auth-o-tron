@@ -900,6 +900,98 @@ mod tests {
                 Err(BrowserVerifyError::Unavailable)
             ));
         }
+        // Stall only cleanup: admission and local Basic verification finish before the pause.
+        struct PauseCleanup(Valkey, Arc<std::sync::atomic::AtomicBool>);
+        #[async_trait::async_trait]
+        impl crate::augmenters::Augmenter for PauseCleanup {
+            fn get_name(&self) -> &str {
+                "pause-cleanup"
+            }
+            fn get_type(&self) -> &str {
+                "plain"
+            }
+            fn get_realm(&self) -> &str {
+                "fixture"
+            }
+            async fn augment(&self, _: Arc<futures::lock::Mutex<User>>) -> Result<(), String> {
+                self.0
+                    .connection
+                    .query::<String>(redis::cmd("CLIENT").arg("PAUSE").arg(2500).arg("ALL"))
+                    .await
+                    .map_err(|_| "fixture pause failed".to_owned())?;
+                self.1.store(true, std::sync::atomic::Ordering::Release);
+                Ok(())
+            }
+        }
+        let mut cfg = config(&url, "oauth-cleanup-deadline");
+        let settings = cfg.ui.browser_session.as_mut().unwrap();
+        settings.verification_timeout_seconds = 1;
+        settings.max_inflight_logins = 1;
+        let BrowserBackendConfig::Valkey {
+            operation_timeout_ms,
+            ..
+        } = &mut settings.backend
+        else {
+            unreachable!()
+        };
+        *operation_timeout_ms = 5000;
+        let mut browser = BrowserLoginState::new(&cfg).unwrap();
+        browser.initialize(true).await.unwrap();
+        let mut auth = crate::auth::Auth::new(
+            &cfg.providers,
+            &[],
+            Arc::new(crate::store::no_store::NoStore),
+            cfg.auth,
+        );
+        let augmented = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        auth.augmenters.push(Box::new(PauseCleanup(
+            browser.valkey.as_ref().unwrap().clone(),
+            augmented.clone(),
+        )));
+        let metrics = crate::metrics::Metrics::new();
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(1800),
+            crate::oauth::authentication::verify_identity(
+                crate::browser::BrowserCredentials::Basic {
+                    username: "alice",
+                    password: "public-fixture",
+                },
+                &browser,
+                &auth,
+                &metrics,
+            ),
+        )
+        .await
+        .expect("strict helper exceeded total deadline tolerance");
+        assert!(augmented.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(
+            outcome.err(),
+            Some(crate::oauth::authentication::AuthenticationError::Timeout)
+        );
+        assert_eq!(browser.inflight.available_permits(), 1);
+        assert!(
+            metrics
+                .render()
+                .unwrap()
+                .contains("authotron_browser_logins_inflight 0")
+        );
+        // Detached bounded cleanup or expiry releases the shared lease, not the caller deadline.
+        tokio::time::sleep(Duration::from_millis(3000)).await;
+        auth.augmenters.clear();
+        assert!(
+            crate::oauth::authentication::verify_identity(
+                crate::browser::BrowserCredentials::Basic {
+                    username: "alice",
+                    password: "public-fixture"
+                },
+                &browser,
+                &auth,
+                &metrics,
+            )
+            .await
+            .is_ok()
+        );
+
         docker(&["stop", &fixture.0]);
         assert!(matches!(
             b.lookup(&rotated).await,
