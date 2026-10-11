@@ -112,7 +112,57 @@ The LDAP augmenter queries a Lightweight Directory Access Protocol server to ext
 
 When using `filters`, each filter is executed and the results are combined. The filter template can use `{username}` as a placeholder.
 
-Results are cached for 120 seconds to reduce LDAP server load.
+Successful complete results are cached for 120 seconds to reduce LDAP server
+load, with a process-wide capacity of 256 lookup identities (LRU eviction).
+
+#### LDAP Result and Cache Limits
+
+The lookup requests `memberOf` using a streaming search with server-side
+`SearchOptions.sizelimit(16)`, and independently enforces these inclusive limits
+locally before deriving/caching roles:
+
+| Data | Limit |
+|------|-------|
+| Lookup UID | 256 UTF-8 bytes |
+| Search entries | 16 per lookup |
+| Returned attributes | 16 per entry, including text and binary maps |
+| Attribute name | 128 bytes |
+| Attribute values | 512 total across all entries/maps, including ignored attributes |
+| Each attribute value / entry DN | 4,096 bytes |
+| Derived roles | 256 per lookup, each at most 1,024 UTF-8 bytes |
+| Lookup aggregate | 128 KiB: entry DNs, attribute names/values and derived role text combined |
+| Role filters | At most 32 `filters`; each filter (including legacy `filter`) at most 4,096 bytes |
+
+The client consumes one entry at a time rather than collecting the full result
+set. Every attribute, including unexpected/binary values, is budgeted. Binary
+`memberOf`, referrals/intermediate results, size-limit failures, and other
+non-success final search results reject the complete lookup. UID is escaped as
+an LDAP filter value. Normal CN/path role derivation is unchanged.
+
+Roles remain in a private accumulator until the complete search succeeds. Any
+limit/error discards all accumulated LDAP roles, does not mutate the user's
+roles, and is not cached. Error messages emitted by this augmenter are static
+and do not include LDAP diagnostics, identity data, or credentials; role payloads
+are not logged. The shared authentication pipeline retains its existing
+augmenter-error behavior: it records the error and may continue with the user's
+preexisting roles. Browser projection limits separately reject an oversized
+final identity with 401. CLI identities are not subject to browser projection
+limits, but their LDAP lookups obey the same limits above.
+
+The transport driver is aborted when the lookup completes, fails, or is
+cancelled, including a browser deadline. The size-limited cache holds only
+bounded successful role vectors; cache keys also contain operator-controlled
+connector configuration, whose size remains trusted.
+
+**Residual transport boundary:** ldap3 decodes an LDAP protocol frame and
+constructs an entry before application checks can inspect its contents. Its
+transport-to-search channel is internally unbounded. A large frame or a burst
+from a nonconforming server can therefore allocate before these checks; a
+cooperative server's entry-size limit does not bound individual frame bytes.
+Connector configuration and the directory server must remain trusted, with
+deployment/transport resource limits as appropriate. This implementation bounds
+application accumulation and retained cache/session data; it does not claim an
+end-to-end hard memory limit or provide a custom bounded LDAP decoder/channel.
 
 **Example with single filter:**
 

@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use cached::Return;
 use cached::proc_macro::cached;
 use futures::lock::Mutex;
-use ldap3::{LdapConnAsync, Scope, SearchEntry};
+use ldap3::{LdapConnAsync, Scope, SearchEntry, SearchOptions};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -23,6 +23,113 @@ use crate::models::user::User;
 use crate::utils::log_throttle::should_emit;
 
 const CACHE_HIT_LOG_WINDOW: Duration = Duration::from_secs(30);
+const LDAP_ENTRY_LIMIT: usize = 16;
+const LDAP_ATTRIBUTE_LIMIT: usize = 16;
+const LDAP_ATTRIBUTE_NAME_BYTES: usize = 128;
+const LDAP_VALUE_LIMIT: usize = 512;
+const LDAP_VALUE_BYTES: usize = 4096;
+const LDAP_DN_BYTES: usize = 4096;
+const LDAP_ROLE_LIMIT: usize = 256;
+const LDAP_ROLE_BYTES: usize = 1024;
+const LDAP_TOTAL_BYTES: usize = 128 * 1024;
+const LDAP_LIMIT_ERROR: &str = "LDAP role lookup exceeds configured safety limits";
+const LDAP_LOOKUP_ERROR: &str = "LDAP role lookup failed";
+
+/// Limits application-owned lookup data, not the LDAP transport decoder's frames.
+#[derive(Default)]
+struct RoleLookup {
+    entries: usize,
+    values: usize,
+    bytes: usize,
+    roles: Vec<String>,
+}
+
+impl RoleLookup {
+    fn finish(self, result: ldap3::LdapResult) -> Result<Vec<String>, String> {
+        result.success().map_err(|_| LDAP_LOOKUP_ERROR)?;
+        Ok(self.roles)
+    }
+
+    fn charge(&mut self, bytes: usize) -> Result<(), String> {
+        self.bytes = self.bytes.checked_add(bytes).ok_or(LDAP_LIMIT_ERROR)?;
+        if self.bytes > LDAP_TOTAL_BYTES {
+            return Err(LDAP_LIMIT_ERROR.into());
+        }
+        Ok(())
+    }
+
+    fn value(&mut self, bytes: usize) -> Result<(), String> {
+        self.values += 1;
+        if self.values > LDAP_VALUE_LIMIT || bytes > LDAP_VALUE_BYTES {
+            return Err(LDAP_LIMIT_ERROR.into());
+        }
+        self.charge(bytes)
+    }
+
+    fn entry(&mut self, entry: &SearchEntry, config: &LDAPAugmenterConfig) -> Result<(), String> {
+        self.entries += 1;
+        if self.entries > LDAP_ENTRY_LIMIT
+            || entry.dn.len() > LDAP_DN_BYTES
+            || entry.attrs.len() + entry.bin_attrs.len() > LDAP_ATTRIBUTE_LIMIT
+        {
+            return Err(LDAP_LIMIT_ERROR.into());
+        }
+        self.charge(entry.dn.len())?;
+        // Validate every returned attribute, including unexpected and binary data,
+        // before parsing memberOf DNs or copying any derived roles.
+        for (name, values) in &entry.attrs {
+            if name.len() > LDAP_ATTRIBUTE_NAME_BYTES || values.len() > LDAP_VALUE_LIMIT {
+                return Err(LDAP_LIMIT_ERROR.into());
+            }
+            self.charge(name.len())?;
+            for value in values {
+                self.value(value.len())?;
+            }
+        }
+        for (name, values) in &entry.bin_attrs {
+            if name.len() > LDAP_ATTRIBUTE_NAME_BYTES || values.len() > LDAP_VALUE_LIMIT {
+                return Err(LDAP_LIMIT_ERROR.into());
+            }
+            self.charge(name.len())?;
+            for value in values {
+                self.value(value.len())?;
+            }
+        }
+        // A binary memberOf cannot supply a complete set of textual entitlements.
+        if entry
+            .bin_attrs
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("memberOf"))
+        {
+            return Err(LDAP_LOOKUP_ERROR.into());
+        }
+        for (_, values) in entry
+            .attrs
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("memberOf"))
+        {
+            for dn in values {
+                for role in collect_roles_from_dn(dn, &config.filter, &config.filters) {
+                    if self.roles.len() >= LDAP_ROLE_LIMIT || role.len() > LDAP_ROLE_BYTES {
+                        return Err(LDAP_LIMIT_ERROR.into());
+                    }
+                    self.charge(role.len())?;
+                    self.roles.push(role);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Closing/cancelling a lookup must also stop its detached transport driver.
+struct ConnectionDriver(tokio::task::JoinHandle<()>);
+
+impl Drop for ConnectionDriver {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 /// Configuration required to connect to LDAP and fetch user roles.
 #[derive(Deserialize, Serialize, JsonSchema, Debug, Hash, PartialEq, Eq, Clone)]
@@ -164,10 +271,7 @@ fn validate_filters(filters: &Option<Vec<String>>) -> Result<(), String> {
     if let Some(filter_list) = filters {
         for filter in filter_list {
             if parse_dn_components(filter).is_empty() {
-                return Err(format!(
-                    "Invalid LDAP filter '{}': expected key=value segments",
-                    filter
-                ));
+                return Err("Invalid LDAP role filter: expected key=value segments".into());
             }
         }
     }
@@ -181,6 +285,7 @@ fn validate_filters(filters: &Option<Vec<String>>) -> Result<(), String> {
 /// `filter` keeps returning just the CN when matched.
 #[cached(
     time = 120,
+    size = 256,
     result = true,
     with_cached_flag = true,
     sync_writes = "default"
@@ -189,6 +294,17 @@ async fn retrieve_ldap_user_roles(
     config: LDAPAugmenterConfig,
     uid: String,
 ) -> Result<Return<Vec<String>>, String> {
+    if uid.len() > 256
+        || config
+            .filter
+            .as_ref()
+            .is_some_and(|filter| filter.len() > LDAP_DN_BYTES)
+        || config.filters.as_ref().is_some_and(|filters| {
+            filters.len() > 32 || filters.iter().any(|filter| filter.len() > LDAP_DN_BYTES)
+        })
+    {
+        return Err(LDAP_LIMIT_ERROR.into());
+    }
     validate_filters(&config.filters)?;
 
     debug!(
@@ -200,8 +316,10 @@ async fn retrieve_ldap_user_roles(
 
     let (conn, mut ldap) = LdapConnAsync::new(&config.uri)
         .await
-        .map_err(|e| e.to_string())?;
-    ldap3::drive!(conn);
+        .map_err(|_| LDAP_LOOKUP_ERROR)?;
+    let _driver = ConnectionDriver(tokio::spawn(async move {
+        let _ = conn.drive().await;
+    }));
 
     // We do a simple bind using the configured service account
     let bind_dn = config
@@ -210,35 +328,37 @@ async fn retrieve_ldap_user_roles(
         .ok_or_else(|| "No bind DN provided for LDAP augmenter.".to_string())?;
     ldap.simple_bind(bind_dn, &config.ldap_password)
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|_| LDAP_LOOKUP_ERROR)?
         .success()
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| LDAP_LOOKUP_ERROR)?;
 
-    let search_filter = format!("(&(objectClass=person)(cn={}))", uid);
-    let (results, _res) = ldap
-        .search(
+    let search_filter = format!("(&(objectClass=person)(cn={}))", ldap3::ldap_escape(&uid));
+    let mut stream = ldap
+        .with_search_options(SearchOptions::new().sizelimit(LDAP_ENTRY_LIMIT as i32))
+        .streaming_search(
             &config.search_base,
             Scope::Subtree,
             &search_filter,
             vec!["memberOf"],
         )
         .await
-        .map_err(|e| e.to_string())?
-        .success()
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| LDAP_LOOKUP_ERROR)?;
 
-    let mut roles = Vec::new();
-    for entry in results {
-        let search_entry = SearchEntry::construct(entry);
-        if let Some(member_of) = search_entry.attrs.get("memberOf") {
-            for role_dn in member_of {
-                let mut extracted = collect_roles_from_dn(role_dn, &config.filter, &config.filters);
-                roles.append(&mut extracted);
-            }
+    let mut lookup = RoleLookup::default();
+    while let Some(entry) = stream.next().await.map_err(|_| LDAP_LOOKUP_ERROR)? {
+        // Referrals/intermediate messages do not establish complete local roles.
+        if entry.is_ref() || entry.is_intermediate() {
+            return Err(LDAP_LOOKUP_ERROR.into());
         }
+        if lookup.entries >= LDAP_ENTRY_LIMIT {
+            return Err(LDAP_LIMIT_ERROR.into());
+        }
+        let search_entry = SearchEntry::construct(entry);
+        lookup.entry(&search_entry, &config)?;
     }
-
-    Ok(Return::new(roles))
+    // sizeLimitExceeded and all other non-success results discard the entire
+    // local accumulator; neither partial results nor failures enter the cache.
+    Ok(Return::new(lookup.finish(stream.finish().await)?))
 }
 
 #[async_trait]
@@ -261,15 +381,14 @@ impl Augmenter for LDAPAugmenter {
     /// Adds additional roles to the user from LDAP, if the realms match.
     async fn augment(&self, user: Arc<Mutex<User>>) -> Result<(), String> {
         let user_guard = user.lock().await;
+        if user_guard.username.len() > 256 {
+            return Err(LDAP_LIMIT_ERROR.into());
+        }
         let realm = user_guard.realm.clone();
         let username = user_guard.username.clone();
         drop(user_guard);
         if realm != self.get_realm() {
-            return Err(format!(
-                "Attempted to augment user in the wrong realm. Expected '{}', got '{}'",
-                self.get_realm(),
-                realm
-            ));
+            return Err("LDAP augmenter realm mismatch".into());
         }
 
         debug!(
@@ -312,7 +431,6 @@ impl Augmenter for LDAPAugmenter {
                         "LDAP augmenter returned no roles"
                     );
                 } else {
-                    let added_roles = (*roles).clone();
                     user.lock().await.roles.extend((*roles).clone());
                     info!(
                         event_name = "augmenters.ldap.roles_added",
@@ -322,7 +440,6 @@ impl Augmenter for LDAPAugmenter {
                         username = username.as_str(),
                         realm = realm.as_str(),
                         added_roles_count = fetched_roles_count,
-                        added_roles = ?added_roles,
                         "LDAP augmenter added roles"
                     );
                 }
@@ -348,6 +465,241 @@ impl Augmenter for LDAPAugmenter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config() -> LDAPAugmenterConfig {
+        LDAPAugmenterConfig {
+            name: "test-ldap".into(),
+            realm: "test".into(),
+            uri: "ldap://127.0.0.1:1".into(),
+            search_base: "dc=example,dc=test".into(),
+            filter: None,
+            filters: None,
+            bind_dn: Some("cn=public-fixture".into()),
+            ldap_password: "public-test-password".into(),
+        }
+    }
+
+    fn entry(dn: &str, roles: Vec<String>) -> SearchEntry {
+        SearchEntry {
+            dn: dn.into(),
+            attrs: std::collections::HashMap::from([("memberOf".into(), roles)]),
+            bin_attrs: Default::default(),
+        }
+    }
+
+    #[test]
+    fn ldap_lookup_accepts_exact_entry_value_dn_and_role_bounds() {
+        let mut lookup = RoleLookup::default();
+        let mut data = entry(&"d".repeat(LDAP_DN_BYTES), vec![]);
+        // 256 textual roles, plus 256 ignored values, at the overall value-count limit.
+        data.attrs
+            .insert("memberOf".into(), vec!["CN=role".into(); LDAP_ROLE_LIMIT]);
+        data.attrs.insert(
+            "ignored".into(),
+            vec![String::new(); LDAP_VALUE_LIMIT - LDAP_ROLE_LIMIT],
+        );
+        lookup.entry(&data, &config()).unwrap();
+        for _ in 1..LDAP_ENTRY_LIMIT {
+            lookup.entry(&entry("", vec![]), &config()).unwrap();
+        }
+        assert_eq!(lookup.entries, LDAP_ENTRY_LIMIT);
+        assert_eq!(lookup.values, LDAP_VALUE_LIMIT);
+        assert_eq!(lookup.roles.len(), LDAP_ROLE_LIMIT);
+        let mut lookup = RoleLookup::default();
+        lookup
+            .entry(
+                &entry("", vec![format!("CN={}", "r".repeat(LDAP_ROLE_BYTES))]),
+                &config(),
+            )
+            .unwrap();
+        assert_eq!(lookup.roles[0].len(), LDAP_ROLE_BYTES);
+        let mut lookup = RoleLookup::default();
+        let mut value_entry = entry("", vec![]);
+        value_entry
+            .bin_attrs
+            .insert("ignored".into(), vec![vec![0; LDAP_VALUE_BYTES]]);
+        lookup.entry(&value_entry, &config()).unwrap();
+    }
+
+    #[test]
+    fn ldap_lookup_rejects_entry_attribute_value_dn_and_role_excess() {
+        for case in [
+            "entries",
+            "attributes",
+            "attribute-name",
+            "values",
+            "value-bytes",
+            "binary-bytes",
+            "dn",
+            "roles",
+            "role-bytes",
+            "binary-memberof",
+        ] {
+            let mut lookup = RoleLookup::default();
+            let mut data = entry("CN=public-user", vec!["CN=normal".into()]);
+            match case {
+                "entries" => lookup.entries = LDAP_ENTRY_LIMIT,
+                "attributes" => {
+                    for n in 0..LDAP_ATTRIBUTE_LIMIT {
+                        data.attrs.insert(format!("extra-{n}"), vec![]);
+                    }
+                }
+                "attribute-name" => {
+                    data.attrs
+                        .insert("n".repeat(LDAP_ATTRIBUTE_NAME_BYTES + 1), vec![]);
+                }
+                "values" => {
+                    data.attrs
+                        .insert("ignored".into(), vec![String::new(); LDAP_VALUE_LIMIT]);
+                }
+                "value-bytes" => {
+                    data.attrs
+                        .insert("ignored".into(), vec!["x".repeat(LDAP_VALUE_BYTES + 1)]);
+                }
+                "binary-bytes" => {
+                    data.bin_attrs
+                        .insert("ignored".into(), vec![vec![0; LDAP_VALUE_BYTES + 1]]);
+                }
+                "dn" => data.dn = "d".repeat(LDAP_DN_BYTES + 1),
+                "roles" => {
+                    data.attrs.insert(
+                        "memberOf".into(),
+                        vec!["CN=normal".into(); LDAP_ROLE_LIMIT + 1],
+                    );
+                }
+                "role-bytes" => {
+                    data.attrs.insert(
+                        "memberOf".into(),
+                        vec![format!("CN={}", "r".repeat(LDAP_ROLE_BYTES + 1))],
+                    );
+                }
+                "binary-memberof" => {
+                    data.bin_attrs.insert("memberOf".into(), vec![vec![255]]);
+                }
+                _ => unreachable!(),
+            }
+            let error = lookup.entry(&data, &config()).unwrap_err();
+            assert!(!error.contains("public-user"), "{case}");
+            assert!(error == LDAP_LIMIT_ERROR || error == LDAP_LOOKUP_ERROR);
+        }
+    }
+
+    #[test]
+    fn ldap_lookup_aggregate_counts_raw_and_derived_bytes_without_partial_user_mutation() {
+        let mut lookup = RoleLookup::default();
+        let data = entry("", vec!["CN=role".into()]);
+        // memberOf name (8), input DN (7), derived role (4) all count.
+        lookup.bytes = LDAP_TOTAL_BYTES - 19;
+        lookup.entry(&data, &config()).unwrap();
+        assert_eq!(lookup.bytes, LDAP_TOTAL_BYTES);
+        assert!(lookup.entry(&data, &config()).is_err());
+
+        let mut user = User::new(
+            "test".into(),
+            "public-user".into(),
+            Some(vec!["existing".into()]),
+            None,
+            None,
+            None,
+        );
+        let outcome = (|| {
+            let mut lookup = RoleLookup::default();
+            lookup.entry(&entry("", vec!["CN=good".into()]), &config())?;
+            lookup.entry(
+                &entry("", vec![format!("CN={}", "x".repeat(LDAP_ROLE_BYTES + 1))]),
+                &config(),
+            )?;
+            Ok::<_, String>(lookup.roles)
+        })();
+        if let Ok(roles) = outcome {
+            user.roles.extend(roles);
+        }
+        assert_eq!(user.roles, ["existing"]);
+    }
+
+    #[tokio::test]
+    async fn ldap_cache_evicts_at_capacity_and_does_not_cache_rejected_lookup() {
+        use cached::Cached;
+        {
+            let mut cache = RETRIEVE_LDAP_USER_ROLES.lock().await;
+            cache.cache_clear();
+            assert_eq!(cache.cache_capacity(), Some(256));
+            for n in 0..257 {
+                cache.cache_set(
+                    (config(), format!("public-{n}")),
+                    Return::new(vec!["role".into()]),
+                );
+            }
+            assert_eq!(cache.cache_size(), 256);
+            assert!(cache.cache_get(&(config(), "public-0".into())).is_none());
+            cache.cache_clear();
+        }
+        // Fails validation before connecting to LDAP; no live service required.
+        assert!(
+            retrieve_ldap_user_roles(config(), "u".repeat(257))
+                .await
+                .is_err()
+        );
+        assert_eq!(RETRIEVE_LDAP_USER_ROLES.lock().await.cache_size(), 0);
+    }
+
+    #[tokio::test]
+    async fn ldap_connection_driver_is_aborted_when_lookup_is_dropped() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        let handle = task.abort_handle();
+        drop(ConnectionDriver(task));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !handle.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn ldap_final_size_limit_or_failure_never_returns_partial_roles_or_diagnostics() {
+        for rc in [0, 4, 10, 80] {
+            let mut lookup = RoleLookup::default();
+            lookup
+                .entry(&entry("CN=public-user", vec!["CN=role".into()]), &config())
+                .unwrap();
+            let result = lookup.finish(ldap3::LdapResult {
+                rc,
+                matched: "CN=public-user".into(),
+                text: "sensitive-diagnostic".into(),
+                refs: vec![],
+                ctrls: vec![],
+            });
+            if rc == 0 {
+                assert_eq!(result.unwrap(), ["role"]);
+            } else {
+                assert_eq!(result.unwrap_err(), LDAP_LOOKUP_ERROR);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rejected_ldap_augmentation_keeps_existing_roles_without_connecting() {
+        let mut settings = config();
+        settings.filters = Some(vec!["OU=team".into(); 33]);
+        let user = Arc::new(Mutex::new(User::new(
+            "test".into(),
+            "public-user".into(),
+            Some(vec!["existing".into()]),
+            None,
+            None,
+            None,
+        )));
+        let error = LDAPAugmenter::new(&settings)
+            .augment(user.clone())
+            .await
+            .unwrap_err();
+        assert!(error.contains(LDAP_LIMIT_ERROR));
+        assert!(!error.contains("public-user"));
+        assert!(!error.contains("public-test-password"));
+        assert_eq!(user.lock().await.roles, ["existing"]);
+    }
 
     /// Test that a valid DN returns the correct CN.
     #[test]
