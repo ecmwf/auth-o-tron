@@ -261,7 +261,25 @@ Debug or serde traits. Fixed errors are InvalidToken, InvalidDecision, InvalidCo
 Unavailable. Callers still enforce Origin, strict duplicate/unknown-field request
 parsing and bound request context. Single use is Rust ownership only: no cross-pod
 atomic replay guarantee or remote fencing is provided. Consent is not an authorization
-code, grant issuance or token mint. No codec/backend state kind, HTTP or startup hook is added.
+code, grant issuance or token mint. No backend state kind, HTTP or startup hook is added.
+
+### OAuth-internal consent-session codec
+
+Sibling OAuth modules may call `ConsentSession::encode/decode`; no public serde or
+raw constructor is exposed. Version-1 private JSON accepts exactly `context`,
+`csrf_hash`, `expires_at_ms`, `version`. The context is canonical unpadded base64url
+of the private authenticated-context codec. The raw render token is never stored
+or recoverable from the hash. Wire limit: 96 KiB before JSON parsing; context text
+is capped before base64 decoding and decoded context bytes are limited to 64 KiB.
+Decode checks positive representable expiry through year 9999 and trusted current
+time, rejects ceilings beyond the original transaction deadline, revalidates current
+source ID/browser binding/policy/freshness, and takes the minimum of the stored
+session ceiling and recomputed context expiry. Relaxing policy never renews that ceiling.
+Fixed codec errors add TooLarge, InvalidRecord, UnsupportedVersion. This assumes
+trusted authenticated storage, not a MAC or fresh provider re-verification. No
+approved capability is decoded. Repeated trusted restores can recreate sessions;
+CSRF does not supply distributed single use. A future backend must atomically
+transition/consume the stored session. No persistence hook is wired in this slice.
 
 ## Typed access-token capability
 

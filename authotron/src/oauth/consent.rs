@@ -8,9 +8,21 @@
 
 //! Explicit in-process consent decisions; no persistence, authorization code or token issuance.
 
-use super::{context::AuthenticatedAuthorization, store::TransactionId};
+use super::{
+    context::{AuthenticatedAuthorization, MAX_AUTHENTICATED_CONTEXT_BYTES},
+    records::valid_time,
+    store::TransactionId,
+};
 use crate::{config::OAuthConfig, models::user::User};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "OAuth-internal consent persistence is not wired")
+)]
+pub(super) const MAX_CONSENT_SESSION_BYTES: usize = 96 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsentError {
@@ -18,6 +30,9 @@ pub enum ConsentError {
     InvalidDecision,
     InvalidContext,
     Unavailable,
+    TooLarge,
+    InvalidRecord,
+    UnsupportedVersion,
 }
 
 /// Secret render token only: no Debug, Clone, Serialize or public construction.
@@ -30,6 +45,18 @@ impl ConsentToken {
 
 pub struct ConsentSession {
     context: AuthenticatedAuthorization,
+    csrf_hash: [u8; 32],
+    expires_at_ms: u64,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "OAuth-internal consent persistence is not wired")
+)]
+struct ConsentDto {
+    version: u8,
+    context: String,
     csrf_hash: [u8; 32],
     expires_at_ms: u64,
 }
@@ -80,6 +107,81 @@ fn checked(
         .map_err(|_| ConsentError::InvalidContext)
 }
 impl ConsentSession {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "OAuth-internal consent persistence is not wired")
+    )]
+    pub(super) fn encode(&self) -> Result<Vec<u8>, ConsentError> {
+        let context = self
+            .context
+            .encode()
+            .map_err(|_| ConsentError::InvalidContext)?;
+        let dto = ConsentDto {
+            version: 1,
+            context: URL_SAFE_NO_PAD.encode(context),
+            csrf_hash: self.csrf_hash,
+            expires_at_ms: self.expires_at_ms,
+        };
+        let bytes = serde_json::to_vec(&dto).map_err(|_| ConsentError::InvalidRecord)?;
+        if bytes.len() > MAX_CONSENT_SESSION_BYTES {
+            return Err(ConsentError::TooLarge);
+        }
+        Ok(bytes)
+    }
+    /// Trusted authenticated storage only, not request JSON or a MAC. No approval is restored.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "OAuth-internal consent persistence is not wired")
+    )]
+    pub(super) fn decode(
+        bytes: &[u8],
+        source_id: &TransactionId,
+        config: &OAuthConfig,
+        browser_hash: &[u8; 32],
+        server_now_ms: u64,
+    ) -> Result<Self, ConsentError> {
+        use ConsentError::*;
+        if bytes.len() > MAX_CONSENT_SESSION_BYTES {
+            return Err(TooLarge);
+        }
+        let dto: ConsentDto = serde_json::from_slice(bytes).map_err(|_| InvalidRecord)?;
+        if dto.version != 1 {
+            return Err(UnsupportedVersion);
+        }
+        if dto.expires_at_ms == 0 || !valid_time(dto.expires_at_ms) {
+            return Err(InvalidRecord);
+        }
+        if !valid_time(server_now_ms) || server_now_ms >= dto.expires_at_ms {
+            return Err(InvalidContext);
+        }
+        if dto.context.len() > (MAX_AUTHENTICATED_CONTEXT_BYTES * 4).div_ceil(3) {
+            return Err(TooLarge);
+        }
+        let bytes = URL_SAFE_NO_PAD
+            .decode(&dto.context)
+            .map_err(|_| InvalidRecord)?;
+        if bytes.len() > MAX_AUTHENTICATED_CONTEXT_BYTES {
+            return Err(TooLarge);
+        }
+        if URL_SAFE_NO_PAD.encode(&bytes) != dto.context {
+            return Err(InvalidRecord);
+        }
+        let context =
+            AuthenticatedAuthorization::decode(&bytes, config, browser_hash, server_now_ms)
+                .map_err(|_| InvalidContext)?;
+        if !context.matches_source(&source_id.hash()) {
+            return Err(InvalidContext);
+        }
+        if dto.expires_at_ms > context.transaction().expires_at_ms() {
+            return Err(InvalidRecord);
+        }
+        let expires_at_ms = dto.expires_at_ms.min(context.expires_at_ms());
+        Ok(Self {
+            context,
+            csrf_hash: dto.csrf_hash,
+            expires_at_ms,
+        })
+    }
     /// Trusted server time and source ID only. Caller enforces Origin/CSRF request context.
     pub fn new(
         context: AuthenticatedAuthorization,
@@ -164,6 +266,165 @@ mod tests {
             AuthenticatedAuthorization::new_bound(source, identity, &[7; 32], &config, now)
                 .unwrap();
         (config, created.id, context, now)
+    }
+    #[tokio::test]
+    async fn private_codec_round_trip_keeps_hash_only_and_original_deadline() {
+        let (mut config, id, context, now) = fixture().await;
+        let (session, token) = ConsentSession::new(context, &id, &config, &[7; 32], now).unwrap();
+        let expiry = session.expires_at_ms;
+        let bytes = session.encode().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let mut names = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names.join(" "), "context csrf_hash expires_at_ms version");
+        assert!(
+            !std::str::from_utf8(&bytes)
+                .unwrap()
+                .contains(token.as_secret_str())
+        );
+        let restored = ConsentSession::decode(&bytes, &id, &config, &[7; 32], now).unwrap();
+        assert!(restored.encode().unwrap() == bytes);
+        let ConsentOutcome::Approved(approved) = restored
+            .decide(
+                token.as_secret_str(),
+                "approve",
+                &id,
+                &[7; 32],
+                &config,
+                now,
+            )
+            .unwrap()
+        else {
+            panic!("approval was not returned")
+        };
+        assert_eq!(approved.client_id(), "desktop");
+        assert_eq!(approved.scopes(), &["read"]);
+        config.max_authentication_age_seconds = 300;
+        let restored = ConsentSession::decode(&bytes, &id, &config, &[7; 32], now + 999).unwrap();
+        assert_eq!(restored.expires_at_ms, expiry);
+        assert_eq!(
+            ConsentSession::decode(&bytes, &id, &config, &[7; 32], expiry).err(),
+            Some(ConsentError::InvalidContext)
+        );
+        // A persisted longer-age session is tightened by current policy, without renewing its ceiling.
+        let mut value = value;
+        value["expires_at_ms"] = serde_json::json!(now + 10000);
+        let longer = serde_json::to_vec(&value).unwrap();
+        config.max_authentication_age_seconds = 1;
+        assert_eq!(
+            ConsentSession::decode(&longer, &id, &config, &[7; 32], now)
+                .unwrap()
+                .expires_at_ms,
+            now + 1000
+        );
+    }
+    #[tokio::test]
+    async fn private_codec_enforces_wire_bounds_shape_and_current_context() {
+        use ConsentError::*;
+        use serde_json::json;
+        let (config, id, context, now) = fixture().await;
+        let transaction_expiry = context.transaction().expires_at_ms();
+        let (session, _) = ConsentSession::new(context, &id, &config, &[7; 32], now).unwrap();
+        let bytes = session.encode().unwrap();
+        let original: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for (field, replacement, error) in [
+            ("version", json!(2), UnsupportedVersion),
+            ("csrf_hash", json!([1, 2]), InvalidRecord),
+            ("expires_at_ms", json!(0), InvalidRecord),
+            ("expires_at_ms", json!(u64::MAX), InvalidRecord),
+            (
+                "expires_at_ms",
+                json!(transaction_expiry + 1),
+                InvalidRecord,
+            ),
+            ("context", json!("%%%"), InvalidRecord),
+            (
+                "context",
+                json!(format!("{}=", original["context"].as_str().unwrap())),
+                InvalidRecord,
+            ),
+            (
+                "context",
+                json!(URL_SAFE_NO_PAD.encode(b"bad JSON")),
+                InvalidContext,
+            ),
+            (
+                "context",
+                json!(URL_SAFE_NO_PAD.encode(vec![b'x'; MAX_AUTHENTICATED_CONTEXT_BYTES + 1])),
+                TooLarge,
+            ),
+            ("token", json!("forbidden"), InvalidRecord),
+            ("approved", json!(true), InvalidRecord),
+        ] {
+            let mut value = original.clone();
+            value[field] = replacement;
+            assert_eq!(
+                ConsentSession::decode(
+                    &serde_json::to_vec(&value).unwrap(),
+                    &id,
+                    &config,
+                    &[7; 32],
+                    now
+                )
+                .err(),
+                Some(error),
+                "{field}"
+            );
+        }
+        let mut padded = bytes.clone();
+        padded.resize(MAX_CONSENT_SESSION_BYTES, b' ');
+        assert!(ConsentSession::decode(&padded, &id, &config, &[7; 32], now).is_ok());
+        padded.push(b' ');
+        assert_eq!(
+            ConsentSession::decode(&padded, &id, &config, &[7; 32], now).err(),
+            Some(TooLarge)
+        );
+        assert_eq!(
+            ConsentSession::decode(b"\xff", &id, &config, &[7; 32], now).err(),
+            Some(InvalidRecord)
+        );
+        assert_eq!(
+            ConsentSession::decode(&bytes, &id, &config, &[8; 32], now).err(),
+            Some(InvalidContext)
+        );
+        assert_eq!(
+            ConsentSession::decode(
+                &bytes,
+                &TransactionId::generate().unwrap(),
+                &config,
+                &[7; 32],
+                now
+            )
+            .err(),
+            Some(InvalidContext)
+        );
+        assert_eq!(
+            ConsentSession::decode(&bytes, &id, &config, &[7; 32], now + 1000).err(),
+            Some(InvalidContext)
+        );
+        assert_eq!(
+            ConsentSession::decode(&bytes, &id, &config, &[7; 32], u64::MAX).err(),
+            Some(InvalidContext)
+        );
+        let mut revoked = config.clone();
+        revoked.clients[0].resources.clear();
+        assert_eq!(
+            ConsentSession::decode(&bytes, &id, &revoked, &[7; 32], now).err(),
+            Some(InvalidContext)
+        );
+        let mut denied = config;
+        denied.resources[0].scopes[0]
+            .required_roles
+            .push("absent".into());
+        assert_eq!(
+            ConsentSession::decode(&bytes, &id, &denied, &[7; 32], now).err(),
+            Some(InvalidContext)
+        );
     }
     #[tokio::test]
     async fn only_explicit_checked_approval_returns_opaque_consent() {
