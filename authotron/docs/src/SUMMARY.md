@@ -17,6 +17,7 @@
 
 - [Overview](configuration/README.md)
 - [Server & Metrics](configuration/server.md)
+- [Login UI](configuration/ui.md)
 - [Providers](configuration/providers.md)
 - [Augmenters](configuration/augmenters.md)
 - [Token Store](configuration/store.md)
