@@ -22,6 +22,12 @@ _spec = importlib.util.spec_from_file_location(
 )
 preview = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(preview)
+_spec = importlib.util.spec_from_file_location(
+    "preview_private_paths",
+    Path(__file__).parents[1] / "kubernetes-login-preview/private_paths.py",
+)
+private_paths = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(private_paths)
 NAMESPACE = preview.NAMESPACE
 SECRET_NAME = "authotron-ecmwf-browser"
 PROVIDER = {
@@ -261,25 +267,13 @@ def private_fd(parent_fd, name, flags):
 
 
 def outside_git(path):
-    if ".." in Path(path).parts:
-        raise ValueError("private paths must not contain parent traversal")
-    path = Path(os.path.abspath(path))
-    if any(
-        (parent / ".git").exists() or (parent / ".git").is_symlink()
-        for parent in (path, *path.parents)
-    ):
-        raise ValueError("private files and output directories must be outside Git")
-    return path
+    return private_paths.outside_git(path)
 
 
 def checked_output_directory(path, project):
-    path = outside_git(path)
-    if path in {Path(os.path.abspath(project / name)) for name in preview.SOURCE_FILES}:
-        raise ValueError("private output collides with an archived source file")
-    for source in preview.SOURCE_DIRS:
-        if path.is_relative_to(Path(os.path.abspath(project / source))):
-            raise ValueError("private output must not be inside archived source")
-    return path
+    return private_paths.checked_private_path(
+        path, project, preview.SOURCE_FILES, preview.SOURCE_DIRS
+    )
 
 
 def checked_credential_path(path, project):
