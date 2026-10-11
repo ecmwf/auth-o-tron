@@ -623,6 +623,30 @@ impl ValkeyTransactionStore {
         )?;
         Ok(token)
     }
+    pub(super) async fn consent_context(
+        &self,
+        id: &TransactionId,
+        binding: &[u8; 32],
+    ) -> Result<AuthenticatedAuthorization, StoreError> {
+        let (now, expiry, bytes, _) = self.raw_read(id, Operation::ReadConsent).await?;
+        let session = ConsentSession::decode(&bytes, id, &self.config, binding, now)
+            .map_err(|_| StoreError::Unavailable)?;
+        if session.expires_at_ms() > expiry {
+            return Err(StoreError::Unavailable);
+        }
+        Ok(session.into_context())
+    }
+    pub(crate) async fn server_now_ms(&self) -> Result<u64, StoreError> {
+        let (sec, micro): (u64, u64) = self
+            .connection
+            .query(&redis::cmd("TIME"))
+            .await
+            .map_err(|_| StoreError::Unavailable)?;
+        sec.checked_mul(1000)
+            .and_then(|ms| ms.checked_add(micro / 1000))
+            .filter(|ms| micro < 1000000 && valid_time(*ms))
+            .ok_or(StoreError::Unavailable)
+    }
     async fn consent_decision(
         &self,
         id: &TransactionId,

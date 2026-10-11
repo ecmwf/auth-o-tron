@@ -75,6 +75,11 @@
     if (!source || !title || source.getAttribute("method")?.toLowerCase() !== "post" ||
         !fixedUrl(source.getAttribute("action"), selected)) return false;
     const names = selected === "/login/basic" ? ["csrf", "username", "password"] : ["csrf", "api_key"];
+    const transaction = source.querySelector('input[name="oauth_transaction"]');
+    if (transaction) {
+      if (transaction.type !== "hidden" || !/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(transaction.value)) return false;
+      names.push("oauth_transaction");
+    }
     const inputs = [...source.querySelectorAll("input")];
     if (inputs.length !== names.length || names.some((name) =>
       inputs.filter((input) => input.name === name).length !== 1)) return false;
@@ -91,8 +96,8 @@
       const original = inputs.find((input) => input.name === name);
       const input = document.createElement("input");
       input.name = name;
-      input.type = name === "csrf" ? "hidden" : name === "username" ? "text" : "password";
-      if (name === "csrf") {
+      input.type = ["csrf", "oauth_transaction"].includes(name) ? "hidden" : name === "username" ? "text" : "password";
+      if (input.type === "hidden") {
         input.value = original.value;
       } else {
         input.id = `login-dialog-${name}`;
@@ -178,9 +183,10 @@
       body = null;
       clearCredentials();
       const response = await pending;
-      if (response.ok && response.redirected && fixedUrl(response.url, "/login/account")) {
+      const destination = form.querySelector('input[name="oauth_transaction"]') ? "/oauth/continue" : "/login/account";
+      if (response.ok && response.redirected && fixedUrl(response.url, destination)) {
         succeeded = true;
-        window.location.assign("/login/account");
+        window.location.assign(destination);
         return;
       }
       if (!response.redirected && [400, 401, 403, 413].includes(response.status)) {

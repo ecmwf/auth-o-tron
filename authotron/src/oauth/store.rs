@@ -198,6 +198,27 @@ impl MemoryTransactionStore {
     ) -> Result<ConsentToken, StoreError> {
         self.prepare_consent_at(id, browser_hash, now_ms)
     }
+    pub(super) async fn consent_context(
+        &self,
+        id: &TransactionId,
+        binding: &[u8; 32],
+    ) -> Result<AuthenticatedAuthorization, StoreError> {
+        let entries = self.entries.lock().map_err(|_| StoreError::Unavailable)?;
+        let now = now_ms()?;
+        let stored = entries
+            .get(&id.hash())
+            .filter(|stored| stored.expires_at_ms > now)
+            .ok_or(StoreError::Missing)?;
+        if !matches!(stored.kind, StoredKind::ConsentReady) {
+            return Err(StoreError::Missing);
+        }
+        let session = ConsentSession::decode(&stored.bytes, id, &self.config, binding, now)
+            .map_err(|_| StoreError::Unavailable)?;
+        if session.expires_at_ms() > stored.expires_at_ms {
+            return Err(StoreError::Unavailable);
+        }
+        Ok(session.into_context())
+    }
     pub async fn decide_consent(
         &self,
         id: &TransactionId,

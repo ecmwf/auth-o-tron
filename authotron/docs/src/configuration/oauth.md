@@ -1,777 +1,252 @@
-# OAuth configuration foundation
+# OAuth authorization server
 
-OAuth/MCP authorization-server support is **not implemented yet**. The v2
-`oauth` section reserves and validates configuration for future work. Setting
-`enabled: true` fails startup with an Unsupported error, before browser, network,
-or store initialization. It does not activate any endpoints or metadata.
+Auth-O-Tron implements an **opt-in OAuth 2.0 public-client authorization-code flow
+with S256 PKCE**. Preregistered MCP/native clients can authenticate through the
+branded Basic or ECMWF API-key forms, explicitly approve resource scopes, and exchange
+a one-use code for a signed access token. Memory and shared Valkey backends are supported.
 
-Omitting this section (including migrated v1 configurations) keeps OAuth disabled.
+OAuth is disabled by default. Disabled OAuth registers none of the routes below and
+does not load OAuth keys or connect an OAuth backend. Existing CLI authentication,
+legacy HMAC tokens, browser sessions and `/login/account` remain separate.
+
+## Readiness and configuration
+
+Enabled OAuth requires:
+
+- Enabled UI with at least one configured direct Basic/API-key provider.
+- Valid browser-session settings and an explicitly selected Memory or Valkey backend.
+- A root HTTPS issuer whose origin matches `ui.browser_session.public_origin`.
+- Nonempty preregistered client/resource policy and usable RS256 signing keys.
+
+Configuration checks precede OAuth file/network initialization. Startup fails closed
+on missing settings, unusable keys or backend connection failure, without fallback.
+Serve the application behind HTTPS at the configured public origin: the application
+listener itself does not terminate TLS. Request Host/forwarded headers do not select
+issuer, callbacks, providers or cookie authority. The literal issuer spelling,
+including an optional root trailing slash, is preserved in metadata, responses and JWTs.
+
+Merge this complete OAuth/direct-login fragment into your existing v2 server configuration:
 
 ```yaml
+providers:
+  - type: ecmwf-api
+    name: ECMWF API Provider
+    realm: ecmwf
+    uri: https://api.ecmwf.int/v1
+augmenters:
+  - type: plain
+    name: MCP access
+    realm: ecmwf
+    roles:
+      reader: [allowed-account-uid]
+ui:
+  enabled: true
+  branding:
+    application_name: MCP sign-in
+  ecmwf_api_key:
+    provider_name: ECMWF API Provider
+  browser_session:
+    public_origin: https://auth.example.org
+    backend:
+      type: memory # explicit development-only, single-instance storage
 oauth:
-  enabled: false
-  issuer: "https://login.example.org"
-  authorization_code_ttl_seconds: 60
-  access_token_ttl_seconds: 300
-  authorization_transaction_ttl_seconds: 300
-  max_authorization_transactions: 1024
-  max_authorization_codes: 1024
-  max_authentication_age_seconds: 300
-  authentication_clock_skew_seconds: 30
-  clients: []
-  resources: []
+  enabled: true
+  issuer: https://auth.example.org/
+  signing:
+    active_kid: signing-2026
+    keys:
+      - kid: signing-2026
+        private_key_file: /run/secrets/oauth/active.pem
+  clients:
+    - client_id: mcp-desktop
+      display_name: MCP Desktop
+      application_type: native
+      redirect_uris: ["http://127.0.0.1:49152/callback"]
+      resources:
+        - resource: https://mcp.example.org/mcp
+          scopes: [mcp:read]
+  resources:
+    - resource: https://mcp.example.org/mcp
+      allowed_realms: [ecmwf]
+      scopes:
+        - name: mcp:read
+          required_roles: [reader]
 ```
 
-| Setting | Default | Validation |
+For Basic, configure your existing selected Basic-capable provider and add
+`ui.basic: {provider_name: YOUR_PROVIDER_NAME}`. Both direct methods may coexist;
+submitted fields cannot select another provider or realm. OAuth uses fresh verification
+and **strict** augmentation, never a cached best-effort browser session.
+
+For shared replicas, replace the browser backend with:
+
+```yaml
+backend:
+  type: valkey
+  url: rediss://valkey.example.org:6379/0
+  key_prefix: authotron
+  password: "" # inject using AOT_UI__BROWSER_SESSION__BACKEND__PASSWORD
+  connect_timeout_ms: 2000
+  operation_timeout_ms: 1000
+```
+
+Keep issuer, policy, signing configuration, prefixes and capacity limits coherent
+across replicas. Only one primary is supported; Cluster/Sentinel discovery and
+automatic fallback are not implemented. Backend durability depends on its configuration.
+
+## HTTP endpoints
+
+| Route | Contract |
+| --- | --- |
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 metadata with literal issuer, authorization/token endpoints, JWKS URI, code grant, public-client `none` authentication and S256 |
+| `GET /oauth/jwks` | Public RSA JWKs only: `kty`, `alg`, `use`, `kid`, `n`, `e` |
+| `GET /oauth/authorize` | Strict bounded authorization query; creates a browser-bound transaction and redirects to `/login` |
+| `GET /login/basic`, `/login/ecmwf-api-key` | Existing modal/native forms capture the current OAuth transaction ID in a server-rendered hidden field |
+| `POST` to the selected login form | Single trusted Origin, one-use flow CSRF, exact hidden-ID/cookie match and pending lookup before fresh strict verification; promotes authenticated state and redirects to fixed `/oauth/continue` |
+| `GET /oauth/continue` | Always a local consent page, not an automatic callback redirect; refresh rotates the challenge |
+| `POST /oauth/consent` | Explicit approve/deny with Origin, transaction binding and consent CSRF; atomic code issuance or denial, then 303 to the registered callback |
+| `POST /oauth/token` | Backchannel public-client code exchange with exact callback/resource and PKCE; atomic redemption followed by the proof-consuming signing bridge |
+
+These routes are absent on the metrics router. Existing HTTP route/status metrics and
+direct-login admission/deadline metrics cover the flow without identity, URL, state,
+code or token labels. Metadata advertises no registration endpoint or refresh grant.
+
+## Client flow
+
+Generate a fresh verifier and S256 challenge for each authorization attempt. For example:
+
+```sh
+VERIFIER="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
+CHALLENGE="$(printf '%s' "$VERIFIER" | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')"
+```
+
+Open the following authorization URL in the browser, inserting the generated challenge
+and a fresh client-generated `state` value:
+
+```text
+https://auth.example.org/oauth/authorize?client_id=mcp-desktop&redirect_uri=http%3A%2F%2F127.0.0.1%3A49152%2Fcallback&response_type=code&resource=https%3A%2F%2Fmcp.example.org%2Fmcp&scope=mcp%3Aread&state=CLIENT_STATE&code_challenge=CHALLENGE&code_challenge_method=S256
+```
+
+The client must verify the callback `state` and exact `iss`, then exchange its code:
+
+```sh
+curl --fail-with-body https://auth.example.org/oauth/token \
+  --data-urlencode 'grant_type=authorization_code' \
+  --data-urlencode 'client_id=mcp-desktop' \
+  --data-urlencode "code=$CODE" \
+  --data-urlencode 'redirect_uri=http://127.0.0.1:49152/callback' \
+  --data-urlencode 'resource=https://mcp.example.org/mcp' \
+  --data-urlencode "code_verifier=$VERIFIER"
+```
+
+Success is JSON containing only `access_token`, `token_type: Bearer`, `expires_in`
+and `scope`. Responses use `Cache-Control: no-store`, `Pragma: no-cache` and `nosniff`.
+The token endpoint requires no cookie or Origin, does not accept Basic client
+authentication, and supports only `authorization_code`. Mandatory fields and known
+duplicates are checked within an 8 KiB/32-field form bound; unknown token fields are
+ignored and cannot override scopes, resource or expiry. Fixed JSON errors are
+`invalid_request`, `invalid_client`, `invalid_grant`, `unsupported_grant_type` and
+`server_error`, without backend diagnostics. Invalid verifier/request bindings preserve
+an unexpired code; replay after successful redemption fails. Signing failure after
+redemption does not restore the code or permit proof retry.
+
+Authorization-gate failures stay local, never redirecting to submitted callbacks.
+Valid denial redirects with `error=access_denied`, original state and issuer, without
+a code. Approvals redirect with code/state/issuer only, never an access token. Static
+registered callback queries are retained. OAuth cookies are cleared after a valid decision.
+
+## Binding and browser protections
+
+Two `__Host-` cookies carry a random browser nonce and opaque transaction ID, with
+Secure, HttpOnly, SameSite=Lax and Path=/; only nonce/ID hashes index persisted state.
+The hidden transaction field must match the current transaction cookie. Missing,
+duplicate, malformed or switched OAuth context is rejected, never falling back to
+ordinary browser authentication. Stale forms from another tab cannot authenticate
+a new client's request. Without OAuth context, the existing `/login/account` flow
+retains its normal behavior.
+
+Credential and consent pages escape all configured/client/identity text. They do not
+render client state or tokens. Modal JavaScript whitelists the optional canonical
+transaction field and navigates only to literal same-origin `/oauth/continue` or
+`/login/account`. Native POST fallback remains supported. Consent alone uses a native
+POST redirect; its CSP allows self plus the registered callback origin because browsers
+can enforce form-action on redirects. Scripts/resource loads remain restricted, and
+external branding is suppressed on credential/consent pages. Browser cross-origin token
+CORS is disabled; cross-origin public SPAs are not supported in this baseline.
+
+## Policy, time and storage
+
+Requests require exact client/callback/resource and all requested scopes. There is no
+URI aliasing, partial consent, first-party skip or variable native loopback-port matching.
+Web callbacks require HTTPS; native callbacks additionally permit literal HTTP loopback
+with an explicit fixed port. Callback userinfo/fragments/control characters and reserved
+response query names are rejected. Resource URIs are canonical HTTPS and explicitly
+bound to each client. Eligible identity must have an allowed realm and every required
+role; attributes and preexisting user scopes never grant permissions.
+
+| Setting | Default | Bound |
 | --- | --- | --- |
-| `enabled` | `false` | Enablement is currently unsupported |
-| `issuer` | absent | Required when enabled; absolute HTTPS origin only |
-| `authorization_code_ttl_seconds` | `60` | 30–300 seconds inclusive |
-| `access_token_ttl_seconds` | `300` | 60–3600 seconds inclusive |
-| `authorization_transaction_ttl_seconds` | `300` | 30–900 seconds inclusive |
-| `max_authorization_transactions` | `1024` | 1–100000 records inclusive |
-| `max_authorization_codes` | `1024` | 1–100000 code records inclusive, separate from transactions |
-| `max_authentication_age_seconds` | `300` | 1–3600 seconds inclusive |
-| `authentication_clock_skew_seconds` | `30` | 0–60 seconds inclusive |
-
-Unknown OAuth fields are rejected. Supplied issuers and TTLs are validated even
-when disabled. Issuers must have no userinfo, query, fragment, whitespace, or
-control characters. An optional trailing `/` is allowed; issuer URI paths such as
-`https://login.example.org/oauth` are unsupported in this origin-only baseline.
-Future authorization endpoints must use a consistent, available public HTTPS origin.
-
-## Local public-client preregistration
-
-`oauth.clients` defaults to an empty list, including for migrated v1 settings.
-Up to 64 public clients may be preregistered locally; this is not dynamic client
-registration. All entries are validated even when OAuth is disabled.
-
-```yaml
-clients:
-  - client_id: mcp-desktop
-    display_name: MCP Desktop
-    application_type: native
-    redirect_uris: ["http://127.0.0.1:49152/callback?installation=desktop"]
-```
-
-Each entry requires `client_id` (1–128 ASCII bytes: letters, digits, `.`, `_`, `-`),
-a nonblank, control-free `display_name` (at most 128 UTF-8 bytes), and 1–8
-`redirect_uris` (at most 2048 bytes each). IDs must be unique, and URL client IDs
-(CIMD) are unsupported. Unknown fields, including secrets and authentication
-methods, are rejected. These are public clients with fixed token endpoint
-authentication semantics of `none`; confidential clients/BFFs are deferred.
-
-`application_type` uses OpenID Connect terminology: `web` (default) or `native`.
-Both allow absolute HTTPS callbacks with a host. Only `native` additionally allows
-HTTP to literal `127.0.0.1` or `[::1]` with an explicit nonzero port. HTTP callbacks
-using DNS localhost or other IPs, and callbacks using custom schemes, are
-unsupported. Callbacks forbid userinfo,
-fragments, backslashes, raw whitespace/control characters, and invalid ports.
-Static queries are allowed except for response names `code`, `state`, `iss`,
-`error`, `error_description`, and `error_uri` (including percent-encoded names).
-Callback strings are retained verbatim for future exact matching of the complete
-URI, including port, path and query; there is no variable-port exemption.
-
-## Explicit resource/scope policy
-
-Both `oauth.resources` and each client's `resources` default to `[]`; a client
-without an explicit binding receives no grants. Example under `oauth`:
-
-```yaml
-resources:
-  - resource: https://mcp.example.org/mcp
-    allowed_realms: [ecmwf, local]
-    scopes:
-      - name: notifications:read
-        required_roles: [reader]
-# Add this binding to a preregistered client's entry:
-# resources:
-#   - resource: https://mcp.example.org/mcp
-#     scopes: [notifications:read]
-```
-
-Resources must be canonical absolute HTTPS URLs (lowercase scheme/host; no
-userinfo, query, fragment, whitespace, backslash, or explicit default port).
-Strings are retained exactly; paths/trailing slashes are distinct, with no prefix matching.
-Root resources may be registered with or without a trailing slash, as permitted
-by RFC 8707; clients must still request the exact form that was registered.
-Limits: 64 resources/bindings, 2048 URI bytes, 1–16 unique realms (1–128 ASCII bytes,
-letters/digits/`._-`), 1–32 unique scopes (1–64 RFC 6749 scope-token bytes), and
-0–32 unique required roles per scope (nonblank, control-free, ≤128 UTF-8 bytes).
-Unknown fields, duplicates and dangling references fail validation even when disabled.
-`authorize_scopes` assumes fresh verification and trusted successful augmentation;
-it does not authenticate or repair upstream fail-open augmentation. Callers must
-bound identity role data before evaluation. A bounded
-nonblank username, allowed realm, exact client binding and **all** required roles
-are required. Empty roles still require that authenticated realm. Attributes and
-existing user scopes never grant permissions. Requests require 1–32 unique valid
-scopes; failures reject the whole request, and success retains request order.
-Fixed errors distinguish invalid configuration/client/resource/scope and access denial.
-
-## RS256 signing references
-
-`oauth.signing` is optional and defaults to absent. Configuration validation checks
-**references only** and performs no file I/O. The key manager loads only on an
-explicit `oauth::keys::KeyManager::load` call; startup does not invoke it.
-Supplying references is allowed while OAuth is disabled. Example under `oauth`:
-
-```yaml
-signing:
-  active_kid: signing-2026-10
-  keys:
-    - kid: signing-2026-10
-      private_key_file: /run/secrets/oauth/active.pem
-    - kid: signing-2026-09
-      public_key_file: /run/secrets/oauth/previous-public.pem
-```
-
-There must be 1–8 keys with unique IDs of 1–64 ASCII bytes (letters, digits,
-`.`, `_`, `-`). `active_kid` must select a key with a private file reference.
-Inactive keys may reference a public file, a private file, or both; a private-only
-key is intended to provide its derived public key. References must be absolute
-UTF-8 paths of at most 4096 bytes without control characters and with a filename
-component; `/` is rejected. This is not a regular-file or existence check. Path
-constraints are runtime-only; JSON Schema string lengths cannot express UTF-8
-byte limits. Paths are trusted
-admin configuration, never request-selected. Inline key material, algorithm
-selection, and unknown fields are rejected.
-
-The Unix loader accepts PKCS8/PKCS1 private PEM and SPKI/PKCS1 public PEM, enforcing
-2048–4096-bit RSA, private-key consistency, and matching public/private modulus and
-exponent when both files are supplied. It derives missing public keys and preserves
-configured key order, including inactive public-only rotation keys. Loads are
-all-or-nothing. Nonblocking opens follow mounted Secret projected symlinks and
-check the opened target is regular; reads are bounded to 16 KiB plus one overflow
-byte before PEM parsing. Loader-owned temporary PEM read buffers are zeroized.
-Dependency parsing is not claimed to wipe every intermediate allocation. Errors contain fixed
-classes/messages without paths, key contents, or underlying crypto errors.
-Private manager state has no Debug/Serialize or public signing API. The internal
-signing capability is limited to sibling OAuth modules, with a load-time RS256
-sign/verify consistency probe (not an access token). Public JWKS serialization
-contains only `kty`, `alg`, `use`, `kid`, `n`, and `e`; integers are unpadded
-base64url. This is an in-process capability, not an HTTP JWKS endpoint.
-Missing signing config does not replace the current Unsupported startup guard;
-a future operational authorization server must require usable signing keys.
-No automatic reload or rotation is implemented. Future deployments must coordinate
-active-key changes across replicas and retain old public keys through the longest
-issued access-token lifetime plus clock skew before retirement.
-
-## Strict augmentation precursor
-
-`Auth::check_augmenters_strict(user, &metrics)` is available in-process and returns
-`Result<User, AugmentationError>`. It applies the existing exact realm filter,
-runs ordinary matching augmenters in parallel, waits for all of them, then runs
-`plain_advanced` augmenters sequentially in configuration order. Any ordinary
-failure prevents the advanced phase; an advanced failure stops that sequence.
-Failures discard the identity result, including mutations made before an error.
-Fixed errors are `Failed` and `Unavailable` (identity ownership could not be recovered).
-Strict pipeline failure logs use a fixed diagnostic; attempt/duration metrics
-remain once per normally completed augmenter. Panics are not caught by this helper.
-Built-in implementation logging is documented in [Augmenters](augmenters.md);
-third-party implementations remain responsible for their own log contents.
-Legacy best-effort augmentation retains its
-existing partial-mutation, logging and continuation behavior. Callers still own
-fresh credential verification, deadlines and bounded identity projection. This
-helper is not authentication, consent or grant proof. The OAuth verification
-capability below uses it, while browser routes remain best-effort and OAuth startup remains Unsupported.
-
-## Strict OAuth credential-verification capability
-
-`oauth::authentication::verify_identity(credentials, &browser_state, &auth, &metrics)`
-returns an opaque `VerifiedOAuthIdentity` or fixed Rejected/Limited/Timeout/Unavailable
-errors. Fresh selected Basic/API-key verification, strict augmentation and OAuth
-projection run through the existing single admission/deadline pipeline: local-first
-permits, shared quotas/optional leases and the in-flight RAII gauge are reused.
-One strict-helper deadline starts at entry and covers lease release and proof
-construction too. Late completion returns Timeout, not a proof or a cleanup error.
-Tokio deadlines are cooperative, not hard real-time. Cancellation releases local
-permits/gauge immediately; bounded detached cleanup or expiry may release shared
-leases later, so this is not remote-provider fencing. Legacy browser cleanup is unchanged.
-API-key verification is uncached; Basic credential encoding preserves Unicode passwords.
-Only server code selects strict mode; no submitted field controls provider or mode.
-OAuth names/realm are nonblank, control-free and ≤128 UTF-8 bytes; roles are at most
-64 entries of the same text bound. Attributes and existing user scopes are discarded.
-The proof has no public constructor, Deserialize, Serialize, Debug or Clone; `as_user`
-is read-only. `verified_at_ms` records checked trusted server time after verification
-completes, through year 9999; it is not a caller timestamp or a max-age decision.
-Callers must check Origin/CSRF and the bound OAuth transaction before invoking this.
-The proof is credential verification only: consent, resource policy, code/grant proof
-and future age checks remain separate. No session/cookie or code is created. Existing
-browser verification retains best-effort augmentation, 256-byte names and display
-attributes. No HTTP integration or startup enablement is implemented.
-
-## Authenticated authorization context
-
-`oauth::context::AuthenticatedAuthorization::new` consumes an owned transaction and
-opaque `VerifiedOAuthIdentity`, with the browser-binding hash, current OAuth config,
-and trusted server/backend time in Unix milliseconds. It accepts no raw User and
-has no Debug, Clone, public serialization or field mutation. The transaction codec revalidates
-the unexpired transaction/current request; binding and all requested-scope role/realm
-policy must pass before construction. It owns the existing bounded proof without
-copying identity fields or retaining attributes/scopes from credentials.
-Read-only getters expose `transaction`, `as_user`, `verified_at_ms`,
-`authorized_scopes` (eligible, not consented), and `expires_at_ms`.
-Identity age expires at exactly `verified_at_ms + max_authentication_age_seconds`;
-clock skew permits a future verification timestamp only within the configured bound.
-Skew adds no grace to that age deadline; accepted future timestamps can leave up to
-max-age plus skew relative to backend time. Context expiry is the minimum of that
-deadline and transaction expiry. Clocks must be synchronized across replicas.
-Fixed errors distinguish Configuration, InvalidTime, InvalidTransaction, Binding,
-StaleIdentity and AccessDenied, without identity data. Callers still enforce
-Origin/CSRF, and must recheck current policy/freshness at future issuance. This is
-in-process policy eligibility only: development-memory persistence is described
-below alongside explicit shared Valkey authenticated persistence. Durability
-depends on backend configuration. Explicit consent and atomic decision completion
-in memory and shared Valkey are described below, alongside atomic code issuance.
-Memory redemption and its signing bridge are described below; HTTP/startup
-integration remains unimplemented.
-
-### OAuth-internal authenticated-context codec
-
-`AuthenticatedAuthorization::encode/decode` are restricted to sibling OAuth modules,
-not external callers or request JSON. Version-2 private JSON accepts only username,
-realm, roles, verification time, a canonical unpadded base64url transaction blob,
-and nullable `source_transaction_id_hash`. Version 1 is rejected; no compatibility migration is provided.
-There are no attributes, user scopes, consent flags, stored authorized-scope lists,
-or derived expiry claims. The wire limit is 64 KiB, checked before JSON parsing;
-decoded transaction bytes are capped at 16 KiB before the transaction codec runs.
-Identity bounds use the fresh-verification projection validator before allocating
-the restored User. Decode recomputes binding, current request/realm/role eligibility,
-age/skew and minimum expiry through the context constructor.
-This requires trusted authenticated backend storage: it is not a MAC or proof of
-fresh provider execution. OAuth-internal snapshot restoration does not rerun
-providers/augmenters, so verification-time roles remain a revocation window until
-authentication age expires; current policy is still rechecked. Deserialization
-allocations are wire-bounded, not an end-to-end hard memory guarantee. Fixed codec
-errors add TooLarge, InvalidRecord and UnsupportedVersion. The development-memory
-and Valkey stores below use this private codec; no HTTP flow is wired.
-
-## Explicit in-process consent
-
-`oauth::consent::ConsentSession::new(context, source_id, config, browser_hash, now_ms)`
-requires a source-bound, unexpired authenticated context and rechecks current policy
-and browser binding before returning a session and secret `ConsentToken`.
-The token is canonical 43-character base64url from 32 OS-random bytes; only its
-SHA-256 hash is retained in the session. Render via `as_secret_str`, never URLs/logs.
-`decide` consumes the owned session, accepts only exact `approve` or `deny`, checks
-canonical submitted CSRF and constant-time hash equality, then rechecks source ID,
-binding, context time/freshness and all current requested-scope policy. Missing or
-unknown decisions never autoapprove. Approve returns opaque `ConsentedAuthorization`
-with read-only identity/scope/client/resource/callback/time getters; deny returns
-only a Denied marker. There is no partial scope selection or first-party skip.
-Session/approval expiry cannot extend the original checked context deadline, even
-if policy is relaxed later. These types have no public raw constructors, Clone,
-Debug or serde traits. Fixed errors are InvalidToken, InvalidDecision, InvalidContext,
-Unavailable. Callers still enforce Origin, strict duplicate/unknown-field request
-parsing and bound request context. Standalone sessions use Rust ownership for single
-use; the stores below add atomic decision completion within one memory instance or
-across replicas sharing Valkey. Standalone sessions provide no cross-pod replay
-guarantee or remote fencing. Consent is not an authorization code, grant issuance
-or token mint. No HTTP or startup hook is wired.
-
-### OAuth-internal consent-session codec
-
-Sibling OAuth modules may call `ConsentSession::encode/decode`; no public serde or
-raw constructor is exposed. Version-1 private JSON accepts exactly `context`,
-`csrf_hash`, `expires_at_ms`, `version`. The context is canonical unpadded base64url
-of the private authenticated-context codec. The raw render token is never stored
-or recoverable from the hash. Wire limit: 96 KiB before JSON parsing; context text
-is capped before base64 decoding and decoded context bytes are limited to 64 KiB.
-Decode checks positive representable expiry through year 9999 and trusted current
-time, rejects ceilings beyond the original transaction deadline, revalidates current
-source ID/browser binding/policy/freshness, and takes the minimum of the stored
-session ceiling and recomputed context expiry. Relaxing policy never renews that ceiling.
-Fixed codec errors add TooLarge, InvalidRecord, UnsupportedVersion. This assumes
-trusted authenticated storage, not a MAC or fresh provider re-verification. No
-approved capability is decoded. Repeated trusted restores can recreate sessions;
-CSRF does not supply distributed single use. The memory and shared Valkey stores
-below atomically transition/consume the stored session.
-
-## Consent-derived code-grant capability
-
-`oauth::code_grant::CodeGrant::from_consent(approval, config, source_id, browser_hash,
-server_now_ms)` consumes an opaque `ConsentedAuthorization` from checked explicit
-approval. It accepts no raw User, consent boolean or request-selected timestamp.
-The source ID and browser hash are trusted server inputs. Construction rechecks
-the actual source-ID hash, binding, current registry/callback/resource/scope policy
-and identity age through the bounded private authenticated-context codec. This
-restores the verified snapshot; it does not rerun providers or augmenters.
-
-Expiry is the minimum of trusted construction time plus `authorization_code_ttl_seconds`
-(default 60, range 30–300), the approval ceiling and the recomputed context deadline.
-Policy relaxation cannot extend approval or an existing grant. Read-only getters
-expose the proved identity, all consented requested scopes, exact client/callback/
-resource, opaque client state, S256 challenge and verification/issue/expiry times.
-Client state remains untrusted text, never identity or a logging field. No raw
-credentials or plaintext verifier are retained. The type has private fields and
-no Debug, Clone, Serialize, Deserialize or raw-identity constructor.
-
-`validate_redemption` is a pure check returning only `Result<(), CodeGrantError>`.
-It requires exact client ID, callback (including native loopback port), mandatory
-resource and a valid S256 verifier, then rechecks current registry and role/realm/
-scope policy and freshness. Time before issuance is InvalidTime (no skew allowance);
-time at or after code expiry is Expired. Errors are fixed Configuration, InvalidTime,
-InvalidContext, Expired and InvalidRedemption, without submitted values. Checks do
-not consume the grant and supply no token-signing proof: a future backend must
-atomically consume a one-use code before returning issuance authority. Code handles
-and stored envelopes are described below; Memory issuance is available explicitly,
-alongside one-use Memory redemption and its signing bridge; HTTP integration
-remains a future slice.
-This capability is explicitly usable with OAuth disabled; startup remains Unsupported.
-
-### OAuth-internal code-grant codec
-
-`CodeGrant::encode/decode` are restricted to sibling OAuth modules. Version-1 private
-JSON rejects unknown fields and contains only `version`, canonical unpadded base64url
-`context`, 32-byte `source_hash` and `browser_hash`, `issued_at_ms` and `expires_at_ms`.
-The context uses the private authenticated-context codec, not a raw User, arbitrary
-scope list or serialized consent capability. Wire limit: 96 KiB before JSON parsing;
-context text is capped before base64 decoding, with a 64 KiB decoded-context limit
-before context parsing and canonical re-encoding checks.
-
-Decode requires positive representable metadata times through year 9999, issuance
-no later than trusted server time (no skew allowance), expiry after issuance and
-current time, a stored window of at most 300 seconds and no expiry beyond the source
-transaction deadline. It checks cached source/browser hashes, current registry,
-policy and identity freshness. Effective expiry is the minimum of stored expiry,
-issuance plus **current** code TTL and recomputed context expiry. Tightening policy
-can shorten expiry; relaxation cannot extend the stored ceiling. Access-token TTL
-is independent. Fixed codec errors add TooLarge, InvalidRecord and UnsupportedVersion.
-
-The authenticated backend record asserts that explicit approval already occurred
-under checked Origin, request context, binding and consent nonce. This is not a MAC,
-fresh provider verification or protection against compromised storage. Cached hashes
-are server data, not token-request parameters; redemption requires no browser cookie
-or source ID. Decode does not reconstruct `ConsentedAuthorization` and grants no
-code-minting, one-use or token-issuance authority. Repeated trusted restores remain
-possible: redemption validation and successful atomic backend code consumption must
-precede token issuance. The grant codec itself contains no code-handle hash.
-`StoredCode` supplies that association for the trusted in-memory envelope; future
-persistence must preserve it with the exact payload and expiry metadata.
-Namespaces require coherent issuer/config snapshots.
-
-## Typed access-token capability
-
-`oauth::tokens::TokenIssuer::new(&config, &key_manager)` validates config, requires
-an issuer (≤2048 bytes), and matches supplied signing references to the manager's
-loaded snapshot. `issue_access_token` accepts a client, exact resource, requested
-scopes and freshly verified user. Callers must enforce trusted successful augmentation,
-consent and a server-owned grant/code proof; this helper performs none of those checks.
-It works in-process with OAuth disabled; no HTTP issuance exists.
-Issuance re-runs policy, bounds identity fields to 128 control-free UTF-8 bytes and
-roles to 64 entries of 128 bytes each. Header: RS256, `typ: at+jwt`, active `kid`.
-Claims: `iss`, `sub`, `aud`, `iat`, `exp`, `jti`, `client_id`, `scope`, `roles`.
-Issuer spelling and audience resource are exact. Subject is `urn:authotron:subject:`
-plus base64url SHA-256 of length-prefixed issuer/realm/username; stable, not anonymous.
-Roles are only the unique required-role union for granted scopes; usernames, realms,
-unrelated roles, attributes, emails, user scopes and credentials are omitted.
-Scope order is preserved. Server-clock time and checked configured TTL determine
-expiry (through year 9999); `jti` is UUIDv4. Wire limit: 32 KiB. Non-Debug responses
-serialize only `access_token`, `token_type: Bearer`, `expires_in`, `scope`; no refresh.
-Errors are fixed configuration/identity/policy/time/signing/size classes. Consumers
-must enforce `at+jwt`, RS256, expected issuer/audience; a complete MCP validator is future work.
-
-### Signing from atomic code redemption
-
-`TokenIssuer::issue_from_redeemed(redeemed)` consumes opaque `RedeemedAuthorization`
-returned only after successful atomic code removal. It accepts no client, resource,
-scope, User or expiry overrides. The proof's literal store issuer must equal the
-issuer's configured spelling exactly, including any trailing slash. The existing
-constructor's borrowed validated keys and signing-reference matching remain required.
-
-After redemption, the bridge samples current trusted server time in milliseconds
-and revalidates the private grant codec against the issuer's current config. It
-enforces tightened code TTLs, rejecting at or beyond the resulting deadline.
-Time before issuance, stale identity, and revoked registry/callback/resource/scope/role
-policy are also rejected. Proof issuer
-or grant revalidation failures return fixed `TokenError::Redemption`; clock acquisition
-and existing issuance failures retain Time/Identity/Policy/Signing/Size classes.
-The common signer rechecks identity bounds and shared scope policy, preserves the
-exact stored client/resource/scopes and required-role-only projection, and emits the
-existing RS256 `at+jwt` response with active `kid`, stable subject and 32 KiB wire cap.
-Failures return no token: the code remains consumed and the owned proof is not retryable.
-Neither the raw code nor its verifier is retained by the bridge.
-
-Access-token expiry uses configured access TTL, independently of the short code,
-consent and authentication deadlines checked before issuance. A valid access token
-can therefore outlive those deadlines; verified-role snapshots and token lifetime
-remain revocation windows, not fresh upstream provider checks. Future OAuth endpoints
-must use atomic redemption followed by this bridge, rather than the trusted-caller
-`issue_access_token` helper. Upstream Origin, consent, binding and fresh-verification
-checks remain required. This capability is explicitly in-process with OAuth disabled;
-no HTTP endpoint, refresh token or startup enablement is added.
-
-## Authorization-request input gate
-
-`oauth::authorization::validate_authorization_request(&config, raw_query_bytes)`
-is a pure gate usable while OAuth is disabled, requiring valid config and an issuer.
-Queries are bounded to 8 KiB/32 parameters, with strict percent escapes/UTF-8 and
-`+` decoded as space. Unknown parameters are ignored and never retained as identity,
-roles, scopes or redirects. Known duplicates fail, including multiple `resource` values.
-Required: explicit `client_id`, exact `redirect_uri` (even for one callback),
-`response_type=code`, one exact registered/bound `resource`, `scope`, challenge and S256 method.
-No URI normalization/aliases. Scope: 1–32 unique RFC 6749 tokens separated by single
-ASCII spaces, client/resource-bound; role eligibility requires fresh identity later.
-Optional opaque `state` retains decoded text, ≤1024 UTF-8 bytes without controls.
-It remains untrusted client text: do not log it or interpret it as identity or
-authorization metadata.
-Challenge: canonical unpadded base64url SHA-256 (43 characters/32 bytes). Immutable
-`challenge().verify` requires 43–128 unreserved ASCII verifier bytes and compares
-digests in constant time. Successful requests have immutable getters, not login,
-consent or grant proof. Fixed-error failures **stay local; never redirect to raw
-submitted callbacks**. Error-redirect routing, extensions, authorization HTTP routes,
-and HTTP code issuance remain future work. Explicit development-memory and shared Valkey
-transaction APIs are described below; neither is wired into an HTTP flow.
-
-## Authorization-transaction record codec
-
-`oauth::records::AuthorizationTransaction::new` owns a validated request, a
-32-byte browser-binding hash (not a raw cookie), and trusted absolute expiry in
-Unix milliseconds. Version-1 JSON contains only client ID, callback, resource,
-scopes, opaque state, S256 challenge digest, binding digest, expiry and version.
-The record/DTO have no Debug or public Deserialize; state remains untrusted text,
-never identity or a logging field. No identity, consent flag, grant or code is stored.
-`encode`/`decode` enforce a 16 KiB wire cap; decode checks it before JSON parsing.
-The canonical reconstructed known query must also fit the 8 KiB request gate,
-including at construction, so persisted records can round-trip without loosening validation.
-Decode rejects unknown fields/versions, malformed timestamps, expiry at or before
-trusted `server_now_ms`, and requests invalid under the current registry/bindings.
-Expiry must be positive and representable through year 9999. Browser digest
-matching is constant-time. Callers supply trusted server/backend time and enforce
-TTL computation; timestamps are never request-selected. This codec is not a MAC
-or cache authenticator and assumes trusted storage. Role eligibility, login and
-consent still require later fresh identity checks. The codec itself supplies no
-backend, nonce generation or atomic consumption; the memory API below adds those
-capabilities. No HTTP route or startup hook is implemented; startup remains Unsupported.
-
-## Explicit development-memory transaction store
-
-`oauth::store::MemoryTransactionStore::new(Arc<OAuthConfig>)` requires valid config
-and an issuer. It is an explicit development-only choice, never a default or
-fallback, and is distinct from the legacy token store and browser-session state.
-Async `create(validated_request, browser_hash)` returns a secret `TransactionId`
-and absolute expiry; `lookup` and `consume` require that ID and binding hash.
-IDs contain 32 cryptographically random bytes, use canonical unpadded base64url,
-and expose wire text only through `as_secret_str`; they and handles have no Debug
-or serialization. Only SHA-256 ID hashes index stored versioned codec bytes.
-Expiry uses trusted server time captured under lock plus the transaction TTL, with checked arithmetic;
-it never extends on reads. Valid operations prune expired entries and enforce the
-configured count cap. Capacity errors are fixed `Limited`; missing/expired IDs and
-binding mismatches are `Missing`; config failures are `Configuration`, and codec,
-clock, entropy or poisoned-lock failures are fixed `Unavailable` errors.
-Consume validates codec/current config and binding before removing under one lock:
-wrong binding does not burn an unexpired transaction, and concurrent consumers have
-one winner. Invalid records provide no proof and remain until expiry cleanup.
-No guard spans an await. Idle expired data is count-bounded; no cleanup task runs.
-These async APIs perform synchronous O(n) pruning and codec validation under a
-mutex. The cap bounds logical records, not retained map allocation. Revalidation
-uses the store's retained immutable configuration, not automatic hot reload.
-Wall-clock rollback can lengthen elapsed lifetime for unpruned records; removed
-records cannot reappear.
-Memory is per instance, cannot support cross-replica transactions, and has no
-restart persistence. Tune capacity to process budgets (pending records ≤16 KiB,
-authenticated records ≤64 KiB and ConsentReady records ≤96 KiB; 100000 ConsentReady
-records allow 9.8304 GB (about 9.15 GiB) of payload,
-plus overhead). Pending transactions prove input validation only, never login,
-consent or grants. No backend is wired at startup; OAuth remains Unsupported.
-
-### Development-memory authenticated promotion
-
-Async `promote_authenticated(id, browser_hash, context)` replaces a Pending entry
-exactly once with an Authenticated entry under the same hashed key/capacity slot.
-It samples trusted time under lock, decodes the pending record, checks binding and
-the context's store-provided source-ID hash and exact source bytes/expiry, then revalidates the context with
-the store's config snapshot before replacement. Expiry shrinks to context freshness
-or the original transaction deadline, never extends. Failures leave unexpired input
-unchanged; a second promotion returns Missing and cannot overwrite the earlier identity.
-`lookup`/`consume` are Pending-only. New `lookup_authenticated`/`consume_authenticated`
-return typed contexts via the private codec, without refreshing expiry; wrong kind,
-missing/expired IDs or wrong binding return Missing. Codec/metadata failures return
-Unavailable without consuming corrupt state. Both kinds share the configured count
-cap, and only successful typed consume removes an unexpired entry. No operation
-adds consent, grants or codes. Source matching now distinguishes IDs even when all
-request, browser-binding and expiry facts are identical. HTTP integration remains a future slice.
-
-### Development-memory consent state
-
-Async `prepare_consent(id, browser_hash)` converts Authenticated to ConsentReady
-under the same hashed key and count slot, or renews an existing ConsentReady challenge.
-Validation precedes fresh entropy/encoding and replacement. Only the CSRF hash and
-private context/session codec are stored; the raw token is returned for rendering.
-Renewal preserves the original session/store expiry ceiling even if policy is relaxed.
-Reload intentionally invalidates the previous token; two tabs have one active challenge.
-Pending and authenticated input lookup/consume APIs return Missing for ConsentReady.
-Async `decide_consent` holds one mutex across trusted-time sampling, private codec,
-source/browser/freshness/current-policy checks, token/decision validation and removal.
-Only a valid explicit approve or deny removes the entry; approval returns the opaque
-consented capability, while denial returns its marker. Invalid submissions preserve
-unexpired state. Fixed decision errors are Missing, InvalidToken, InvalidDecision,
-Unavailable; codec/time/context failures (including ConsentReady binding mismatch)
-are Unavailable, without diagnostics or identity data. Preparation keeps StoreError
-classes; an Authenticated-state binding mismatch is Missing. Expired entries are pruned.
-The shared configured count cap includes all three memory kinds, with no TTL refresh
-or extension. This gives atomic one-use decisions only within one memory instance;
-`decide_consent` alone does not persist a code or add HTTP/startup integration.
-
-### Authorization-code identity and stored-envelope foundation
-
-`oauth::codes::AuthorizationCode` is a secret handle: 32 OS-random bytes encoded as
-canonical 43-character unpadded base64url. Generation and SHA-256 hashing are
-OAuth-internal; public `parse` rejects wrong lengths, padding and noncanonical
-aliases as fixed Missing errors. The type has no Debug, Clone or serde. Wire text
-is exposed only through `as_secret_str` for future callback delivery, not logging.
-Explicit Memory issuance generates codes; no redirect or HTTP delivery is wired.
-
-The private stored envelope consumes a typed CodeGrant, retaining only its bounded
-96 KiB codec bytes, expiry, originating literal issuer and its own actual code-handle
-hash. Raw code values are not stored. Internal restoration compares that hash in
-constant time and requires the cached issuer to exactly match reader config before decoding,
-rejects an expired envelope, and rechecks grant codec/current-policy constraints
-without extending the envelope ceiling. A copied envelope cannot be accepted under
-another code handle. This assumes trusted storage, not a MAC; restoration is not
-code consumption or token-issuance proof. Code expiry still follows the grant's
-code/consent/context minimum (code TTL defaults to 60 seconds), with PKCE required
-for redemption.
-
-OAuth-only `StoredCode::from_backend` restores four separate metadata fields:
-canonical unpadded base64url `code_hash` (43 characters/32 bytes), `issuer` (a validated
-HTTPS origin, at most 2048 UTF-8 bytes), positive representable `expiry` through year
-9999, and nonempty `payload` (at most 96 KiB). Bounds are checked before copying;
-grant parsing and proof checks still occur on access. Read-only hash, issuer, payload
-and expiry getters support the next shared-backend slice without public serde or
-mutable fields. Restoring these metadata fields does not assert current eligibility.
-A changed issuer or trailing-slash variant returns fixed Unavailable and cannot rebind
-an unexpired code; successful Memory redemption copies the **cached** issuer into its
-proof. Trusted-storage compromise can forge metadata: this is not a MAC. Shared
-namespaces still require coherent issuer/config snapshots. Shared Valkey code
-persistence and its atomic consent transition are described below.
-
-`max_authorization_codes` sets a separate Memory code count cap, default 1024 and range
-1–100000. At the maximum, 96 KiB payloads alone permit 9.8304 GB (about 9.15 GiB), plus
-overhead. CodeStoreError classes are Missing, Limited, InvalidToken, InvalidDecision
-and Unavailable. Memory and shared Valkey persistence/redemption are described
-below; HTTP/startup integration remains future work. OAuth enablement remains
-Unsupported.
-
-### Development-memory atomic code issuance
-
-`MemoryTransactionStore::issue_code(id, browser_hash, submitted_csrf, decision)`
-locks transactions then codes and samples trusted server time after both locks.
-No guard crosses an await, and no path locks them in reverse. ConsentReady decoding
-rechecks source, binding, freshness and current policy; only valid canonical CSRF
-and an exact approve/deny decision proceed. Denial removes only the source, even
-when code capacity is full. Approval prunes expired code entries, checks the separate
-code cap, constructs the bounded grant, generates a random handle with up to four
-collision attempts and encodes its envelope. It inserts the code before removing
-the source while both locks are held, then returns `CodeIssueOutcome::Issued`.
-Expected validation, capacity, codec and entropy failures preserve unexpired source
-state and its nonce. Allocation panics are not rollback. Expired records may be pruned.
-
-`IssuedCode` exposes only read-only code, expiry, registered callback and opaque client
-state getters, with no Debug, Clone or serde. Denial returns a marker. Expiry is the
-code-TTL/approval/context minimum; no raw code, CSRF or credential is stored in the
-envelope. This is per-instance development Memory atomicity, without restart
-persistence or distributed guarantees. Pruning and validation are synchronous under
-locks; no background cleanup runs. Existing `decide_consent` consumes consent alone;
-future code-delivery callers must use `issue_code`, never decide then persist in
-separate calls. Issuance supplies no redemption or token-signing proof.
-
-### Development-memory one-use code redemption
-
-`MemoryTransactionStore::redeem_code(code, client_id, redirect_uri, resource,
-code_verifier)` locks only codes, samples trusted server time after locking and
-prunes expired envelopes. It checks the actual submitted handle hash, restores the
-bounded grant under current store config, then validates exact client/callback
-(including native loopback port), mandatory resource and S256 PKCE. Cached source
-and browser hashes remain server data; redemption needs no browser cookie or source
-ID. Verification-time identity snapshots are revalidated for current policy and
-freshness without rerunning providers or augmenters. No raw verifier is retained.
-
-All validation precedes removal under the same lock, with no await or acquisition
-of the transactions lock. Only after successful removal is an opaque
-`RedeemedAuthorization` constructed; competing consumers have one winner. Missing,
-expired/replayed codes and invalid client/callback/resource/PKCE return fixed Missing.
-Invalid time, policy/context, hash association or corrupt-record failures return
-Unavailable, preserving unexpired records. Time before issuance is rejected; time
-at the effective deadline is expired. Effective expiry tightening also fails closed.
-
-The result has private fields, no public constructor, Debug, Clone or serde, and only
-OAuth-internal grant/issuer readers. It retains the cached originating issuer spelling
-(including a trailing slash) for the signing bridge to bind exactly. The bridge
-rechecks its active policy/freshness and issuer; redemption itself neither signs
-nor issues a token. One use and capacity reclamation are per Memory instance only,
-without restart or distributed guarantees. Shared Valkey redemption is described
-below; HTTP integration remains future work and OAuth enablement remains Unsupported.
-
-### Store-provided source witnesses
-
-Memory and Valkey `lookup_bound(id, browser_hash)` return an opaque
-`BoundAuthorizationTransaction` only after successful pending lookup validation.
-It owns the input record and actual lookup-key ID hash, with a read-only transaction
-getter and no public constructor, Clone, Debug or deserialization. Obtain this
-witness before credential verification; `AuthenticatedAuthorization::new_bound`
-consumes it with the fresh identity proof. No separate caller ID tag can bind or
-rebind a context. The original `new` remains unbound for pure in-process eligibility;
-unbound contexts cannot be promoted or loaded as persisted authenticated state.
-Memory promotion checks the hash in constant time and retains the full source-byte
-checks. Authenticated lookup/consume also verify the persisted hash against the
-indexed ID before removal, rejecting copied records. Mismatch/missing source is
-fixed Unavailable, with unexpired data preserved. The private version-2 codec carries
-the hash across trusted storage; it is not a MAC against storage compromise.
-Neither lookup API creates consent, codes, grants or new startup/HTTP wiring.
-
-### Shared Valkey connector foundation
-
-The crate-internal connector now reuses the existing validated
-`BrowserBackendConfig::Valkey` credentials, TLS and timeout settings independently
-of browser-session policy. Browser Valkey operations use that same bounded
-connection-manager implementation. Defaults remain 2 seconds to connect and
-1 second per operation; only explicit connection calls perform network I/O.
-It supports one primary endpoint, with verified `rediss` TLS and no memory fallback.
-Connector errors expose only Configuration/Unavailable classes. Connection-manager
-reconnect is distinct from command replay: commands are issued once, and timeout
-or lost-response mutation outcomes may be ambiguous; callers must not blindly retry.
-No OAuth backend or connection is initialized at startup.
-
-### Shared Valkey authorization transactions
-
-`oauth::valkey_transactions::ValkeyTransactionStore::new(config, &backend)` is an
-explicit connection call requiring Valkey settings. Async `create`, `lookup`, and
-`consume` use the memory store's ID/handle/record contracts, without local cache or
-fallback. Namespace: `<key_prefix>:oauth:authorization-transactions:v3:`, with only
-hashed-ID record keys and an expiry sorted-set index, separate from UI state.
-Replicas sharing a namespace must use consistent policy snapshots, TTL and capacity.
-Creation obtains server `TIME`, encodes/revalidates the record, then Lua checks the
-current server time and expiry window, prunes expired index members, checks shared
-capacity, and creates an absent hash with `HSET`, `PEXPIREAT` and `ZADD` in one script.
-No client/replica clock determines expiry. Each hash has exactly `kind`, `expiry`
-and `payload` fields; kind is Pending, Authenticated or ConsentReady. Earlier
-namespaces are not migrated or decoded; old keys expire independently.
-Lookup checks types/metadata and `HSTRLEN` before bounded `HGET`, returning exact
-bytes and server time for Rust codec/config/binding checks. Reads never refresh TTL.
-Consume validates that read in Rust, then Lua compares exact bytes and expiry at
-current server time before `DEL`/`ZREM`; changed data or another winner fail closed.
-Wrong binding or invalid current policy/record cannot burn an unexpired transaction.
-Lua checks key types and mutation ACL permissions before writes. Atomic execution
-is not rollback: unexpected write failures/OOM or lost responses can leave ambiguous
-outcomes; operations are not automatically replayed. Invalid data yields fixed
-Unavailable errors, not raw backend diagnostics. The index is bounded to 100000
-members and uses no `KEYS` scans; Pending reads are capped at 16 KiB, Authenticated
-reads at 64 KiB and ConsentReady reads at 96 KiB. Expired members
-are pruned in one atomic script: a large expired batch can occupy the shared
-server and exceed a caller's operation deadline, so tune capacity and timeouts.
-Storage transitions and consent decisions do not provide atomic code issuance.
-
-`promote_authenticated` requires a source-bound context matching the actual ID,
-exact Pending bytes and expiry. Rust revalidates the private context against current
-config, browser binding and server time, then Lua CAS checks Pending kind, unchanged
-bytes/metadata and current time before replacing the same hash and index score.
-All HSET/PEXPIREAT/ZADD permissions are preflighted before conversion. Effective
-expiry must stay positive, unexpired and no later than the Pending deadline.
-Both states use one global capacity slot; repeat promotion returns Missing.
-Pending lookup/consume (including bound lookup) return Missing for Authenticated
-state. New typed `lookup_authenticated` and `consume_authenticated` recheck the
-private codec, source-ID hash, current eligibility and effective expiry, with no
-TTL refresh. Authenticated consume CAS additionally checks the effective freshness
-deadline even when current policy makes it earlier than stored metadata. Wrong
-binding preserves state as Missing; corrupt/oversized/unknown-kind/source-mismatched
-data stays unconsumed as fixed Unavailable. Cross-replica snapshots still require
-trusted storage and coherent config; restoration is not fresh provider execution.
-
-### Shared Valkey consent state
-
-Async `prepare_consent(id, browser_hash)` validates an Authenticated or ConsentReady
-snapshot against the source ID, browser binding, current policy and server `TIME`.
-It generates a fresh render token and stores only its hash in the private session
-codec. Lua compares the original kind, payload, expiry and index score at current
-server time before converting or renewing the same hash. HSET/PEXPIREAT/ZADD
-permissions are preflighted, and expiry cannot extend the stored or session ceiling.
-The token is returned only after successful CAS; competing snapshots have one winner.
-Renewal invalidates the previous token, so two tabs share one active challenge.
-All three states share one capacity slot. Pending and authenticated lookup/consume
-APIs return Missing for ConsentReady.
-
-Async `decide_consent` privately computes a validated approve/deny outcome in Rust,
-then Lua compares the exact ConsentReady snapshot and checks its effective freshness
-deadline before atomic `DEL`/`ZREM`. The outcome is exposed only after successful
-deletion; competing consumers have one winner across replicas. Invalid tokens,
-decisions, source/binding, policy or codec data preserve unexpired state. Decision
-errors are fixed Missing, InvalidToken, InvalidDecision and Unavailable; context,
-codec and ConsentReady binding failures map to Unavailable. Preparation retains
-StoreError classes, including Missing for Authenticated binding mismatch.
-Lost responses can leave an ambiguous consumed or renewed state; no automatic
-mutation replay or local fallback is provided. Callers still enforce Origin and
-strict duplicate/unknown-field parsing. Trusted authenticated storage and coherent
-policy snapshots remain required, and approval deletion is not atomic persistence
-of an authorization code. The `issue_code` transition below atomically persists
-a code while consuming consent; `decide_consent` only deletes the
-session and returns an opaque consent proof. No HTTP or startup integration is added.
-
-### Shared Valkey atomic code issuance
-
-`ValkeyTransactionStore::issue_code(id, browser_hash, submitted_csrf, decision)` returns
-the same opaque Issued/Denied outcomes and fixed CodeStoreError classes as Memory.
-Rust reads ConsentReady with server `TIME`, validates source/binding/current policy,
-freshness, canonical CSRF and explicit decision, then constructs the bounded grant.
-Approval generates a random handle and preserves the producer's literal issuer in
-its envelope. Codes use `<key_prefix>:oauth:authorization-codes:v1:index` and
-`<key_prefix>:oauth:authorization-codes:v1:record:<base64url-SHA256-code-hash>`, separate
-from the v3 transaction namespace. Hashes have exactly `code_hash`, `issuer`, `expiry`
-and `payload`; payload is capped at 96 KiB, issuer at 2048 bytes and code hash at 43
-canonical base64url characters. No raw code, verifier or CSRF nonce is persisted.
-
-One four-key Lua script checks both namespaces' types, source shape and bounded
-payload before reading it, exact ConsentReady bytes/expiry/index score and current
-server time/effective deadline. It preflights code HSET/PEXPIREAT/ZADD and expired-index
-pruning plus source DEL/ZREM permissions before any writes. It checks collisions,
-prunes expired code-index entries, enforces `max_authorization_codes`, writes the code
-hash/TTL/index and deletes the source/index in one atomic execution. No Issued result
-is exposed before confirmation. Four collision attempts never overwrite another code.
-Capacity, validation, ACL and expected write-precondition failures preserve unexpired
-consent and its current nonce; validated denial consumes only the source without
-generating a code or requiring code capacity. Code expiry cannot exceed the checked
-consent/context ceiling or code TTL. Reads never refresh source TTL.
-
-Both indexes are bounded to 100000 members, without key scans. Replicas require
-coherent issuer/policy/capacity settings and trusted authenticated storage, not a MAC.
-This uses the existing bounded connector on one primary; Cluster/Sentinel discovery
-is unsupported. Unexpected OOM/write failures or lost responses can leave ambiguous
-outcomes: atomic execution is not rollback, and there is no automatic replay or
-fallback. Shared code redemption is described below.
-No HTTP or startup hook is added; OAuth enablement remains Unsupported.
-
-### Shared Valkey one-use code redemption
-
-`ValkeyTransactionStore::redeem_code(code, client_id, redirect_uri, resource,
-code_verifier)` uses a two-key Lua read to obtain server `TIME` and unchanged code
-metadata/payload. It checks index/record types, exactly four hash fields, index-score
-agreement and positive canonical decimal expiry through year 9999. Before any HGET,
-HSTRLEN enforces a 43-byte hash, 1–2048-byte issuer, 1–15-byte expiry and nonempty
-payload of at most 96 KiB.
-Rust restores the bounded envelope, checks the actual handle hash and exact cached
-issuer against store config, then revalidates current grant policy/freshness/time,
-mandatory exact client/callback/resource and S256 PKCE. No verifier is sent to Valkey.
-
-After validation, a second Lua call compares **all four** fields and index score at
-current server time, including the recomputed effective grant deadline when it is
-earlier than stored expiry. DEL/ZREM permissions are preflighted before deletion.
-Only the confirmed CAS winner constructs `RedeemedAuthorization` with the cached
-originating issuer; another consumer or changed snapshot returns Missing with no proof.
-Missing/expired codes and invalid public inputs are Missing. Wrong types, shape,
-metadata, issuer/hash binding, config/context or transport failures are fixed
-Unavailable. Failed checks preserve unexpired records; reads never refresh TTL.
-
-Atomic consumption is shared across replicas on the configured primary, assuming
-trusted authenticated storage and coherent config; it is not a MAC or fresh provider
-verification. Effective-deadline failure can leave a stored record readable under
-broader policy until its original expiry. Lost mutation responses may be ambiguous,
-with no replay or fallback; timeout/cancellation exposes no proof. There is no public
-code lookup authority. Callers may pass successful proof to `issue_from_redeemed`,
-which separately consumes it and rechecks issuer/current eligibility before signing.
-No token is signed by redemption itself, and no HTTP/startup hook is installed.
-
-HTTP token issuance, discovery/JWKS, browser CORS,
-and MCP integration remain future capabilities. No HTTP tokens are issued and
-`enabled: true` still fails startup as Unsupported. The legacy HMAC `jwt.secret`
-must never be published through
-future JWKS or reused as an OAuth asymmetric signing key.
+| `authorization_transaction_ttl_seconds` | 300 | 30–900 seconds |
+| `authorization_code_ttl_seconds` | 60 | 30–300 seconds |
+| `access_token_ttl_seconds` | 300 | 60–3600 seconds |
+| `max_authorization_transactions`, `max_authorization_codes` | 1024 each | 1–100000 each, separate capacity |
+| `max_authentication_age_seconds` | 300 | 1–3600 seconds |
+| `authentication_clock_skew_seconds` | 30 | 0–60 seconds; future verification timestamps only, no age-deadline grace |
+
+Code expiry is the minimum of code TTL, original consent ceiling, transaction expiry
+and authentication freshness. Current policy/TTL tightening can shorten eligibility;
+relaxation never extends stored ceilings. Valkey state transitions use server TIME;
+replica clocks must be synchronized for verification and signing. Access tokens use
+their own configured lifetime and may outlive the short authorization deadlines.
+Verification-time roles and issued-token lifetime remain revocation windows; snapshot
+restoration does not rerun upstream verification.
+
+Private codecs are wire-bounded: Pending 16 KiB, authenticated context 64 KiB,
+ConsentReady/code grant 96 KiB. Trusted authenticated storage is required, not a MAC
+against compromised cache contents. Code envelopes bind their actual code hash and
+originating literal issuer. Valkey namespaces are `:oauth:authorization-transactions:v3:`
+and `:oauth:authorization-codes:v1:`; code hashes contain exactly code_hash/issuer/expiry/payload.
+Shared issuance atomically persists code while consuming consent; redemption compares
+all code fields/index score/effective deadline before atomic deletion and proof release.
+Expected failures preserve unexpired state. Unexpected write failures, OOM, cancellation
+or lost replies can leave ambiguous mutation outcomes: atomic execution is not rollback;
+there is no automatic replay or fallback. Memory is development-only, per-instance,
+without restart persistence. Capacity bounds logical records, not total allocation;
+100000 96 KiB records alone permit about 9.15 GiB payload plus overhead.
+
+## Signing and deferred capabilities
+
+Keys are trusted absolute file references, loaded explicitly on enabled startup.
+The Unix loader accepts bounded PKCS8/PKCS1 private PEM and SPKI/PKCS1 public PEM,
+checks 2048–4096-bit RSA and private/public consistency, and publishes only public JWKS.
+One active key and up to eight unique IDs are supported; inactive public keys permit
+verification overlap. Rotation/reload is not automatic: coordinate replicas and retain
+old public keys through the longest access-token lifetime plus clock skew. Never expose
+or reuse legacy `jwt.secret` as an OAuth RSA key.
+
+The HTTP token controller always uses atomic redemption then
+`TokenIssuer::issue_from_redeemed`, never the raw-User trusted-caller helper. It binds
+the exact cached issuer and rechecks current grant eligibility before signing RS256
+with `typ: at+jwt` and active kid. Claims include iss/sub/aud/iat/exp/jti/client_id/scope
+and only the required-role union, with no username/email/credentials or unrelated roles.
+Resource servers must enforce RS256, at+jwt, exact issuer/audience and current validity.
+The MCP resource server owns its protected-resource metadata and access-token validation.
+
+External SSO/OIDC, refresh tokens, dynamic/CIMD registration, confidential-client
+authentication, browser token CORS and automatic operational key rotation are deferred.
+The first supported flow is preregistered public clients with fresh Basic/API-key login,
+explicit consent and code/S256 exchange; no separate production demo or deployment is required.
+
+## Self-contained verification
+
+`cargo test -p authotron --test oauth_http_integration -- --test-threads=1` runs
+Basic and mocked ECMWF API-key HTTP flows, checks signatures from the HTTP JWKS,
+tests replay and non-consuming bad-verifier handling, stale hidden-ID/cookie swaps,
+Origin/CSRF/denial, token-form errors and disabled/readiness/metrics isolation.
+The fixture generates disposable RSA keys and uses only public synthetic credentials.
+
+`cargo test -p authotron --test oauth_http_integration disposable_valkey_http_oauth_cross_replica_flow -- --ignored --test-threads=1`
+starts and removes its own password-protected Valkey container, runs both direct login
+methods across two app states and verifies the resulting tokens. Existing ignored
+browser/authorization Valkey fixtures additionally cover quotas, ACL failures,
+metadata corruption, forced CAS races, expiry and outages. No cluster or deployment is used.

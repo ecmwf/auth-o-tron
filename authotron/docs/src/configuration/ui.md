@@ -123,6 +123,11 @@ Open `http://127.0.0.1:8080/login`. No local user configuration is required.
 
 ## Browser Application Callbacks
 
+The opt-in [OAuth authorization server](oauth.md) now provides the preregistered
+public-client code/S256 flow through these Basic/API-key forms and explicit consent.
+When OAuth is disabled, standalone browser verification and the preview retain their
+existing behavior. OAuth requests are transaction-bound and do not reuse browser sessions.
+
 Branding and sign-in links do not register an authentication client or callback.
 The browser sign-in flow must register an exact callback URI for each application
 client, such as the Aviso backend's `/auth/callback`, and use authorization codes

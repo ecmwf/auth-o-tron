@@ -89,7 +89,7 @@ impl ValidatedAuthorizationRequest {
 }
 
 /// Valid: `state=a%2Bb` decodes to `a+b`; invalid: `state=%ZZ` or `%FF`.
-fn decode_component(raw: &[u8]) -> Result<String, AuthorizationError> {
+pub(crate) fn decode_component(raw: &[u8]) -> Result<String, AuthorizationError> {
     let mut bytes = Vec::with_capacity(raw.len());
     let mut i = 0;
     while i < raw.len() {

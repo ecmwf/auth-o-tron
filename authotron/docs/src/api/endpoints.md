@@ -118,7 +118,12 @@ clients; configured Basic or ECMWF API-key login opens its direct credential for
 in a same-page dialog, with standalone navigation as the JavaScript-free fallback.
 An existing direct browser session redirects to `/login/account` only when no
 alternative direct flow or sign-in actions are configured; otherwise the chooser stays visible.
-This is not an OAuth authorization server or an Aviso application callback.
+With opt-in OAuth enabled and a bound authorization transaction, the same direct
+forms perform fresh strict verification and continue to explicit consent instead
+of creating an ordinary browser session. See [OAuth](../configuration/oauth.md)
+for metadata/JWKS, authorize, consent and code/S256 token endpoints. The login entry
+itself is not an application callback, and an existing browser session never proves
+OAuth authentication.
 
 | Aspect | Details |
 |--------|---------|

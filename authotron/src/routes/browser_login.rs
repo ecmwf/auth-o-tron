@@ -139,10 +139,15 @@ pub(super) fn unavailable(error: BrowserVerifyError) -> Response {
 
 async fn form_response(
     state: &AppState,
+    headers: &HeaderMap,
     flow: LoginFlow,
     status: StatusCode,
     error: bool,
 ) -> Response {
+    let oauth_transaction = match super::oauth::form_transaction(state, headers).await {
+        Ok(transaction) => transaction,
+        Err(status) => return super::oauth::local(status),
+    };
     let (sid, csrf) = match state.browser.form(flow).await {
         Ok(form) => form,
         Err(error) => return unavailable(error),
@@ -152,9 +157,13 @@ async fn form_response(
         html! {
             h2 id="login-card-title" { @if flow == LoginFlow::ApiKey { "ECMWF API key" } @else { "Username and password" } }
             @if error { p class="login-card-message" role="alert" { (flow_error(flow)) } }
-            p class="login-card-detail" { "Verify your identity for a short-lived Auth-O-Tron browser session." }
+            p class="login-card-detail" {
+                @if oauth_transaction.is_some() { "Verify your identity to review this authorization request." }
+                @else { "Verify your identity for a short-lived Auth-O-Tron browser session." }
+            }
             form class="key-form" method="post" action=(if flow == LoginFlow::ApiKey { "/login/ecmwf-api-key" } else { "/login/basic" }) {
                 input type="hidden" name="csrf" value=(csrf);
+                @if let Some(id) = &oauth_transaction { input type="hidden" name="oauth_transaction" value=(id); }
                 @if flow == LoginFlow::ApiKey {
                     label for="api-key" { "ECMWF API key" }
                     input class="login-input" id="api-key" type="password" name="api_key" autocomplete="off" maxlength="512" required;
@@ -166,7 +175,10 @@ async fn form_response(
                 }
                 button class="login-action" type="submit" { "Sign in" }
             }
-            p class="login-card-detail" { "This verifies your identity in Auth-O-Tron. Application sign-in handoff is separate." }
+            p class="login-card-detail" {
+                @if oauth_transaction.is_some() { "Explicit approval is required before returning to the registered application." }
+                @else { "This verifies your identity in Auth-O-Tron. Application sign-in handoff is separate." }
+            }
         },
     );
     let mut response = private_response((status, Html(page)).into_response());
@@ -187,18 +199,20 @@ fn flow_error(flow: LoginFlow) -> &'static str {
     }
 }
 
-async fn key_form(State(state): State<AppState>) -> Response {
-    form_response(&state, LoginFlow::ApiKey, StatusCode::OK, false).await
+async fn key_form(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    form_response(&state, &headers, LoginFlow::ApiKey, StatusCode::OK, false).await
 }
 
-async fn basic_form(State(state): State<AppState>) -> Response {
-    form_response(&state, LoginFlow::Basic, StatusCode::OK, false).await
+async fn basic_form(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    form_response(&state, &headers, LoginFlow::Basic, StatusCode::OK, false).await
 }
 
 // Valid: api_key=public-fixture&csrf=opaque. Invalid: a missing or duplicate csrf field.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KeyForm {
+    #[serde(default)]
+    oauth_transaction: Option<String>,
     api_key: String,
     csrf: String,
 }
@@ -207,12 +221,15 @@ struct KeyForm {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BasicForm {
+    #[serde(default)]
+    oauth_transaction: Option<String>,
     username: String,
     password: String,
     csrf: String,
 }
 
 struct Submission {
+    oauth_transaction: Option<String>,
     csrf: String,
     username: String,
     secret: String,
@@ -227,6 +244,7 @@ async fn submit_key(
         state,
         headers,
         payload.map(|Form(p)| Submission {
+            oauth_transaction: p.oauth_transaction,
             csrf: p.csrf,
             username: String::new(),
             secret: p.api_key,
@@ -245,6 +263,7 @@ async fn submit_basic(
         state,
         headers,
         payload.map(|Form(p)| Submission {
+            oauth_transaction: p.oauth_transaction,
             csrf: p.csrf,
             username: p.username,
             secret: p.password,
@@ -309,9 +328,17 @@ async fn submit_inner(
             {
                 return unavailable(error);
             }
-            return form_response(&state, flow, status, true).await;
+            return form_response(&state, &headers, flow, status, true).await;
         }
     };
+    let oauth_context =
+        match super::oauth::posted_context(&headers, payload.oauth_transaction.as_deref()) {
+            Ok(context) => context,
+            Err(status) => {
+                attempt.outcome = BrowserOutcome::Csrf;
+                return super::oauth::local(status);
+            }
+        };
     let valid_transaction = if let Some(sid) = cookie_value(&headers, FORM_COOKIE) {
         match state.browser.consume(&sid, &payload.csrf, flow).await {
             Ok(valid) => valid,
@@ -322,7 +349,7 @@ async fn submit_inner(
     };
     if !valid_transaction {
         attempt.outcome = BrowserOutcome::Csrf;
-        return form_response(&state, flow, StatusCode::FORBIDDEN, true).await;
+        return form_response(&state, &headers, flow, StatusCode::FORBIDDEN, true).await;
     }
     let credentials = match flow {
         LoginFlow::ApiKey => BrowserCredentials::ApiKey(&payload.secret),
@@ -334,6 +361,81 @@ async fn submit_inner(
             }
         }
     };
+    if let Some((id, binding)) = oauth_context {
+        let Some(runtime) = &state.oauth else {
+            attempt.outcome = BrowserOutcome::Csrf;
+            return super::oauth::local(StatusCode::FORBIDDEN);
+        };
+        let witness = match runtime.bound(&id, &binding).await {
+            Ok(witness) => witness,
+            Err(error) => {
+                attempt.outcome = if error == crate::oauth::store::StoreError::Missing {
+                    BrowserOutcome::Csrf
+                } else {
+                    BrowserOutcome::BackendUnavailable
+                };
+                return super::oauth::local(if error == crate::oauth::store::StoreError::Missing {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                });
+            }
+        };
+        let identity = match crate::oauth::authentication::verify_identity(
+            credentials,
+            &state.browser,
+            &state.auth,
+            &state.metrics,
+        )
+        .await
+        {
+            Ok(identity) => identity,
+            Err(error) => {
+                use crate::oauth::authentication::AuthenticationError::*;
+                attempt.outcome = match error {
+                    Rejected => BrowserOutcome::Rejected,
+                    Timeout => BrowserOutcome::Timeout,
+                    Limited => BrowserOutcome::Limited,
+                    Unavailable => BrowserOutcome::BackendUnavailable,
+                };
+                return match error {
+                    Rejected | Timeout => {
+                        form_response(&state, &headers, flow, StatusCode::UNAUTHORIZED, true).await
+                    }
+                    Limited => super::oauth::local(StatusCode::TOO_MANY_REQUESTS),
+                    Unavailable => super::oauth::local(StatusCode::SERVICE_UNAVAILABLE),
+                };
+            }
+        };
+        let now = match runtime.now().await {
+            Ok(now) => now,
+            Err(_) => {
+                attempt.outcome = BrowserOutcome::BackendUnavailable;
+                return super::oauth::local(StatusCode::SERVICE_UNAVAILABLE);
+            }
+        };
+        let context = match crate::oauth::context::AuthenticatedAuthorization::new_bound(
+            witness,
+            identity,
+            &binding,
+            &runtime.config,
+            now,
+        ) {
+            Ok(context) => context,
+            Err(_) => {
+                attempt.outcome = BrowserOutcome::Rejected;
+                return super::oauth::local(StatusCode::FORBIDDEN);
+            }
+        };
+        if runtime.promote(&id, &binding, context).await.is_err() {
+            attempt.outcome = BrowserOutcome::BackendUnavailable;
+            return super::oauth::local(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        let mut response = private_response(Redirect::to("/oauth/continue").into_response());
+        set_cookie(&mut response, FORM_COOKIE, String::new(), 0);
+        attempt.outcome = BrowserOutcome::Success;
+        return response;
+    }
     let user = match state
         .browser
         .verify_identity(credentials, &state.auth, &state.metrics)
@@ -342,7 +444,7 @@ async fn submit_inner(
         Ok(user) => user,
         Err(error @ (BrowserVerifyError::Rejected | BrowserVerifyError::Timeout)) => {
             attempt.outcome = error_outcome(&error);
-            return form_response(&state, flow, StatusCode::UNAUTHORIZED, true).await;
+            return form_response(&state, &headers, flow, StatusCode::UNAUTHORIZED, true).await;
         }
         Err(BrowserVerifyError::Limited) => {
             attempt.outcome = BrowserOutcome::Limited;

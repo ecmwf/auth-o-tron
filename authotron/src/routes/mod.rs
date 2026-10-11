@@ -19,6 +19,7 @@ mod health;
 mod homepage;
 mod login;
 mod metrics;
+mod oauth;
 mod providers;
 mod tokens;
 mod whoami;
@@ -32,6 +33,7 @@ pub fn create_app_router(state: AppState) -> Router {
         .merge(homepage::routes())
         .merge(login::routes(&state.config.ui))
         .merge(browser_login::routes(&state.config.ui))
+        .merge(oauth::routes(state.oauth.is_some()))
         .merge(auth::routes())
         .merge(whoami::routes())
         .merge(tokens::routes())

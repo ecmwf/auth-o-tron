@@ -23,6 +23,7 @@ use std::sync::Arc;
 /// references to the configuration, authentication system, and token store.
 #[derive(Clone)]
 pub struct AppState {
+    pub oauth: Option<Arc<crate::oauth::runtime::OAuthRuntime>>,
     pub browser: Arc<crate::browser::BrowserLoginState>,
     /// Application configuration loaded at startup.
     pub config: Arc<ConfigV2>,

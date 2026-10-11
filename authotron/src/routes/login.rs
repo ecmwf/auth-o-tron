@@ -50,6 +50,10 @@ pub fn routes(config: &UiConfig) -> Router<AppState> {
 }
 
 async fn login(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    let oauth_pending = match super::oauth::form_transaction(&state, &headers).await {
+        Ok(transaction) => transaction.is_some(),
+        Err(status) => return super::oauth::local(status),
+    };
     let session = if state.config.ui.has_direct_login() {
         match super::browser_login::current_session(&state, &headers).await {
             Ok(session) => session,
@@ -62,14 +66,18 @@ async fn login(State(state): State<AppState>, headers: axum::http::HeaderMap) ->
         && !(state.config.ui.basic.is_some() && state.config.ui.ecmwf_api_key.is_some())
         && state.config.ui.sign_in_actions.is_empty()
         && session.is_some()
+        && !oauth_pending
     {
         return secure_response(Redirect::to("/login/account").into_response(), true);
     }
-    let config = if state.config.ui.has_direct_login() {
+    let mut config = if state.config.ui.has_direct_login() {
         super::browser_login::private_ui(&state)
     } else {
         state.config.ui.clone()
     };
+    if oauth_pending {
+        config.sign_in_actions.clear();
+    }
     let mut response = secure_response(Html(render_login(&config)).into_response(), false);
     if state.config.ui.has_direct_login() {
         response.headers_mut().insert(

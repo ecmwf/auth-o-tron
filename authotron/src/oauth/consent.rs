@@ -102,6 +102,9 @@ fn checked(
         .map_err(|_| ConsentError::InvalidContext)
 }
 impl ConsentSession {
+    pub(super) fn into_context(self) -> AuthenticatedAuthorization {
+        self.context
+    }
     pub(super) fn expires_at_ms(&self) -> u64 {
         self.expires_at_ms
     }

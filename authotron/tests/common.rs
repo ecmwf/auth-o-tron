@@ -46,6 +46,7 @@ pub async fn build_app_with_state(config: ConfigV2) -> (Router, Arc<ConfigV2>, A
     let metrics = Metrics::new();
 
     let state = AppState {
+        oauth: None,
         browser,
         config: config.clone(),
         auth,

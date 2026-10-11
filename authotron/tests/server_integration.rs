@@ -71,11 +71,7 @@ async fn oauth_fails_closed_before_browser_initialization() {
     config.oauth.enabled = true;
     config.oauth.issuer = Some("https://login.example.org".into());
     let error = startup::build_app(Arc::new(config)).await.err().unwrap();
-    assert_eq!(
-        error.downcast_ref::<std::io::Error>().unwrap().kind(),
-        std::io::ErrorKind::Unsupported
-    );
-    assert!(error.to_string().contains("configuration foundation"));
+    assert!(error.to_string().contains("OAuth requires signing keys"));
 }
 
 #[tokio::test]
