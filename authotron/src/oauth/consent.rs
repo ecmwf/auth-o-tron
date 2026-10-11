@@ -18,10 +18,6 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "OAuth-internal consent persistence is not wired")
-)]
 pub(super) const MAX_CONSENT_SESSION_BYTES: usize = 96 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,10 +46,6 @@ pub struct ConsentSession {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "OAuth-internal consent persistence is not wired")
-)]
 struct ConsentDto {
     version: u8,
     context: String,
@@ -107,10 +99,42 @@ fn checked(
         .map_err(|_| ConsentError::InvalidContext)
 }
 impl ConsentSession {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "OAuth-internal consent persistence is not wired")
-    )]
+    pub(super) fn expires_at_ms(&self) -> u64 {
+        self.expires_at_ms
+    }
+    /// A store may shorten but never extend the source record's expiry ceiling.
+    pub(super) fn from_stored_context(
+        context: AuthenticatedAuthorization,
+        source_id: &TransactionId,
+        config: &OAuthConfig,
+        browser_hash: &[u8; 32],
+        now: u64,
+        ceiling: u64,
+    ) -> Result<(Self, ConsentToken), ConsentError> {
+        if !valid_time(ceiling) || now >= ceiling {
+            return Err(ConsentError::InvalidContext);
+        }
+        let (mut session, token) = Self::new(context, source_id, config, browser_hash, now)?;
+        session.expires_at_ms = session.expires_at_ms.min(ceiling);
+        Ok((session, token))
+    }
+    /// Rotate the challenge after validation, preserving the existing session ceiling.
+    pub(super) fn renew(
+        self,
+        source_id: &TransactionId,
+        config: &OAuthConfig,
+        browser_hash: &[u8; 32],
+        now: u64,
+    ) -> Result<(Self, ConsentToken), ConsentError> {
+        Self::from_stored_context(
+            self.context,
+            source_id,
+            config,
+            browser_hash,
+            now,
+            self.expires_at_ms,
+        )
+    }
     pub(super) fn encode(&self) -> Result<Vec<u8>, ConsentError> {
         let context = self
             .context
@@ -129,10 +153,6 @@ impl ConsentSession {
         Ok(bytes)
     }
     /// Trusted authenticated storage only, not request JSON or a MAC. No approval is restored.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "OAuth-internal consent persistence is not wired")
-    )]
     pub(super) fn decode(
         bytes: &[u8],
         source_id: &TransactionId,
@@ -266,6 +286,29 @@ mod tests {
             AuthenticatedAuthorization::new_bound(source, identity, &[7; 32], &config, now)
                 .unwrap();
         (config, created.id, context, now)
+    }
+    #[tokio::test]
+    async fn internal_renewal_preserves_ceiling_under_relaxed_policy() {
+        let (mut config, id, context, now) = fixture().await;
+        let (session, first) = ConsentSession::new(context, &id, &config, &[7; 32], now).unwrap();
+        let expiry = session.expires_at_ms();
+        config.max_authentication_age_seconds = 300;
+        let (session, second) = session.renew(&id, &config, &[7; 32], now + 500).unwrap();
+        assert_eq!(session.expires_at_ms(), expiry);
+        assert!(first.as_secret_str() != second.as_secret_str());
+        assert_eq!(
+            session
+                .decide(
+                    second.as_secret_str(),
+                    "approve",
+                    &id,
+                    &[7; 32],
+                    &config,
+                    expiry
+                )
+                .err(),
+            Some(ConsentError::InvalidContext)
+        );
     }
     #[tokio::test]
     async fn private_codec_round_trip_keeps_hash_only_and_original_deadline() {

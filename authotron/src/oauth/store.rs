@@ -10,6 +10,7 @@
 
 use super::{
     authorization::ValidatedAuthorizationRequest,
+    consent::{ConsentError, ConsentOutcome, ConsentSession, ConsentToken},
     context::AuthenticatedAuthorization,
     records::{AuthorizationTransaction, BoundAuthorizationTransaction, valid_time},
 };
@@ -28,6 +29,14 @@ pub enum StoreError {
     Configuration,
     Missing,
     Limited,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsentStoreError {
+    Missing,
+    InvalidToken,
+    InvalidDecision,
     Unavailable,
 }
 
@@ -68,6 +77,7 @@ pub struct CreatedTransaction {
 enum StoredKind {
     Pending,
     Authenticated,
+    ConsentReady,
 }
 struct Stored {
     kind: StoredKind,
@@ -157,6 +167,22 @@ impl MemoryTransactionStore {
         browser_hash: &[u8; 32],
     ) -> Result<AuthenticatedAuthorization, StoreError> {
         self.authenticated_at(id, browser_hash, now_ms, true)
+    }
+    pub async fn prepare_consent(
+        &self,
+        id: &TransactionId,
+        browser_hash: &[u8; 32],
+    ) -> Result<ConsentToken, StoreError> {
+        self.prepare_consent_at(id, browser_hash, now_ms)
+    }
+    pub async fn decide_consent(
+        &self,
+        id: &TransactionId,
+        browser_hash: &[u8; 32],
+        submitted_csrf: &str,
+        decision: &str,
+    ) -> Result<ConsentOutcome, ConsentStoreError> {
+        self.decide_consent_at(id, browser_hash, submitted_csrf, decision, now_ms)
     }
     fn create_at(
         &self,
@@ -308,6 +334,95 @@ impl MemoryTransactionStore {
         }
         Ok(context)
     }
+    fn prepare_consent_at(
+        &self,
+        id: &TransactionId,
+        binding: &[u8; 32],
+        clock: impl FnOnce() -> Result<u64, StoreError>,
+    ) -> Result<ConsentToken, StoreError> {
+        let mut entries = self.entries.lock().map_err(|_| StoreError::Unavailable)?;
+        let now = clock()?;
+        if !valid_time(now) {
+            return Err(StoreError::Unavailable);
+        }
+        entries.retain(|_, entry| entry.expires_at_ms > now);
+        let key = id.hash();
+        let stored = entries.get_mut(&key).ok_or(StoreError::Missing)?;
+        let (session, token) = match stored.kind {
+            StoredKind::Pending => return Err(StoreError::Missing),
+            StoredKind::Authenticated => {
+                let context =
+                    AuthenticatedAuthorization::decode(&stored.bytes, &self.config, binding, now)
+                        .map_err(|error| match error {
+                        super::context::ContextError::Binding => StoreError::Missing,
+                        _ => StoreError::Unavailable,
+                    })?;
+                if !context.matches_source(&key) {
+                    return Err(StoreError::Unavailable);
+                }
+                ConsentSession::from_stored_context(
+                    context,
+                    id,
+                    &self.config,
+                    binding,
+                    now,
+                    stored.expires_at_ms,
+                )
+            }
+            StoredKind::ConsentReady => {
+                let session = ConsentSession::decode(&stored.bytes, id, &self.config, binding, now)
+                    .map_err(|_| StoreError::Unavailable)?;
+                if session.expires_at_ms() > stored.expires_at_ms {
+                    return Err(StoreError::Unavailable);
+                }
+                session.renew(id, &self.config, binding, now)
+            }
+        }
+        .map_err(|_| StoreError::Unavailable)?;
+        let bytes = session.encode().map_err(|_| StoreError::Unavailable)?;
+        *stored = Stored {
+            kind: StoredKind::ConsentReady,
+            bytes,
+            expires_at_ms: session.expires_at_ms().min(stored.expires_at_ms),
+        };
+        Ok(token)
+    }
+    fn decide_consent_at(
+        &self,
+        id: &TransactionId,
+        binding: &[u8; 32],
+        submitted: &str,
+        decision: &str,
+        clock: impl FnOnce() -> Result<u64, StoreError>,
+    ) -> Result<ConsentOutcome, ConsentStoreError> {
+        use ConsentStoreError::*;
+        let mut entries = self.entries.lock().map_err(|_| Unavailable)?;
+        let now = clock().map_err(|_| Unavailable)?;
+        if !valid_time(now) {
+            return Err(Unavailable);
+        }
+        entries.retain(|_, entry| entry.expires_at_ms > now);
+        let key = id.hash();
+        let stored = entries.get(&key).ok_or(Missing)?;
+        if !matches!(stored.kind, StoredKind::ConsentReady) {
+            return Err(Missing);
+        }
+        let session = ConsentSession::decode(&stored.bytes, id, &self.config, binding, now)
+            .map_err(|_| Unavailable)?;
+        if session.expires_at_ms() > stored.expires_at_ms {
+            return Err(Unavailable);
+        }
+        let outcome = session
+            .decide(submitted, decision, id, binding, &self.config, now)
+            .map_err(|error| match error {
+                ConsentError::InvalidToken => InvalidToken,
+                ConsentError::InvalidDecision => InvalidDecision,
+                _ => Unavailable,
+            })?;
+        // No await while locked; only validated explicit decisions remove the record.
+        entries.remove(&key);
+        Ok(outcome)
+    }
 }
 
 #[cfg(test)]
@@ -345,6 +460,228 @@ pub(super) mod tests {
             AuthenticatedAuthorization::new_bound(source, identity, &[7; 32], &config, now)
                 .unwrap();
         (store, created, context, now)
+    }
+    #[tokio::test]
+    async fn consent_preparation_rotation_capacity_and_invalid_decisions_preserve_state() {
+        let (store, created, context, now) = authenticated_fixture().await;
+        assert_eq!(
+            store.prepare_consent(&created.id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        store
+            .promote_at(&created.id, &[7; 32], context, at(now))
+            .unwrap();
+        let first = store.prepare_consent(&created.id, &[7; 32]).await.unwrap();
+        let second = store
+            .prepare_consent_at(&created.id, &[7; 32], at(now + 500))
+            .unwrap();
+        let bytes = store.entries.lock().unwrap()[&created.id.hash()]
+            .bytes
+            .clone();
+        assert!(
+            !std::str::from_utf8(&bytes)
+                .unwrap()
+                .contains(second.as_secret_str())
+        );
+        assert_eq!(store.entries.lock().unwrap().len(), 1);
+        assert_eq!(
+            store.entries.lock().unwrap()[&created.id.hash()].expires_at_ms,
+            now + 1000
+        );
+        assert_eq!(
+            store
+                .create_at(request(&store.config), [7; 32], at(now + 500))
+                .err(),
+            Some(StoreError::Limited)
+        );
+        assert_eq!(
+            store.lookup(&created.id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        assert_eq!(
+            store
+                .lookup_authenticated(&created.id, &[7; 32])
+                .await
+                .err(),
+            Some(StoreError::Missing)
+        );
+        for (token, decision, hash, expected) in [
+            (
+                first.as_secret_str(),
+                "approve",
+                [7; 32],
+                ConsentStoreError::InvalidToken,
+            ),
+            (
+                second.as_secret_str(),
+                "other",
+                [7; 32],
+                ConsentStoreError::InvalidDecision,
+            ),
+            (
+                second.as_secret_str(),
+                "approve",
+                [8; 32],
+                ConsentStoreError::Unavailable,
+            ),
+        ] {
+            assert_eq!(
+                store
+                    .decide_consent_at(&created.id, &hash, token, decision, at(now + 500))
+                    .err(),
+                Some(expected)
+            );
+            assert!(store.entries.lock().unwrap()[&created.id.hash()].bytes == bytes);
+        }
+        let outcome = store
+            .decide_consent(&created.id, &[7; 32], second.as_secret_str(), "approve")
+            .await
+            .unwrap();
+        assert!(matches!(outcome, ConsentOutcome::Approved(_)));
+        assert_eq!(
+            store
+                .decide_consent(&created.id, &[7; 32], second.as_secret_str(), "approve")
+                .await
+                .err(),
+            Some(ConsentStoreError::Missing)
+        );
+        assert!(store.create(request(&store.config), [7; 32]).await.is_ok());
+    }
+    #[tokio::test]
+    async fn consent_expiry_denial_corruption_and_failed_preparation_are_fail_closed() {
+        let (store, created, context, now) = authenticated_fixture().await;
+        store
+            .promote_at(&created.id, &[7; 32], context, at(now))
+            .unwrap();
+        let original = store.entries.lock().unwrap()[&created.id.hash()]
+            .bytes
+            .clone();
+        assert_eq!(
+            store
+                .prepare_consent_at(&created.id, &[8; 32], at(now))
+                .err(),
+            Some(StoreError::Missing)
+        );
+        assert!(store.entries.lock().unwrap()[&created.id.hash()].bytes == original);
+        let token = store
+            .prepare_consent_at(&created.id, &[7; 32], at(now))
+            .unwrap();
+        assert!(matches!(
+            store.decide_consent_at(
+                &created.id,
+                &[7; 32],
+                token.as_secret_str(),
+                "deny",
+                at(now)
+            ),
+            Ok(ConsentOutcome::Denied)
+        ));
+        assert_eq!(store.entries.lock().unwrap().len(), 0);
+        let (store, created, context, now) = authenticated_fixture().await;
+        store
+            .promote_at(&created.id, &[7; 32], context, at(now))
+            .unwrap();
+        let token = store
+            .prepare_consent_at(&created.id, &[7; 32], at(now))
+            .unwrap();
+        assert_eq!(
+            store
+                .decide_consent_at(
+                    &created.id,
+                    &[7; 32],
+                    token.as_secret_str(),
+                    "approve",
+                    at(now + 1000)
+                )
+                .err(),
+            Some(ConsentStoreError::Missing)
+        );
+        assert!(
+            store
+                .create_at(request(&store.config), [7; 32], at(now + 1000))
+                .is_ok()
+        );
+        let (store, created, context, now) = authenticated_fixture().await;
+        store
+            .promote_at(&created.id, &[7; 32], context, at(now))
+            .unwrap();
+        let token = store
+            .prepare_consent_at(&created.id, &[7; 32], at(now))
+            .unwrap();
+        store
+            .entries
+            .lock()
+            .unwrap()
+            .get_mut(&created.id.hash())
+            .unwrap()
+            .bytes = b"invalid consent".to_vec();
+        assert_eq!(
+            store
+                .prepare_consent_at(&created.id, &[7; 32], at(now))
+                .err(),
+            Some(StoreError::Unavailable)
+        );
+        assert_eq!(
+            store
+                .decide_consent_at(
+                    &created.id,
+                    &[7; 32],
+                    token.as_secret_str(),
+                    "approve",
+                    at(now)
+                )
+                .err(),
+            Some(ConsentStoreError::Unavailable)
+        );
+        assert_eq!(store.entries.lock().unwrap().len(), 1);
+    }
+    #[tokio::test]
+    async fn concurrent_consent_decisions_have_exactly_one_approved_winner() {
+        let (store, created, context, now) = authenticated_fixture().await;
+        store
+            .promote_at(&created.id, &[7; 32], context, at(now))
+            .unwrap();
+        let token = Arc::new(
+            store
+                .prepare_consent_at(&created.id, &[7; 32], at(now))
+                .unwrap(),
+        );
+        let store = Arc::new(store);
+        let id = Arc::new(created.id);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let workers = (0..2)
+            .map(|_| {
+                let (store, id, token, barrier) =
+                    (store.clone(), id.clone(), token.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    match store.decide_consent_at(
+                        &id,
+                        &[7; 32],
+                        token.as_secret_str(),
+                        "approve",
+                        at(now),
+                    ) {
+                        Ok(ConsentOutcome::Approved(_)) => Ok(()),
+                        Err(error) => Err(error),
+                        _ => panic!("approval unexpectedly denied"),
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        let outcomes = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| **result == Err(ConsentStoreError::Missing))
+                .count(),
+            1
+        );
+        assert_eq!(store.entries.lock().unwrap().len(), 0);
     }
     #[tokio::test]
     async fn source_witness_prevents_identical_payload_id_aliasing_and_cache_copy() {

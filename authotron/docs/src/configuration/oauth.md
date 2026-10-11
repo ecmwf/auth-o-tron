@@ -219,8 +219,9 @@ StaleIdentity and AccessDenied, without identity data. Callers still enforce
 Origin/CSRF, and must recheck current policy/freshness at future issuance. This is
 in-process policy eligibility only: development-memory persistence is described
 below alongside explicit shared Valkey authenticated persistence. Durability
-depends on backend configuration; consent, grants, codes, and HTTP/startup
-integration remain unimplemented.
+depends on backend configuration. Explicit consent and per-instance decision
+completion are described below; grants, codes, and HTTP/startup integration remain
+unimplemented.
 
 ### OAuth-internal authenticated-context codec
 
@@ -259,9 +260,11 @@ Session/approval expiry cannot extend the original checked context deadline, eve
 if policy is relaxed later. These types have no public raw constructors, Clone,
 Debug or serde traits. Fixed errors are InvalidToken, InvalidDecision, InvalidContext,
 Unavailable. Callers still enforce Origin, strict duplicate/unknown-field request
-parsing and bound request context. Single use is Rust ownership only: no cross-pod
-atomic replay guarantee or remote fencing is provided. Consent is not an authorization
-code, grant issuance or token mint. No backend state kind, HTTP or startup hook is added.
+parsing and bound request context. Standalone sessions use Rust ownership for single
+use; the memory store below adds atomic decision completion within one instance.
+No cross-pod consent replay guarantee or remote fencing is provided. Consent is
+not an authorization code, grant issuance or token mint. Memory ConsentReady state
+is implemented below; no HTTP or startup hook is wired.
 
 ### OAuth-internal consent-session codec
 
@@ -279,7 +282,8 @@ Fixed codec errors add TooLarge, InvalidRecord, UnsupportedVersion. This assumes
 trusted authenticated storage, not a MAC or fresh provider re-verification. No
 approved capability is decoded. Repeated trusted restores can recreate sessions;
 CSRF does not supply distributed single use. A future backend must atomically
-transition/consume the stored session. No persistence hook is wired in this slice.
+transition/consume the stored session. Development-memory wiring is described below;
+shared consent persistence is not implemented.
 
 ## Typed access-token capability
 
@@ -371,8 +375,8 @@ Wall-clock rollback can lengthen elapsed lifetime for unpruned records; removed
 records cannot reappear.
 Memory is per instance, cannot support cross-replica transactions, and has no
 restart persistence. Tune capacity to process budgets (pending records ≤16 KiB,
-authenticated records ≤64 KiB; 100000 authenticated records allow 6.5536 GB
-(approximately 6.10 GiB) of payload,
+authenticated records ≤64 KiB and ConsentReady records ≤96 KiB; 100000 ConsentReady
+records allow 9.8304 GB (about 9.15 GiB) of payload,
 plus overhead). Pending transactions prove input validation only, never login,
 consent or grants. No backend is wired at startup; OAuth remains Unsupported.
 
@@ -392,6 +396,27 @@ Unavailable without consuming corrupt state. Both kinds share the configured cou
 cap, and only successful typed consume removes an unexpired entry. No operation
 adds consent, grants or codes. Source matching now distinguishes IDs even when all
 request, browser-binding and expiry facts are identical. HTTP integration remains a future slice.
+
+### Development-memory consent state
+
+Async `prepare_consent(id, browser_hash)` converts Authenticated to ConsentReady
+under the same hashed key and count slot, or renews an existing ConsentReady challenge.
+Validation precedes fresh entropy/encoding and replacement. Only the CSRF hash and
+private context/session codec are stored; the raw token is returned for rendering.
+Renewal preserves the original session/store expiry ceiling even if policy is relaxed.
+Reload intentionally invalidates the previous token; two tabs have one active challenge.
+Pending and authenticated input lookup/consume APIs return Missing for ConsentReady.
+Async `decide_consent` holds one mutex across trusted-time sampling, private codec,
+source/browser/freshness/current-policy checks, token/decision validation and removal.
+Only a valid explicit approve or deny removes the entry; approval returns the opaque
+consented capability, while denial returns its marker. Invalid submissions preserve
+unexpired state. Fixed decision errors are Missing, InvalidToken, InvalidDecision,
+Unavailable; codec/time/context failures (including ConsentReady binding mismatch)
+are Unavailable, without diagnostics or identity data. Preparation keeps StoreError
+classes; an Authenticated-state binding mismatch is Missing. Expired entries are pruned.
+The shared configured count cap includes all three memory kinds, with no TTL refresh
+or extension. This gives atomic one-use decisions only within one memory instance;
+no distributed consent, atomic code persistence, HTTP or startup hook is added.
 
 ### Store-provided source witnesses
 
