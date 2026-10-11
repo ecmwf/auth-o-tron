@@ -284,6 +284,36 @@ approved capability is decoded. Repeated trusted restores can recreate sessions;
 CSRF does not supply distributed single use. The memory and shared Valkey stores
 below atomically transition/consume the stored session.
 
+## Consent-derived code-grant capability
+
+`oauth::code_grant::CodeGrant::from_consent(approval, config, source_id, browser_hash,
+server_now_ms)` consumes an opaque `ConsentedAuthorization` from checked explicit
+approval. It accepts no raw User, consent boolean or request-selected timestamp.
+The source ID and browser hash are trusted server inputs. Construction rechecks
+the actual source-ID hash, binding, current registry/callback/resource/scope policy
+and identity age through the bounded private authenticated-context codec. This
+restores the verified snapshot; it does not rerun providers or augmenters.
+
+Expiry is the minimum of trusted construction time plus `authorization_code_ttl_seconds`
+(default 60, range 30–300), the approval ceiling and the recomputed context deadline.
+Policy relaxation cannot extend approval or an existing grant. Read-only getters
+expose the proved identity, all consented requested scopes, exact client/callback/
+resource, opaque client state, S256 challenge and verification/issue/expiry times.
+Client state remains untrusted text, never identity or a logging field. No raw
+credentials or plaintext verifier are retained. The type has private fields and
+no Debug, Clone, Serialize, Deserialize or raw-identity constructor.
+
+`validate_redemption` is a pure check returning only `Result<(), CodeGrantError>`.
+It requires exact client ID, callback (including native loopback port), mandatory
+resource and a valid S256 verifier, then rechecks current registry and role/realm/
+scope policy and freshness. Time before issuance is InvalidTime (no skew allowance);
+time at or after code expiry is Expired. Errors are fixed Configuration, InvalidTime,
+InvalidContext, Expired and InvalidRedemption, without submitted values. Checks do
+not consume the grant and supply no token-signing proof: a future backend must
+atomically consume a one-use code before returning issuance authority. Code IDs,
+private grant codec, backend code storage and HTTP integration are future slices.
+This capability is explicitly usable with OAuth disabled; startup remains Unsupported.
+
 ## Typed access-token capability
 
 `oauth::tokens::TokenIssuer::new(&config, &key_manager)` validates config, requires

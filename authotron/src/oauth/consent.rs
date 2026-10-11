@@ -57,6 +57,9 @@ pub struct ConsentedAuthorization {
     expires_at_ms: u64,
 }
 impl ConsentedAuthorization {
+    pub(super) fn into_parts(self) -> (AuthenticatedAuthorization, u64) {
+        (self.context, self.expires_at_ms)
+    }
     pub fn as_user(&self) -> &User {
         self.context.as_user()
     }
