@@ -11,7 +11,6 @@
 //! A memory-backend restart signs users out. Key revocation is observed on the next verification;
 //! an existing identity view can remain signed in until its absolute expiry.
 
-use crate::config::{BrowserBackendConfig, BrowserSessionConfig};
 use crate::{
     auth::Auth,
     metrics::Metrics,
@@ -27,6 +26,8 @@ use std::{
 use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
+mod valkey;
+use crate::config::{BrowserBackendConfig, BrowserSessionConfig};
 
 const CAPACITY: usize = 1024;
 const FORM_LIMIT: usize = 120;
@@ -41,11 +42,49 @@ const IDENTITY_TEXT_LIMIT: usize = 256;
 const ROLE_COUNT_LIMIT: usize = 64;
 const ROLE_BYTES_LIMIT: usize = 128;
 const IDENTITY_BYTES_LIMIT: usize = 16 * 1024;
+const SESSION_WIRE_BYTES_LIMIT: usize = 65536;
+const SESSION_ENVELOPE_BYTES_RESERVE: usize = 36;
 pub(crate) const DISPLAY_ATTRIBUTES: [(&str, &str, usize); 3] = [
     ("ecmwf-email", "ECMWF email", 320),
     ("email", "Email", 320),
     ("display_name", "Display name", 256),
 ];
+
+/// The wire payload accepts only the browser projection, never arbitrary User fields.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredIdentity {
+    version: u8,
+    username: String,
+    realm: String,
+    roles: Vec<String>,
+    attributes: HashMap<String, String>,
+}
+
+impl StoredIdentity {
+    fn from_user(user: User) -> Self {
+        Self {
+            version: 1,
+            username: user.username,
+            realm: user.realm,
+            roles: user.roles,
+            attributes: user.attributes,
+        }
+    }
+    fn into_user(self) -> Result<User, BrowserVerifyError> {
+        if self.version != 1 {
+            return Err(BrowserVerifyError::Unavailable);
+        }
+        Ok(User::new(
+            self.realm,
+            self.username,
+            Some(self.roles),
+            Some(self.attributes),
+            None,
+            None,
+        ))
+    }
+}
 
 /// Check borrowed data before copying only the bounded browser projection.
 /// Role limits reject the whole identity, never truncate entitlements.
@@ -106,6 +145,12 @@ impl LoginFlow {
     pub(crate) fn metric_label(self) -> &'static str {
         match self {
             Self::ApiKey => "ecmwf-api-key",
+            Self::Basic => "basic",
+        }
+    }
+    fn tag(self) -> &'static str {
+        match self {
+            Self::ApiKey => "api-key",
             Self::Basic => "basic",
         }
     }
@@ -189,6 +234,7 @@ pub struct BrowserLoginState {
     client: reqwest::Client,
     inflight: Semaphore,
     settings: Option<BrowserSessionConfig>,
+    valkey: Option<valkey::Valkey>,
 }
 
 fn opaque_id() -> String {
@@ -236,21 +282,33 @@ impl BrowserLoginState {
                 }
             })),
             settings: settings.map(|s| (**s).clone()),
+            valkey: None,
         })
     }
 
     pub async fn initialize(&mut self, enabled: bool) -> Result<(), &'static str> {
-        if enabled {
-            self.require_memory()
-                .map_err(|_| "browser backend is not available")?;
+        if enabled
+            && let Some(settings) = &self.settings
+            && matches!(settings.backend, BrowserBackendConfig::Valkey { .. })
+        {
+            self.valkey = Some(
+                valkey::Valkey::connect(&settings.backend)
+                    .await
+                    .map_err(|_| "browser Valkey startup failed (connection or authentication)")?,
+            );
         }
         Ok(())
     }
 
-    fn require_memory(&self) -> Result<(), BrowserVerifyError> {
+    fn shared(&self) -> Result<Option<&valkey::Valkey>, BrowserVerifyError> {
         match self.settings.as_ref().map(|s| &s.backend) {
-            Some(BrowserBackendConfig::Memory {}) => Ok(()),
-            _ => Err(BrowserVerifyError::Unavailable),
+            Some(BrowserBackendConfig::Memory {}) => Ok(None),
+            Some(BrowserBackendConfig::Valkey { .. }) => self
+                .valkey
+                .as_ref()
+                .map(Some)
+                .ok_or(BrowserVerifyError::Unavailable),
+            None => Err(BrowserVerifyError::Unavailable),
         }
     }
 
@@ -264,8 +322,32 @@ impl BrowserLoginState {
     }
 
     pub async fn form(&self, flow: LoginFlow) -> Result<(String, String), BrowserVerifyError> {
-        self.require_memory()?;
-        {
+        if let Some(backend) = self.shared()? {
+            let s = self
+                .settings
+                .as_ref()
+                .ok_or(BrowserVerifyError::Unavailable)?;
+            let sid = opaque_id();
+            let csrf = opaque_id();
+            let result = backend
+                .call(&[
+                    "form".into(),
+                    sid.clone(),
+                    csrf.clone(),
+                    flow.tag().into(),
+                    (s.transaction_ttl_seconds * 1000).to_string(),
+                    s.max_forms.to_string(),
+                    s.max_forms_per_window.to_string(),
+                    (s.rate_window_seconds * 1000).to_string(),
+                ])
+                .await?;
+            match result.first().map(String::as_str) {
+                Some("ok") => Ok((sid, csrf)),
+                Some("limited") => Err(BrowserVerifyError::Limited),
+                Some("capacity") => Err(BrowserVerifyError::Capacity),
+                _ => Err(BrowserVerifyError::Unavailable),
+            }
+        } else {
             let mut entries = self
                 .entries
                 .lock()
@@ -307,16 +389,25 @@ impl BrowserLoginState {
         if !valid_id(sid) || !valid_id(csrf) {
             return Ok(false);
         }
-        self.require_memory()?;
-        self.consume_form_for(sid, csrf, flow)
+        if let Some(backend) = self.shared()? {
+            Ok(backend
+                .call(&["consume".into(), sid.into(), csrf.into(), flow.tag().into()])
+                .await?
+                .first()
+                .map(String::as_str)
+                == Some("ok"))
+        } else {
+            self.consume_form_for(sid, csrf, flow)
+        }
     }
 
     pub async fn discard(&self, sid: &str) -> Result<(), BrowserVerifyError> {
         if !valid_id(sid) {
             return Ok(());
         }
-        self.require_memory()?;
-        {
+        if let Some(backend) = self.shared()? {
+            backend.call(&["discard".into(), sid.into()]).await?;
+        } else {
             self.discard_form(sid)?;
         }
         Ok(())
@@ -329,16 +420,86 @@ impl BrowserLoginState {
     ) -> Result<String, BrowserVerifyError> {
         let user = browser_identity(&user)?;
         let previous = previous.filter(|id| valid_id(id));
-        self.require_memory()?;
-        self.memory_save_session(user, previous)
+        if let Some(backend) = self.shared()? {
+            let sid = opaque_id();
+            let payload = serde_json::to_string(&StoredIdentity::from_user(user))
+                .map_err(|_| BrowserVerifyError::Rejected)?;
+            if payload.len() > SESSION_WIRE_BYTES_LIMIT - SESSION_ENVELOPE_BYTES_RESERVE {
+                return Err(BrowserVerifyError::Rejected);
+            }
+            let result = backend
+                .call(&[
+                    "session".into(),
+                    sid.clone(),
+                    previous.unwrap_or("").into(),
+                    payload,
+                    (self.ttl * 1000).to_string(),
+                    self.settings
+                        .as_ref()
+                        .ok_or(BrowserVerifyError::Unavailable)?
+                        .max_sessions
+                        .to_string(),
+                ])
+                .await?;
+            match result.first().map(String::as_str) {
+                Some("ok") => {}
+                Some("capacity") => return Err(BrowserVerifyError::Capacity),
+                _ => return Err(BrowserVerifyError::Unavailable),
+            }
+            Ok(sid)
+        } else {
+            self.memory_save_session(user, previous)
+        }
     }
 
     pub async fn lookup(&self, sid: &str) -> Result<Option<BrowserSession>, BrowserVerifyError> {
         if !valid_id(sid) {
             return Ok(None);
         }
-        self.require_memory()?;
-        self.memory_session(sid)
+        if let Some(backend) = self.shared()? {
+            let result = backend.call(&["read".into(), sid.into()]).await?;
+            match result.first().map(String::as_str) {
+                Some("missing") => return Ok(None),
+                Some("ok") => {}
+                _ => return Err(BrowserVerifyError::Unavailable),
+            }
+            let value = result
+                .get(1)
+                .filter(|v| v.len() <= SESSION_WIRE_BYTES_LIMIT)
+                .ok_or(BrowserVerifyError::Unavailable)?;
+            let mut parts = value.splitn(3, '\n');
+            if parts.next() != Some("1") {
+                return Err(BrowserVerifyError::Unavailable);
+            }
+            let expiry = parts
+                .next()
+                .and_then(|v| v.parse::<u64>().ok())
+                .ok_or(BrowserVerifyError::Unavailable)?;
+            let expires_at_utc = i64::try_from(expiry)
+                .ok()
+                .and_then(chrono::DateTime::from_timestamp_millis)
+                .ok_or(BrowserVerifyError::Unavailable)?;
+            let stored: StoredIdentity =
+                serde_json::from_str(parts.next().ok_or(BrowserVerifyError::Unavailable)?)
+                    .map_err(|_| BrowserVerifyError::Unavailable)?;
+            let user = stored.into_user()?;
+            let projection =
+                browser_identity(&user).map_err(|_| BrowserVerifyError::Unavailable)?;
+            if user.attributes.len() != projection.attributes.len() {
+                return Err(BrowserVerifyError::Unavailable);
+            }
+            let expires_at = SystemTime::UNIX_EPOCH
+                .checked_add(Duration::from_millis(expiry))
+                .ok_or(BrowserVerifyError::Unavailable)?;
+            Ok(Some(BrowserSession {
+                user: Arc::new(projection),
+                expires_at,
+                expires_at_utc,
+                expires: Instant::now(),
+            }))
+        } else {
+            self.memory_session(sid)
+        }
     }
 
     #[cfg(test)]
@@ -439,8 +600,35 @@ impl BrowserLoginState {
                     .as_ref()
                     .map_or(10, |s| s.verification_timeout_seconds),
             );
-        self.require_memory()?;
-        {
+        let mut lease = if let Some(backend) = self.shared()? {
+            let s = self
+                .settings
+                .as_ref()
+                .ok_or(BrowserVerifyError::Unavailable)?;
+            if let Some(cap) = s.max_shared_inflight_logins {
+                Some(
+                    tokio::time::timeout_at(
+                        deadline,
+                        backend.admit(
+                            s.max_logins_per_window,
+                            s.rate_window_seconds,
+                            cap,
+                            s.verification_timeout_seconds,
+                        ),
+                    )
+                    .await
+                    .map_err(|_| BrowserVerifyError::Unavailable)??,
+                )
+            } else {
+                tokio::time::timeout_at(
+                    deadline,
+                    backend.quota(s.max_logins_per_window, s.rate_window_seconds),
+                )
+                .await
+                .map_err(|_| BrowserVerifyError::Unavailable)??;
+                None
+            }
+        } else {
             let mut entries = self
                 .entries
                 .lock()
@@ -454,10 +642,14 @@ impl BrowserLoginState {
             ) {
                 return Err(BrowserVerifyError::Limited);
             }
-        }
+            None
+        };
         let result = tokio::time::timeout_at(deadline, operation)
             .await
             .unwrap_or(Err(BrowserVerifyError::Timeout));
+        if let Some(lease) = &mut lease {
+            lease.release().await?;
+        }
         result
     }
 
@@ -727,6 +919,7 @@ mod tests {
             client: reqwest::Client::new(),
             inflight: Semaphore::new(MAX_INFLIGHT),
             settings: Some(serde_json::from_value(serde_json::json!({"public_origin": "https://login.example.test", "backend": {"type": "memory"}})).unwrap()),
+            valkey: None,
         }
     }
 
