@@ -11,6 +11,7 @@
 pub mod logging;
 pub mod oauth;
 pub mod oauth_policy;
+pub mod oauth_signing;
 pub mod store;
 pub mod types;
 pub mod ui;
@@ -18,6 +19,7 @@ pub mod ui;
 pub use logging::*;
 pub use oauth::*;
 pub use oauth_policy::*;
+pub use oauth_signing::*;
 pub use store::*;
 pub use types::*;
 pub use ui::*;

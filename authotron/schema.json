@@ -1020,6 +1020,17 @@
           },
           "maxItems": 64,
           "default": []
+        },
+        "signing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OAuthSigningConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "additionalProperties": false
@@ -1144,6 +1155,58 @@
         "required_roles"
       ]
     },
+    "OAuthSigningConfig": {
+      "type": "object",
+      "properties": {
+        "active_kid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OAuthSigningKey"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "active_kid",
+        "keys"
+      ]
+    },
+    "OAuthSigningKey": {
+      "description": "Admin-selected paths only; key contents are never part of the config contract.",
+      "type": "object",
+      "properties": {
+        "kid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "private_key_file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "public_key_file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kid"
+      ]
+    },
     "ConfigV2": {
       "type": "object",
       "properties": {
@@ -1218,7 +1281,8 @@
             "authorization_code_ttl_seconds": 60,
             "access_token_ttl_seconds": 300,
             "clients": [],
-            "resources": []
+            "resources": [],
+            "signing": null
           }
         }
       },

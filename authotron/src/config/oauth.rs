@@ -9,6 +9,7 @@
 //! Configuration contract for future OAuth authorization-server support.
 
 use super::oauth_policy::{ClientResource, OAuthResource};
+use super::oauth_signing::OAuthSigningConfig;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +26,7 @@ pub struct OAuthConfig {
     pub clients: Vec<OAuthClient>,
     #[schemars(length(max = 64))]
     pub resources: Vec<OAuthResource>,
+    pub signing: Option<OAuthSigningConfig>,
 }
 
 impl Default for OAuthConfig {
@@ -36,12 +38,16 @@ impl Default for OAuthConfig {
             access_token_ttl_seconds: 300,
             clients: Vec::new(),
             resources: Vec::new(),
+            signing: None,
         }
     }
 }
 
 impl OAuthConfig {
     pub fn validate(&self) -> Result<(), &'static str> {
+        if let Some(signing) = &self.signing {
+            signing.validate()?;
+        }
         if self.enabled && self.issuer.is_none() {
             return Err("oauth.issuer is required when OAuth is enabled");
         }

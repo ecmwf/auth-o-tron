@@ -98,8 +98,45 @@ existing user scopes never grant permissions. Requests require 1–32 unique val
 scopes; failures reject the whole request, and success retains request order.
 Fixed errors distinguish invalid configuration/client/resource/scope and access denial.
 
+## RS256 signing references
+
+`oauth.signing` is optional and defaults to absent. This slice validates **file
+references only**; it does not read files, load keys, sign tokens, or publish JWKS.
+Supplying references is allowed while OAuth is disabled. Example under `oauth`:
+
+```yaml
+signing:
+  active_kid: signing-2026-10
+  keys:
+    - kid: signing-2026-10
+      private_key_file: /run/secrets/oauth/active.pem
+    - kid: signing-2026-09
+      public_key_file: /run/secrets/oauth/previous-public.pem
+```
+
+There must be 1–8 keys with unique IDs of 1–64 ASCII bytes (letters, digits,
+`.`, `_`, `-`). `active_kid` must select a key with a private file reference.
+Inactive keys may reference a public file, a private file, or both; a private-only
+key is intended to provide its derived public key. References must be absolute
+UTF-8 paths of at most 4096 bytes without control characters and with a filename
+component; `/` is rejected. This is not a regular-file or existence check. Path
+constraints are runtime-only; JSON Schema string lengths cannot express UTF-8
+byte limits. Paths are trusted
+admin configuration, never request-selected. Inline key material, algorithm
+selection, and unknown fields are rejected.
+
+File existence, bounded PEM reads, 2048–4096-bit RSA checks, key-pair matching, RS256
+encoding, and public-only JWK projection require the next key-loader slice.
+That loader must support mounted Secret projected-symlink paths while checking
+that the opened target is a regular file.
+Missing signing config does not replace the current Unsupported startup guard;
+a future operational authorization server must require usable signing keys.
+No automatic reload or rotation is implemented. Future deployments must coordinate
+active-key changes across replicas and retain old public keys through the longest
+issued access-token lifetime plus clock skew before retirement.
+
 Authorization codes, PKCE S256, RS256 access tokens, discovery/JWKS, browser CORS,
 and MCP integration remain future capabilities. No tokens are issued and
-`enabled: true` still fails startup as Unsupported. No OAuth signing keys
+`enabled: true` still fails startup as Unsupported. Only OAuth signing file references
 are configured here. The legacy HMAC `jwt.secret` must never be published through
 future JWKS or reused as an OAuth asymmetric signing key.
