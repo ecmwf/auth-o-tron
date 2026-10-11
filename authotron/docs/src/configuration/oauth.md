@@ -150,6 +150,25 @@ No automatic reload or rotation is implemented. Future deployments must coordina
 active-key changes across replicas and retain old public keys through the longest
 issued access-token lifetime plus clock skew before retirement.
 
+## Strict augmentation precursor
+
+`Auth::check_augmenters_strict(user, &metrics)` is available in-process and returns
+`Result<User, AugmentationError>`. It applies the existing exact realm filter,
+runs ordinary matching augmenters in parallel, waits for all of them, then runs
+`plain_advanced` augmenters sequentially in configuration order. Any ordinary
+failure prevents the advanced phase; an advanced failure stops that sequence.
+Failures discard the identity result, including mutations made before an error.
+Fixed errors are `Failed` and `Unavailable` (identity ownership could not be recovered).
+Strict pipeline failure logs use a fixed diagnostic; attempt/duration metrics
+remain once per normally completed augmenter. Panics are not caught by this helper.
+Built-in implementation logging is documented in [Augmenters](augmenters.md);
+third-party implementations remain responsible for their own log contents.
+Legacy best-effort augmentation retains its
+existing partial-mutation, logging and continuation behavior. Callers still own
+fresh credential verification, deadlines and bounded identity projection. This
+helper is not authentication, consent or grant proof and is not integrated into
+browser routes or OAuth credential handling yet; OAuth startup remains Unsupported.
+
 ## Typed access-token capability
 
 `oauth::tokens::TokenIssuer::new(&config, &key_manager)` validates config, requires

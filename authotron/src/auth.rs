@@ -26,6 +26,19 @@ use tracing::{debug, info, warn};
 
 const AUTH_LOG_SUPPRESSION_WINDOW: Duration = Duration::from_secs(30);
 
+/// Fixed augmentation failures, without identity or augmenter diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AugmentationError {
+    Failed,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AugmentationMode {
+    BestEffort,
+    Strict,
+}
+
 /// Holds all authentication providers, augmenters, and a reference to the store.
 pub struct Auth {
     pub providers: Vec<Box<dyn Provider>>,
@@ -453,7 +466,8 @@ impl Auth {
         user: Arc<Mutex<User>>,
         metrics: &Metrics,
         realm: &str,
-    ) {
+        mode: AugmentationMode,
+    ) -> Result<(), AugmentationError> {
         let metrics = metrics.clone();
         let name = augmenter.get_name().to_string();
         let aug_type = augmenter.get_type().to_string();
@@ -466,6 +480,7 @@ impl Auth {
             Ok(_) => {
                 metrics.record_augmenter_attempt(&name, &aug_type, realm, "success");
                 metrics.record_augmenter_duration(&aug_type, realm, duration);
+                Ok(())
             }
             Err(e) => {
                 if let Some(suppressed_count) = should_emit(
@@ -479,17 +494,43 @@ impl Auth {
                         augmenter_type = aug_type.as_str(),
                         realm,
                         suppressed_count,
-                        error = e.as_str(),
+                        error = if mode == AugmentationMode::Strict {
+                            "augmentation failed"
+                        } else {
+                            e.as_str()
+                        },
                         "augmenter failed"
                     );
                 }
                 metrics.record_augmenter_attempt(&name, &aug_type, realm, "error");
                 metrics.record_augmenter_duration(&aug_type, realm, duration);
+                Err(AugmentationError::Failed)
             }
         }
     }
 
     pub(crate) async fn check_augmenters(&self, user: User, metrics: &Metrics) -> Option<User> {
+        self.augment(user, metrics, AugmentationMode::BestEffort)
+            .await
+            .ok()
+    }
+
+    /// Caller supplies a freshly verified user. This checks augmentation only, not
+    /// authentication, consent or grant proof; no partial identity is returned on failure.
+    pub async fn check_augmenters_strict(
+        &self,
+        user: User,
+        metrics: &Metrics,
+    ) -> Result<User, AugmentationError> {
+        self.augment(user, metrics, AugmentationMode::Strict).await
+    }
+
+    async fn augment(
+        &self,
+        user: User,
+        metrics: &Metrics,
+        mode: AugmentationMode,
+    ) -> Result<User, AugmentationError> {
         debug!(
             event_name = "auth.augmenters.started",
             event_domain = "auth",
@@ -507,22 +548,31 @@ impl Auth {
             .partition(|a| a.get_type().eq_ignore_ascii_case("plain_advanced"));
 
         // Run non-advanced in parallel
-        join_all(
+        let outcomes = join_all(
             parallel
                 .iter()
-                .map(|aug| self.run_augmenter(aug.as_ref(), user.clone(), metrics, &realm)),
+                .map(|aug| self.run_augmenter(aug.as_ref(), user.clone(), metrics, &realm, mode)),
         )
         .await;
+        if mode == AugmentationMode::Strict && outcomes.iter().any(Result::is_err) {
+            return Err(AugmentationError::Failed);
+        }
 
         // Then run advanced-plain synchronously
         for aug in serial {
-            self.run_augmenter(aug.as_ref(), user.clone(), metrics, &realm)
+            let outcome = self
+                .run_augmenter(aug.as_ref(), user.clone(), metrics, &realm, mode)
                 .await;
+            if mode == AugmentationMode::Strict {
+                outcome?;
+            }
         }
 
         // All augmenter futures have completed; take ownership without copying an
         // unbounded identity before the browser can apply its projection limits.
-        Arc::try_unwrap(user).ok().map(Mutex::into_inner)
+        Arc::try_unwrap(user)
+            .map(Mutex::into_inner)
+            .map_err(|_| AugmentationError::Unavailable)
     }
 }
 
@@ -1161,6 +1211,222 @@ mod tests {
         assert!(user.roles.contains(&"base".to_string()));
         assert!(user.roles.contains(&"derived".to_string()));
     }
+    type RetainedUser = Arc<Mutex<Option<Arc<Mutex<User>>>>>;
+    struct MockAugmenter {
+        name: &'static str,
+        kind: &'static str,
+        realm: &'static str,
+        fail: bool,
+        required: Option<&'static str>,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+        retained: Option<RetainedUser>,
+    }
+    #[async_trait]
+    impl Augmenter for MockAugmenter {
+        fn get_name(&self) -> &str {
+            self.name
+        }
+        fn get_type(&self) -> &str {
+            self.kind
+        }
+        fn get_realm(&self) -> &str {
+            self.realm
+        }
+        async fn augment(&self, user: Arc<Mutex<User>>) -> Result<(), String> {
+            self.calls.lock().await.push(self.name);
+            let mut guard = user.lock().await;
+            if self
+                .required
+                .is_some_and(|role| !guard.roles.iter().any(|r| r == role))
+            {
+                return Err("required predecessor did not run".into());
+            }
+            guard.roles.push(self.name.into());
+            drop(guard);
+            if let Some(retained) = &self.retained {
+                *retained.lock().await = Some(user);
+            }
+            if self.fail {
+                Err("private augmenter diagnostic".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+    fn mock(
+        calls: &Arc<Mutex<Vec<&'static str>>>,
+        name: &'static str,
+        kind: &'static str,
+        fail: bool,
+        required: Option<&'static str>,
+    ) -> MockAugmenter {
+        MockAugmenter {
+            name,
+            kind,
+            realm: "r1",
+            fail,
+            required,
+            calls: calls.clone(),
+            retained: None,
+        }
+    }
+    fn augmentation_auth(augmenters: Vec<Box<dyn Augmenter>>) -> Auth {
+        Auth {
+            providers: vec![],
+            augmenters,
+            config: AuthConfig::default(),
+            token_store: Arc::new(DummyStore),
+        }
+    }
+    fn augmentation_user() -> User {
+        User {
+            username: "verified-fixture".into(),
+            realm: "r1".into(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn strict_parallel_failure_discards_mutations_and_skips_advanced_legacy_continues() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let auth = augmentation_auth(vec![
+            Box::new(mock(
+                &calls,
+                "advanced",
+                "PLAIN_ADVANCED",
+                false,
+                Some("bad"),
+            )),
+            Box::new(mock(&calls, "bad", "plain", true, None)),
+            Box::new(mock(&calls, "good", "ldap", false, None)),
+        ]);
+        let metrics = Metrics::new();
+        assert_eq!(
+            auth.check_augmenters_strict(augmentation_user(), &metrics)
+                .await
+                .err(),
+            Some(AugmentationError::Failed)
+        );
+        assert_eq!(*calls.lock().await, ["bad", "good"]);
+        assert!(!logs_contain("private augmenter diagnostic"));
+        assert!(logs_contain("augmentation failed"));
+        for (name, kind, result) in [("bad", "plain", "error"), ("good", "ldap", "success")] {
+            assert_eq!(
+                get_counter_value(
+                    &metrics,
+                    "augmenter_attempts_total",
+                    &[
+                        ("augmenter_name", name),
+                        ("augmenter_type", kind),
+                        ("realm", "r1"),
+                        ("result", result)
+                    ]
+                ),
+                1.0
+            );
+            assert_eq!(
+                get_histogram_count(
+                    &metrics,
+                    "augmenter_duration_seconds",
+                    &[("augmenter_type", kind), ("realm", "r1")]
+                ),
+                1
+            );
+        }
+        calls.lock().await.clear();
+        let user = auth
+            .check_augmenters(augmentation_user(), &metrics)
+            .await
+            .unwrap();
+        assert_eq!(user.roles, ["bad", "good", "advanced"]);
+        assert_eq!(*calls.lock().await, ["bad", "good", "advanced"]);
+    }
+
+    #[tokio::test]
+    async fn strict_advanced_failure_stops_sequence_legacy_keeps_partial_mutations() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let auth = augmentation_auth(vec![
+            Box::new(mock(&calls, "base", "plain", false, None)),
+            Box::new(mock(
+                &calls,
+                "bad_advanced",
+                "plain_advanced",
+                true,
+                Some("base"),
+            )),
+            Box::new(mock(
+                &calls,
+                "last",
+                "plain_advanced",
+                false,
+                Some("bad_advanced"),
+            )),
+        ]);
+        let metrics = Metrics::new();
+        assert_eq!(
+            auth.check_augmenters_strict(augmentation_user(), &metrics)
+                .await
+                .err(),
+            Some(AugmentationError::Failed)
+        );
+        assert_eq!(*calls.lock().await, ["base", "bad_advanced"]);
+        calls.lock().await.clear();
+        let user = auth
+            .check_augmenters(augmentation_user(), &metrics)
+            .await
+            .unwrap();
+        assert_eq!(user.roles, ["base", "bad_advanced", "last"]);
+    }
+
+    #[tokio::test]
+    async fn strict_success_preserves_order_realm_filter_and_passthrough() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut other = mock(&calls, "other", "plain", true, None);
+        other.realm = "r2";
+        let auth = augmentation_auth(vec![
+            Box::new(mock(&calls, "first", "plain_advanced", false, Some("base"))),
+            Box::new(other),
+            Box::new(mock(&calls, "base", "plain", false, None)),
+            Box::new(mock(&calls, "last", "plain_advanced", false, Some("first"))),
+        ]);
+        let metrics = Metrics::new();
+        let user = auth
+            .check_augmenters_strict(augmentation_user(), &metrics)
+            .await
+            .unwrap();
+        assert_eq!(user.roles, ["base", "first", "last"]);
+        assert_eq!(*calls.lock().await, ["base", "first", "last"]);
+        let original = augmentation_user();
+        let user = augmentation_auth(vec![])
+            .check_augmenters_strict(original.clone(), &metrics)
+            .await
+            .unwrap();
+        assert_eq!(user, original);
+    }
+
+    #[tokio::test]
+    async fn retained_identity_fails_ownership_in_both_modes() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let retained = Arc::new(Mutex::new(None));
+        let mut augmenter = mock(&calls, "retains", "plain", false, None);
+        augmenter.retained = Some(retained.clone());
+        let auth = augmentation_auth(vec![Box::new(augmenter)]);
+        let metrics = Metrics::new();
+        assert_eq!(
+            auth.check_augmenters_strict(augmentation_user(), &metrics)
+                .await
+                .err(),
+            Some(AugmentationError::Unavailable)
+        );
+        *retained.lock().await = None;
+        assert!(
+            auth.check_augmenters(augmentation_user(), &metrics)
+                .await
+                .is_none()
+        );
+    }
+
     /// A dummy Provider implementation for testing.
     struct DummyProvider {
         name: String,
