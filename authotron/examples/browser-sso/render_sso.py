@@ -22,6 +22,12 @@ _spec = importlib.util.spec_from_file_location(
 )
 preview = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(preview)
+_spec = importlib.util.spec_from_file_location(
+    "preview_private_paths",
+    Path(__file__).parents[1] / "kubernetes-login-preview/private_paths.py",
+)
+private_paths = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(private_paths)
 NAMESPACE = preview.NAMESPACE
 SECRET_NAME = "authotron-browser-sso"
 INGRESS_PEER = {
@@ -736,8 +742,18 @@ def write_file(path, data, private=False, exclusive=False):
         stream.write(data if isinstance(data, bytes) else data.encode())
 
 
-def load_or_create_secrets(path):
-    path = check_path(path)
+def checked_private_path(path, project):
+    return check_path(
+        private_paths.checked_private_path(
+            path, project, preview.SOURCE_FILES, preview.SOURCE_DIRS
+        )
+    )
+
+
+def load_or_create_secrets(path, *, project=None):
+    if project is None:
+        project = Path(__file__).resolve().parents[3]
+    path = checked_private_path(path, project)
     if path.exists():
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         with os.fdopen(fd) as stream:
@@ -811,8 +827,9 @@ def main():
         )
         if NAMESPACE != "authotron-palyground":
             raise ValueError("unexpected target namespace")
-        output = check_path(args.output_dir)
-        secret_path = check_path(args.secret_file)
+        project = Path(__file__).resolve().parents[3]
+        output = checked_private_path(args.output_dir, project)
+        secret_path = checked_private_path(args.secret_file, project)
         outputs = [
             output / name
             for name in (
@@ -822,15 +839,15 @@ def main():
                 "build.sh",
             )
         ]
-        if secret_path in outputs:
+        if output.is_relative_to(secret_path) or any(
+            secret_path.is_relative_to(path) for path in outputs
+        ):
             raise ValueError("secret file must be separate from rendered outputs")
         for path in outputs:
-            check_path(path)
+            checked_private_path(path, project)
         output.mkdir(parents=True, exist_ok=True)
-        bundle = load_or_create_secrets(secret_path)
-        ui, sso, archive = render_bundles(
-            Path(__file__).resolve().parents[3], args.chart, profile, bundle
-        )
+        bundle = load_or_create_secrets(secret_path, project=project)
+        ui, sso, archive = render_bundles(project, args.chart, profile, bundle)
         write_file(outputs[0], yaml.safe_dump_all(ui, sort_keys=False))
         write_file(outputs[1], yaml.safe_dump_all(sso, sort_keys=False), private=True)
         write_file(outputs[2], archive)

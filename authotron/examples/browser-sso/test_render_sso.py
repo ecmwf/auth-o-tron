@@ -630,6 +630,111 @@ class RendererTests(unittest.TestCase):
         self.assertIn("unrecognized arguments: --namespace other", stderr.getvalue())
         self.assertFalse((self.root / "secret.json").exists())
 
+    def test_secret_generation_rejects_archive_paths_without_git(self):
+        for name in (*renderer.preview.SOURCE_FILES, *renderer.preview.SOURCE_DIRS):
+            path = self.project / name
+            if name in renderer.preview.SOURCE_DIRS:
+                path /= "private.json"
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                renderer.load_or_create_secrets(path, project=self.project)
+            self.assertFalse(path.exists())
+        marker = self.project / ".git"
+        marker.write_text("gitdir: synthetic-worktree")
+        with self.assertRaises(ValueError):
+            renderer.load_or_create_secrets(
+                self.project / "private.json", project=self.project
+            )
+        with patch.object(renderer, "__file__", str(self.assets / "render_sso.py")):
+            with self.assertRaises(ValueError):
+                renderer.load_or_create_secrets(self.project / "private.json")
+        path = self.root / "valid-private.json"
+        generated = renderer.load_or_create_secrets(path, project=self.project)
+        self.assertEqual(
+            renderer.load_or_create_secrets(path, project=self.project), generated
+        )
+
+    def assert_cli_paths_rejected(self, secret, output):
+        args = self.cli_args()
+        args[args.index("--secret-file") + 1] = str(secret)
+        args[args.index("--output-dir") + 1] = str(output)
+        with (
+            patch("sys.argv", args),
+            patch("sys.stderr", io.StringIO()),
+            patch.object(renderer, "__file__", str(self.assets / "render_sso.py")),
+            patch.object(renderer, "load_or_create_secrets") as generate,
+            patch.object(renderer, "render_bundles") as render,
+            patch.object(renderer.preview.subprocess, "run") as helm,
+        ):
+            with self.assertRaises(SystemExit) as error:
+                renderer.main()
+        self.assertEqual(error.exception.code, 1)
+        generate.assert_not_called()
+        render.assert_not_called()
+        helm.assert_not_called()
+
+    def test_cli_rejects_git_and_archive_locations_before_side_effects(self):
+        secret = self.root / "secret.json"
+        output = self.root / "output"
+        paths = [self.project / name for name in renderer.preview.SOURCE_FILES]
+        paths += [
+            self.project / name / "private" for name in renderer.preview.SOURCE_DIRS
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                self.assert_cli_paths_rejected(path, output)
+                self.assert_cli_paths_rejected(secret, path)
+                self.assertFalse(path.exists())
+        (self.project / ".git").write_text("gitdir: synthetic-worktree")
+        self.assert_cli_paths_rejected(self.project / "private.json", output)
+        self.assert_cli_paths_rejected(secret, self.project / "output")
+        self.assert_cli_paths_rejected(secret, self.project / ".git/output")
+        self.assertFalse(secret.exists())
+        self.assertFalse(output.exists())
+
+    def test_cli_rejects_output_file_locations_and_credential_overlaps(self):
+        output = self.root / "output"
+        secret = self.root / "secret.json"
+        for name in (
+            "ui-resources.yaml",
+            "sso-resources.yaml",
+            renderer.preview.ARCHIVE_KEY,
+            "build.sh",
+        ):
+            path = output / name
+            self.assert_cli_paths_rejected(path, output)
+            self.assert_cli_paths_rejected(path / "secret.json", output)
+        self.assert_cli_paths_rejected(output, output)
+        self.assert_cli_paths_rejected(secret, secret / "output")
+        # A permitted directory must still reject a secret-bearing output that
+        # collides with an exact archive filename before any directory is made.
+        with patch.object(renderer.preview, "SOURCE_FILES", ("sso-resources.yaml",)):
+            self.assert_cli_paths_rejected(secret, self.project)
+        self.assertFalse(output.exists())
+        self.assertFalse(secret.exists())
+
+    def test_rejected_secret_never_enters_decompressed_source_archive(self):
+        self.make_preview_fixture()
+        (self.project / ".git/config").unlink()
+        (self.project / ".git").rmdir()
+        sentinel = "synthetic-sentinel-secret-must-not-be-packaged"
+        secret_path = self.project / renderer.preview.SOURCE_DIRS[0] / "private.json"
+        with patch.object(renderer.secrets, "token_urlsafe", return_value=sentinel):
+            with self.assertRaises(ValueError):
+                renderer.load_or_create_secrets(secret_path, project=self.project)
+        self.assertFalse(secret_path.exists())
+        existing = self.project / renderer.preview.SOURCE_FILES[0]
+        before = existing.read_bytes()
+        with self.assertRaises(ValueError):
+            renderer.load_or_create_secrets(existing, project=self.project)
+        self.assertEqual(existing.read_bytes(), before)
+        archive = renderer.preview.source_archive(self.project)
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as source:
+            for member in source.getmembers():
+                if member.isfile():
+                    self.assertNotIn(
+                        sentinel.encode(), source.extractfile(member).read()
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()

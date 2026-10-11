@@ -86,7 +86,12 @@ applied outside the playground. Do not substitute all-namespace selectors.
 The renderer emits `ui-resources.yaml` and private mode-0600
 `sso-resources.yaml`, plus the whitelisted build archive. It applies nothing and
 cannot select another namespace. The private credential file is generated once
-and reused; keep it outside the Git workspace and do not print or commit it.
+and reused; do not print or commit it. The renderer enforces that the credential
+file, output directory, and rendered output files are outside Git and outside
+the preview's archived source directories and exact source filenames, including
+in projects without Git metadata. These location guards run before credential
+generation, source packaging, or Helm rendering, so generated credentials cannot
+enter the public source ConfigMap through the compressed build archive.
 The Keycloak import and proxy consume the same namespace Secret, and callback
 registration/proxy configuration derive from one immutable profile.
 
