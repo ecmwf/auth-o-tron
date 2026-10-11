@@ -214,7 +214,7 @@ fn render_page_with_dialog(config: &UiConfig, content: Markup, dialog: bool) -> 
                 link rel="icon" type="image/x-icon" href=(FAVICON_PATH);
                 link rel="stylesheet" href="/static/login.css";
                 @if dialog {
-                    script src="/static/login.js" defer {} 
+                    script src="/static/login.js" defer {}
                 }
             }
             body class="login-page" {
