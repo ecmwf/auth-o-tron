@@ -83,12 +83,15 @@ resources:
 Resources must be canonical absolute HTTPS URLs (lowercase scheme/host; no
 userinfo, query, fragment, whitespace, backslash, or explicit default port).
 Strings are retained exactly; paths/trailing slashes are distinct, with no prefix matching.
+Root resources may be registered with or without a trailing slash, as permitted
+by RFC 8707; clients must still request the exact form that was registered.
 Limits: 64 resources/bindings, 2048 URI bytes, 1–16 unique realms (1–128 ASCII bytes,
 letters/digits/`._-`), 1–32 unique scopes (1–64 RFC 6749 scope-token bytes), and
 0–32 unique required roles per scope (nonblank, control-free, ≤128 UTF-8 bytes).
 Unknown fields, duplicates and dangling references fail validation even when disabled.
 `authorize_scopes` assumes fresh verification and trusted successful augmentation;
-it does not authenticate or repair upstream fail-open augmentation. A bounded
+it does not authenticate or repair upstream fail-open augmentation. Callers must
+bound identity role data before evaluation. A bounded
 nonblank username, allowed realm, exact client binding and **all** required roles
 are required. Empty roles still require that authenticated realm. Attributes and
 existing user scopes never grant permissions. Requests require 1–32 unique valid

@@ -83,14 +83,16 @@ fn find<T>(entries: &[T], mut predicate: impl FnMut(&T) -> bool) -> Option<&T> {
 
 /// Valid `https://mcp.example.org/mcp`; invalid `https://MCP.example.org/mcp?x=1`.
 fn resource_uri(value: &str) -> bool {
+    if value.len() > 2048 {
+        return false;
+    }
     let Ok(uri) = value.parse::<http::Uri>() else {
         return false;
     };
     let Ok(url) = url::Url::parse(value) else {
         return false;
     };
-    value.len() <= 2048
-        && uri.scheme_str() == Some("https")
+    uri.scheme_str() == Some("https")
         && url.host_str().is_some()
         && !value.contains(['@', '\\'])
         && !value.chars().any(|c| c.is_whitespace() || c.is_control())
@@ -99,7 +101,8 @@ fn resource_uri(value: &str) -> bool {
         && url.port() != Some(0)
         && url.query().is_none()
         && url.fragment().is_none()
-        && value == url.as_str()
+        && (value == url.as_str()
+            || (url.path() == "/" && url.as_str().strip_suffix('/') == Some(value)))
 }
 
 impl OAuthConfig {
@@ -149,6 +152,7 @@ impl OAuthConfig {
     }
 
     /// Caller must supply a freshly verified identity with trusted, successful augmentation.
+    /// Identity role data must be bounded by the caller before policy evaluation.
     /// This function does not authenticate users or repair fail-open augmentation upstream.
     pub fn authorize_scopes(
         &self,
@@ -310,5 +314,46 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn canonical_resources_accept_both_root_forms_without_normalizing_requests() {
+        for uri in ["https://mcp.example.org", "https://mcp.example.org/"] {
+            assert!(resource_uri(uri));
+        }
+        for uri in [
+            "HTTPS://mcp.example.org/mcp",
+            "https://MCP.example.org/mcp",
+            "https://MCP.example.org",
+            "https://mcp.example.org:443",
+            "https://mcp.example.org:443/mcp",
+            "https://mcp.example.org:0/mcp",
+            "https://mcp.example.org:/mcp",
+            "https:///mcp",
+            "https://mcp.example.org/a/../mcp",
+            "https://user@mcp.example.org/mcp",
+            "https://mcp.example.org/mcp?q=1",
+            "https://mcp.example.org/mcp#fragment",
+        ] {
+            assert!(!resource_uri(uri), "{uri}");
+        }
+        let mut config: OAuthConfig = serde_json::from_value(fixture()).unwrap();
+        let root = "https://mcp.example.org";
+        config.resources[0].resource = root.into();
+        config.clients[0].resources[0].resource = root.into();
+        let user = User {
+            username: "alice".into(),
+            realm: "local".into(),
+            ..Default::default()
+        };
+        assert!(
+            config
+                .authorize_scopes("desktop", root, &["open".into()], &user)
+                .is_ok()
+        );
+        assert_eq!(
+            config.authorize_scopes("desktop", &format!("{root}/"), &["open".into()], &user),
+            Err(OAuthPolicyError::InvalidResource)
+        );
     }
 }
