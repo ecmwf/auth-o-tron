@@ -94,12 +94,10 @@ impl StoredCode {
     pub(super) fn issuer(&self) -> &str {
         &self.issuer
     }
-    // Read-only metadata for explicit shared-backend persistence in the next slice.
-    #[cfg_attr(not(test), allow(dead_code))]
+    // Read-only metadata for explicit shared-backend persistence.
     pub(super) fn code_hash(&self) -> &[u8; 32] {
         &self.code_hash
     }
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) fn payload(&self) -> &[u8] {
         &self.bytes
     }

@@ -6,10 +6,12 @@
 // granted to it by virtue of its status as an intergovernmental organisation nor
 // does it submit to any jurisdiction.
 
-//! Explicit shared authorization-input transactions, not authorization codes or grants.
+//! Explicit shared authorization transactions and atomic code issuance; no code redemption.
 
 use super::{
     authorization::ValidatedAuthorizationRequest,
+    code_grant::{CodeGrant, MAX_CODE_GRANT_BYTES},
+    codes::{AuthorizationCode, CodeIssueOutcome, CodeStoreError, IssuedCode, StoredCode},
     consent::{
         ConsentError, ConsentOutcome, ConsentSession, ConsentToken, MAX_CONSENT_SESSION_BYTES,
     },
@@ -30,6 +32,7 @@ pub struct ValkeyTransactionStore {
     config: Arc<OAuthConfig>,
     connection: ValkeyConnection,
     prefix: String,
+    code_prefix: String,
 }
 #[derive(Clone, Copy)]
 enum Operation {
@@ -77,6 +80,7 @@ impl ValkeyTransactionStore {
             config,
             connection,
             prefix: format!("{key_prefix}:oauth:authorization-transactions:v3:"),
+            code_prefix: format!("{key_prefix}:oauth:authorization-codes:v1:"),
         })
     }
     fn keys(&self, id: &TransactionId) -> [String; 2] {
@@ -88,6 +92,134 @@ impl ValkeyTransactionStore {
                 URL_SAFE_NO_PAD.encode(id.hash())
             ),
         ]
+    }
+    fn code_keys(&self, code: &AuthorizationCode) -> [String; 2] {
+        [
+            format!("{}index", self.code_prefix),
+            format!(
+                "{}record:{}",
+                self.code_prefix,
+                URL_SAFE_NO_PAD.encode(code.hash())
+            ),
+        ]
+    }
+    async fn persist_code(
+        &self,
+        id: &TransactionId,
+        code: &AuthorizationCode,
+        record: &StoredCode,
+        snapshot: (u64, &[u8], u64),
+    ) -> Result<Vec<Vec<u8>>, CodeStoreError> {
+        let (expiry, bytes, effective) = snapshot;
+        if bytes.len() > MAX_CONSENT_SESSION_BYTES
+            || record.payload().len() > MAX_CODE_GRANT_BYTES
+            || record.code_hash() != &code.hash()
+        {
+            return Err(CodeStoreError::Unavailable);
+        }
+        self.connection
+            .query(
+                redis::cmd("EVAL")
+                    .arg(include_str!("valkey_issue_code.lua"))
+                    .arg(4)
+                    .arg(&self.keys(id))
+                    .arg(&self.code_keys(code))
+                    .arg(expiry)
+                    .arg(bytes)
+                    .arg(effective)
+                    .arg(self.config.max_authorization_codes)
+                    .arg(record.expires_at_ms())
+                    .arg(URL_SAFE_NO_PAD.encode(record.code_hash()))
+                    .arg(record.issuer())
+                    .arg(record.payload())
+                    .arg(MAX_CODE_GRANT_BYTES)
+                    .arg(MAX_CONSENT_SESSION_BYTES)
+                    .arg(self.config.authorization_code_ttl_seconds * 1000),
+            )
+            .await
+            .map_err(|_| CodeStoreError::Unavailable)
+    }
+    pub async fn issue_code(
+        &self,
+        id: &TransactionId,
+        browser_hash: &[u8; 32],
+        submitted_csrf: &str,
+        decision: &str,
+    ) -> Result<CodeIssueOutcome, CodeStoreError> {
+        self.issue_code_with(
+            id,
+            browser_hash,
+            submitted_csrf,
+            decision,
+            AuthorizationCode::generate,
+        )
+        .await
+    }
+    async fn issue_code_with(
+        &self,
+        id: &TransactionId,
+        browser_hash: &[u8; 32],
+        submitted_csrf: &str,
+        decision: &str,
+        mut generate: impl FnMut() -> Result<AuthorizationCode, CodeStoreError>,
+    ) -> Result<CodeIssueOutcome, CodeStoreError> {
+        use CodeStoreError::*;
+        let (outcome, expiry, bytes, effective, now) = self
+            .consent_decision(id, browser_hash, submitted_csrf, decision)
+            .await
+            .map_err(|error| match error {
+                ConsentStoreError::Missing => Missing,
+                ConsentStoreError::InvalidToken => InvalidToken,
+                ConsentStoreError::InvalidDecision => InvalidDecision,
+                ConsentStoreError::Unavailable => Unavailable,
+            })?;
+        let ConsentOutcome::Approved(approval) = outcome else {
+            Self::mutation(
+                self.call(
+                    Operation::ConsumeConsent,
+                    id,
+                    expiry,
+                    &bytes,
+                    Some((effective, &[])),
+                )
+                .await
+                .map_err(|_| Unavailable)?,
+            )
+            .map_err(|error| {
+                if error == StoreError::Missing {
+                    Missing
+                } else {
+                    Unavailable
+                }
+            })?;
+            return Ok(CodeIssueOutcome::Denied);
+        };
+        let grant = CodeGrant::from_consent(*approval, &self.config, id, browser_hash, now)
+            .map_err(|_| Unavailable)?;
+        let payload = grant.encode().map_err(|_| Unavailable)?;
+        let issuer = self.config.issuer.as_deref().ok_or(Unavailable)?;
+        for _ in 0..4 {
+            let code = generate()?;
+            let record = StoredCode::from_backend(
+                &URL_SAFE_NO_PAD.encode(code.hash()),
+                issuer,
+                grant.expires_at_ms(),
+                &payload,
+            )?;
+            let reply = self
+                .persist_code(id, &code, &record, (expiry, &bytes, effective))
+                .await?;
+            match reply.as_slice() {
+                [status] if status == b"ok" => {
+                    return Ok(CodeIssueOutcome::Issued(IssuedCode::new(code, &grant)));
+                }
+                [status] if status == b"collision" => continue,
+                [status] if status == b"limited" => return Err(Limited),
+                [status] if status == b"missing" => return Err(Missing),
+                _ => return Err(Unavailable),
+            }
+        }
+        Err(Unavailable)
     }
     async fn call(
         &self,
@@ -407,7 +539,7 @@ impl ValkeyTransactionStore {
         browser_hash: &[u8; 32],
         submitted: &str,
         decision: &str,
-    ) -> Result<(ConsentOutcome, u64, Vec<u8>, u64), ConsentStoreError> {
+    ) -> Result<(ConsentOutcome, u64, Vec<u8>, u64, u64), ConsentStoreError> {
         use ConsentStoreError::*;
         let (now, expiry, bytes, _) =
             self.raw_read(id, Operation::ReadConsent)
@@ -429,7 +561,7 @@ impl ValkeyTransactionStore {
                 ConsentError::InvalidDecision => InvalidDecision,
                 _ => Unavailable,
             })?;
-        Ok((outcome, expiry, bytes, effective))
+        Ok((outcome, expiry, bytes, effective, now))
     }
     pub async fn decide_consent(
         &self,
@@ -438,7 +570,7 @@ impl ValkeyTransactionStore {
         submitted_csrf: &str,
         decision: &str,
     ) -> Result<ConsentOutcome, ConsentStoreError> {
-        let (outcome, expiry, bytes, effective) = self
+        let (outcome, expiry, bytes, effective, _) = self
             .consent_decision(id, browser_hash, submitted_csrf, decision)
             .await?;
         Self::mutation(
@@ -493,6 +625,193 @@ mod tests {
         command: &redis::Cmd,
     ) -> T {
         store.connection.query(command).await.unwrap()
+    }
+    async fn code_source(store: &ValkeyTransactionStore) -> (CreatedTransaction, ConsentToken) {
+        let (_, _, identity) = super::super::context::tests::fixture().await;
+        let created = store.create(request(&store.config), [7; 32]).await.unwrap();
+        let source = store.lookup_bound(&created.id, &[7; 32]).await.unwrap();
+        let (sec, micro): (u64, u64) = command(store, &redis::cmd("TIME")).await;
+        let context = AuthenticatedAuthorization::new_bound(
+            source,
+            identity,
+            &[7; 32],
+            &store.config,
+            sec * 1000 + micro / 1000,
+        )
+        .unwrap();
+        store
+            .promote_authenticated(&created.id, &[7; 32], context)
+            .await
+            .unwrap();
+        let token = store.prepare_consent(&created.id, &[7; 32]).await.unwrap();
+        (created, token)
+    }
+    async fn code_cases(backend: &BrowserBackendConfig) {
+        use CodeStoreError::*;
+        let (mut cfg, _, _) = super::super::context::tests::fixture().await;
+        cfg.issuer = Some("https://login.example.org/".into());
+        cfg.max_authorization_transactions = 1;
+        cfg.max_authorization_codes = 1;
+        cfg.authorization_code_ttl_seconds = 30;
+        let cfg = Arc::new(cfg);
+        let a = ValkeyTransactionStore::new(cfg.clone(), backend)
+            .await
+            .unwrap();
+        let b = ValkeyTransactionStore::new(cfg.clone(), backend)
+            .await
+            .unwrap();
+        let (source, token) = code_source(&a).await;
+        let (_, _, original, _) = a
+            .raw_read(&source.id, Operation::ReadConsent)
+            .await
+            .unwrap();
+        // Allow ZADD only in the source namespace; code-index ZADD is denied specifically.
+        let selector = format!("(+zadd ~{}*)", a.prefix);
+        let _: String = command(
+            &a,
+            redis::cmd("ACL")
+                .arg("SETUSER")
+                .arg("default")
+                .arg("-zadd")
+                .arg(selector),
+        )
+        .await;
+        for restore in [false, true] {
+            if restore {
+                let _: String = command(
+                    &a,
+                    redis::cmd("ACL").arg(&[
+                        "SETUSER",
+                        "default",
+                        "clearselectors",
+                        "+zadd",
+                        "-del",
+                    ]),
+                )
+                .await;
+            }
+            assert_eq!(
+                b.issue_code(&source.id, &[7; 32], token.as_secret_str(), "approve")
+                    .await
+                    .err(),
+                Some(Unavailable)
+            );
+            let (_, _, preserved, _) = a
+                .raw_read(&source.id, Operation::ReadConsent)
+                .await
+                .unwrap();
+            assert!(preserved == original);
+            let count: usize = command(&a, &redis::cmd("DBSIZE")).await;
+            assert_eq!(count, 2);
+        }
+        let _: String = command(&a, redis::cmd("ACL").arg(&["SETUSER", "default", "+del"])).await;
+        let (left, right) = tokio::join!(
+            a.issue_code(&source.id, &[7; 32], token.as_secret_str(), "approve"),
+            b.issue_code(&source.id, &[7; 32], token.as_secret_str(), "approve")
+        );
+        let outcomes = [left, right];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|result| matches!(result, Err(Missing)))
+                .count(),
+            1
+        );
+        let mut winners = outcomes.into_iter().filter_map(|result| match result {
+            Ok(CodeIssueOutcome::Issued(code)) => Some(code),
+            _ => None,
+        });
+        let code = winners.next().unwrap();
+        assert!(winners.next().is_none());
+        assert_eq!(
+            a.prepare_consent(&source.id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        assert_eq!(
+            b.issue_code(&source.id, &[7; 32], token.as_secret_str(), "approve")
+                .await
+                .err(),
+            Some(Missing)
+        );
+        let keys = a.code_keys(code.code());
+        assert!(keys[1].starts_with(&format!("{}record:", a.code_prefix)));
+        let mut fields: Vec<String> = command(&a, redis::cmd("HKEYS").arg(&keys[1])).await;
+        fields.sort();
+        assert_eq!(fields, ["code_hash", "expiry", "issuer", "payload"]);
+        let size: usize = command(&a, redis::cmd("HSTRLEN").arg(&keys[1]).arg("payload")).await;
+        assert!(size > 0 && size <= MAX_CODE_GRANT_BYTES);
+        let hash: String = command(&a, redis::cmd("HGET").arg(&keys[1]).arg("code_hash")).await;
+        let issuer: String = command(&a, redis::cmd("HGET").arg(&keys[1]).arg("issuer")).await;
+        let expiry: u64 = command(&a, redis::cmd("HGET").arg(&keys[1]).arg("expiry")).await;
+        let payload: Vec<u8> = command(&a, redis::cmd("HGET").arg(&keys[1]).arg("payload")).await;
+        let record = StoredCode::from_backend(&hash, &issuer, expiry, &payload).unwrap();
+        assert_eq!(record.code_hash(), &code.code().hash());
+        assert_eq!(record.issuer(), "https://login.example.org/");
+        assert_eq!(expiry, code.expires_at_ms());
+        assert!(expiry <= source.expires_at_ms);
+        let (sec, micro): (u64, u64) = command(&a, &redis::cmd("TIME")).await;
+        let grant = record
+            .grant(code.code(), &cfg, sec * 1000 + micro / 1000)
+            .unwrap();
+        assert_eq!(expiry, grant.issued_at_ms() + 30_000);
+        assert!(
+            !std::str::from_utf8(&payload)
+                .unwrap()
+                .contains(code.code().as_secret_str())
+        );
+        assert!(
+            !std::str::from_utf8(&payload)
+                .unwrap()
+                .contains(token.as_secret_str())
+        );
+        let ttl: i64 = command(&a, redis::cmd("PTTL").arg(&keys[1])).await;
+        assert!(ttl > 0 && ttl <= 30_000);
+        let score: u64 = command(&a, redis::cmd("ZSCORE").arg(&keys[0]).arg(&keys[1])).await;
+        assert_eq!(score, expiry);
+        let count: usize = command(&a, redis::cmd("ZCARD").arg(&keys[0])).await;
+        assert_eq!(count, 1);
+        let (second, token) = code_source(&b).await;
+        let (_, _, original, _) = a
+            .raw_read(&second.id, Operation::ReadConsent)
+            .await
+            .unwrap();
+        let mut attempts = 0;
+        let result = a
+            .issue_code_with(
+                &second.id,
+                &[7; 32],
+                token.as_secret_str(),
+                "approve",
+                || {
+                    attempts += 1;
+                    AuthorizationCode::parse(code.code().as_secret_str())
+                },
+            )
+            .await;
+        assert_eq!(result.err(), Some(Unavailable));
+        assert_eq!(attempts, 4);
+        assert_eq!(
+            b.issue_code(&second.id, &[7; 32], token.as_secret_str(), "approve")
+                .await
+                .err(),
+            Some(Limited)
+        );
+        let (_, _, preserved, _) = a
+            .raw_read(&second.id, Operation::ReadConsent)
+            .await
+            .unwrap();
+        assert!(preserved == original);
+        assert!(matches!(
+            a.issue_code(&second.id, &[7; 32], token.as_secret_str(), "deny")
+                .await
+                .unwrap(),
+            CodeIssueOutcome::Denied
+        ));
+        let count: usize = command(&a, redis::cmd("ZCARD").arg(&keys[0])).await;
+        assert_eq!(count, 1);
+        let _: usize = command(&a, redis::cmd("DEL").arg(&keys)).await;
+        let count: usize = command(&a, &redis::cmd("DBSIZE")).await;
+        assert_eq!(count, 0);
     }
     async fn consent_cases(backend: &BrowserBackendConfig) {
         let (mut cfg, _, identity) = super::super::context::tests::fixture().await;
@@ -625,11 +944,11 @@ mod tests {
         assert!(matches!(loser.as_slice(), [status] if status == b"missing"));
         let second = if left_won { left_token } else { right_token };
         // Force both validations to finish before competing CAS deletes.
-        let (left, exp, payload, effective) = a
+        let (left, exp, payload, effective, _) = a
             .consent_decision(&created.id, &[7; 32], second.as_secret_str(), "approve")
             .await
             .unwrap();
-        let (right, other_exp, other_payload, other_effective) = b
+        let (right, other_exp, other_payload, other_effective, _) = b
             .consent_decision(&created.id, &[7; 32], second.as_secret_str(), "approve")
             .await
             .unwrap();
@@ -1247,6 +1566,7 @@ mod tests {
         consent_cases(&backend).await;
         effective_deadline_and_hash_shape_cases(&backend).await;
         authenticated_cases(&backend).await;
+        code_cases(&backend).await;
         docker(&["stop", &container.0]);
         assert_eq!(
             b.lookup(&created.id, &[7; 32]).await.err(),

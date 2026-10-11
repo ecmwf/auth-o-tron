@@ -222,7 +222,7 @@ Origin/CSRF, and must recheck current policy/freshness at future issuance. This 
 in-process policy eligibility only: development-memory persistence is described
 below alongside explicit shared Valkey authenticated persistence. Durability
 depends on backend configuration. Explicit consent and atomic decision completion
-in memory and shared Valkey are described below, alongside Memory code issuance.
+in memory and shared Valkey are described below, alongside atomic code issuance.
 Memory redemption and its signing bridge are described below; HTTP/startup
 integration remains unimplemented.
 
@@ -544,13 +544,13 @@ A changed issuer or trailing-slash variant returns fixed Unavailable and cannot 
 an unexpired code; successful Memory redemption copies the **cached** issuer into its
 proof. Trusted-storage compromise can forge metadata: this is not a MAC. Shared
 namespaces still require coherent issuer/config snapshots. Shared Valkey code
-persistence and its atomic consent transition remain the next reviewed increment.
+persistence and its atomic consent transition are described below.
 
 `max_authorization_codes` sets a separate Memory code count cap, default 1024 and range
 1–100000. At the maximum, 96 KiB payloads alone permit 9.8304 GB (about 9.15 GiB), plus
 overhead. CodeStoreError classes are Missing, Limited, InvalidToken, InvalidDecision
-and Unavailable. Memory persistence and redemption are described below; shared Valkey
-code storage and HTTP/startup integration remain future work. OAuth enablement remains
+and Unavailable. Memory persistence/redemption and shared Valkey issuance are described
+below; shared redemption and HTTP/startup integration remain future work. OAuth enablement remains
 Unsupported.
 
 ### Development-memory atomic code issuance
@@ -703,11 +703,46 @@ Lost responses can leave an ambiguous consumed or renewed state; no automatic
 mutation replay or local fallback is provided. Callers still enforce Origin and
 strict duplicate/unknown-field parsing. Trusted authenticated storage and coherent
 policy snapshots remain required, and approval deletion is not atomic persistence
-of an authorization code. A future ConsentReady-to-Code transition must atomically
-persist the code while consuming consent; the current method only deletes the
+of an authorization code. The `issue_code` transition below atomically persists
+a code while consuming consent; `decide_consent` only deletes the
 session and returns an opaque consent proof. No HTTP or startup integration is added.
 
-Shared Valkey codes/redemption, HTTP token issuance, discovery/JWKS, browser CORS,
+### Shared Valkey atomic code issuance
+
+`ValkeyTransactionStore::issue_code(id, browser_hash, submitted_csrf, decision)` returns
+the same opaque Issued/Denied outcomes and fixed CodeStoreError classes as Memory.
+Rust reads ConsentReady with server `TIME`, validates source/binding/current policy,
+freshness, canonical CSRF and explicit decision, then constructs the bounded grant.
+Approval generates a random handle and preserves the producer's literal issuer in
+its envelope. Codes use `<key_prefix>:oauth:authorization-codes:v1:index` and
+`<key_prefix>:oauth:authorization-codes:v1:record:<base64url-SHA256-code-hash>`, separate
+from the v3 transaction namespace. Hashes have exactly `code_hash`, `issuer`, `expiry`
+and `payload`; payload is capped at 96 KiB, issuer at 2048 bytes and code hash at 43
+canonical base64url characters. No raw code, verifier or CSRF nonce is persisted.
+
+One four-key Lua script checks both namespaces' types, source shape and bounded
+payload before reading it, exact ConsentReady bytes/expiry/index score and current
+server time/effective deadline. It preflights code HSET/PEXPIREAT/ZADD and expired-index
+pruning plus source DEL/ZREM permissions before any writes. It checks collisions,
+prunes expired code-index entries, enforces `max_authorization_codes`, writes the code
+hash/TTL/index and deletes the source/index in one atomic execution. No Issued result
+is exposed before confirmation. Four collision attempts never overwrite another code.
+Capacity, validation, ACL and expected write-precondition failures preserve unexpired
+consent and its current nonce; validated denial consumes only the source without
+generating a code or requiring code capacity. Code expiry cannot exceed the checked
+consent/context ceiling or code TTL. Reads never refresh source TTL.
+
+Both indexes are bounded to 100000 members, without key scans. Replicas require
+coherent issuer/policy/capacity settings and trusted authenticated storage, not a MAC.
+This uses the existing bounded connector on one primary; Cluster/Sentinel discovery
+is unsupported. Unexpected OOM/write failures or lost responses can leave ambiguous
+outcomes: atomic execution is not rollback, and there is no automatic replay or
+fallback. Shared code lookup/redemption remains unimplemented; its next slice must
+bound hash shape/metadata and HSTRLEN before HGET, validate the cached issuer/actual
+code hash and grant/PKCE, and CAS-consume before returning redemption authority.
+No HTTP or startup hook is added; OAuth enablement remains Unsupported.
+
+Shared Valkey code redemption, HTTP token issuance, discovery/JWKS, browser CORS,
 and MCP integration remain future capabilities. No HTTP tokens are issued and
 `enabled: true` still fails startup as Unsupported. The legacy HMAC `jwt.secret`
 must never be published through
