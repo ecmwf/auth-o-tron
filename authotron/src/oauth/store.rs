@@ -515,6 +515,35 @@ pub(super) mod tests {
                 .is_ok()
         );
         assert!(store.entries.lock().unwrap()[&created.id.hash()].bytes == pending);
+        let (store, created, context, now) = authenticated_fixture().await;
+        let changed = {
+            let mut entries = store.entries.lock().unwrap();
+            let entry = entries.get_mut(&created.id.hash()).unwrap();
+            let mut value: serde_json::Value = serde_json::from_slice(&entry.bytes).unwrap();
+            value["state"] = json!("different-canonical-request");
+            entry.bytes = serde_json::to_vec(&value).unwrap();
+            entry.bytes.clone()
+        };
+        assert_eq!(
+            store
+                .access_at(&created.id, &[7; 32], at(now), false)
+                .unwrap()
+                .request()
+                .state(),
+            Some("different-canonical-request")
+        );
+        assert_eq!(
+            store
+                .promote_at(&created.id, &[7; 32], context, at(now))
+                .err(),
+            Some(StoreError::Unavailable)
+        );
+        {
+            let entries = store.entries.lock().unwrap();
+            let entry = entries.get(&created.id.hash()).unwrap();
+            assert!(matches!(entry.kind, StoredKind::Pending));
+            assert!(entry.bytes == changed);
+        }
         for corrupt in ["payload", "expiry"] {
             let (store, created, context, now) = authenticated_fixture().await;
             {
