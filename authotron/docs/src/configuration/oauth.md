@@ -15,6 +15,8 @@ oauth:
   access_token_ttl_seconds: 300
   authorization_transaction_ttl_seconds: 300
   max_authorization_transactions: 1024
+  max_authentication_age_seconds: 300
+  authentication_clock_skew_seconds: 30
   clients: []
   resources: []
 ```
@@ -27,6 +29,8 @@ oauth:
 | `access_token_ttl_seconds` | `300` | 60–3600 seconds inclusive |
 | `authorization_transaction_ttl_seconds` | `300` | 30–900 seconds inclusive |
 | `max_authorization_transactions` | `1024` | 1–100000 records inclusive |
+| `max_authentication_age_seconds` | `300` | 1–3600 seconds inclusive |
+| `authentication_clock_skew_seconds` | `30` | 0–60 seconds inclusive |
 
 Unknown OAuth fields are rejected. Supplied issuers and TTLs are validated even
 when disabled. Issuers must have no userinfo, query, fragment, whitespace, or
@@ -193,6 +197,28 @@ The proof is credential verification only: consent, resource policy, code/grant 
 and future age checks remain separate. No session/cookie or code is created. Existing
 browser verification retains best-effort augmentation, 256-byte names and display
 attributes. No HTTP integration or startup enablement is implemented.
+
+## Authenticated authorization context
+
+`oauth::context::AuthenticatedAuthorization::new` consumes an owned transaction and
+opaque `VerifiedOAuthIdentity`, with the browser-binding hash, current OAuth config,
+and trusted server/backend time in Unix milliseconds. It accepts no raw User and
+has no Debug, Clone, serialization or public field mutation. The codec revalidates
+the unexpired transaction/current request; binding and all requested-scope role/realm
+policy must pass before construction. It owns the existing bounded proof without
+copying identity fields or retaining attributes/scopes from credentials.
+Read-only getters expose `transaction`, `as_user`, `verified_at_ms`,
+`authorized_scopes` (eligible, not consented), and `expires_at_ms`.
+Identity age expires at exactly `verified_at_ms + max_authentication_age_seconds`;
+clock skew permits a future verification timestamp only within the configured bound.
+Skew adds no grace to that age deadline; accepted future timestamps can leave up to
+max-age plus skew relative to backend time. Context expiry is the minimum of that
+deadline and transaction expiry. Clocks must be synchronized across replicas.
+Fixed errors distinguish Configuration, InvalidTime, InvalidTransaction, Binding,
+StaleIdentity and AccessDenied, without identity data. Callers still enforce
+Origin/CSRF, and must recheck current policy/freshness at future issuance. This is
+in-process policy eligibility only: no persistence, consent flag, grant, code or
+HTTP/startup integration is implemented.
 
 ## Typed access-token capability
 

@@ -2,6 +2,7 @@
 
 pub mod authentication;
 pub mod authorization;
+pub mod context;
 pub mod keys;
 pub mod records;
 pub mod store;

@@ -1019,6 +1019,20 @@
           "maximum": 100000,
           "default": 1024
         },
+        "max_authentication_age_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 1,
+          "maximum": 3600,
+          "default": 300
+        },
+        "authentication_clock_skew_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "maximum": 60,
+          "default": 30
+        },
         "clients": {
           "type": "array",
           "items": {
@@ -1296,6 +1310,8 @@
             "access_token_ttl_seconds": 300,
             "authorization_transaction_ttl_seconds": 300,
             "max_authorization_transactions": 1024,
+            "max_authentication_age_seconds": 300,
+            "authentication_clock_skew_seconds": 30,
             "clients": [],
             "resources": [],
             "signing": null

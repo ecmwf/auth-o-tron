@@ -26,6 +26,10 @@ pub struct OAuthConfig {
     pub authorization_transaction_ttl_seconds: u64,
     #[schemars(range(min = 1, max = 100000))]
     pub max_authorization_transactions: usize,
+    #[schemars(range(min = 1, max = 3600))]
+    pub max_authentication_age_seconds: u64,
+    #[schemars(range(min = 0, max = 60))]
+    pub authentication_clock_skew_seconds: u64,
     #[schemars(length(max = 64))]
     pub clients: Vec<OAuthClient>,
     #[schemars(length(max = 64))]
@@ -42,6 +46,8 @@ impl Default for OAuthConfig {
             access_token_ttl_seconds: 300,
             authorization_transaction_ttl_seconds: 300,
             max_authorization_transactions: 1024,
+            max_authentication_age_seconds: 300,
+            authentication_clock_skew_seconds: 30,
             clients: Vec::new(),
             resources: Vec::new(),
             signing: None,
@@ -71,6 +77,12 @@ impl OAuthConfig {
         }
         if !(1..=100000).contains(&self.max_authorization_transactions) {
             return Err("oauth.max_authorization_transactions must be between 1 and 100000");
+        }
+        if !(1..=3600).contains(&self.max_authentication_age_seconds) {
+            return Err("oauth.max_authentication_age_seconds must be between 1 and 3600");
+        }
+        if self.authentication_clock_skew_seconds > 60 {
+            return Err("oauth.authentication_clock_skew_seconds must be between 0 and 60");
         }
         if self.clients.len() > 64 {
             return Err("oauth.clients must contain at most 64 clients");
@@ -283,14 +295,23 @@ mod tests {
             ("access_token_ttl_seconds", 60, 3600, 300),
             ("authorization_transaction_ttl_seconds", 30, 900, 300),
             ("max_authorization_transactions", 1, 100000, 1024),
+            ("max_authentication_age_seconds", 1, 3600, 300),
+            ("authentication_clock_skew_seconds", 0, 60, 30),
         ] {
             let property = &schema["properties"][field];
             assert_eq!(property["minimum"], min);
             assert_eq!(property["maximum"], max);
             assert_eq!(property["default"], default);
             for value in [min - 1, min, max, max + 1] {
-                let config: OAuthConfig = serde_json::from_value(json!({field: value})).unwrap();
-                assert_eq!(config.validate().is_ok(), (min..=max).contains(&value));
+                let config = serde_json::from_value::<OAuthConfig>(json!({field: value}));
+                if value < 0 {
+                    assert!(config.is_err());
+                } else {
+                    assert_eq!(
+                        config.unwrap().validate().is_ok(),
+                        (min..=max).contains(&value)
+                    );
+                }
             }
         }
     }
