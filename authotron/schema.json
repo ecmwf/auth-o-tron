@@ -1004,9 +1004,58 @@
           "minimum": 60,
           "maximum": 3600,
           "default": 300
+        },
+        "clients": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OAuthClient"
+          },
+          "maxItems": 64,
+          "default": []
         }
       },
       "additionalProperties": false
+    },
+    "OAuthClient": {
+      "description": "Locally preregistered public client; token endpoint authentication is `none`.",
+      "type": "object",
+      "properties": {
+        "client_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "application_type": {
+          "$ref": "#/$defs/ApplicationType",
+          "default": "web"
+        },
+        "redirect_uris": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "maxItems": 8
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "client_id",
+        "display_name",
+        "redirect_uris"
+      ]
+    },
+    "ApplicationType": {
+      "description": "Uses the OpenID Connect `application_type` terminology.",
+      "type": "string",
+      "enum": [
+        "web",
+        "native"
+      ]
     },
     "ConfigV2": {
       "type": "object",
@@ -1080,7 +1129,8 @@
             "enabled": false,
             "issuer": null,
             "authorization_code_ttl_seconds": 60,
-            "access_token_ttl_seconds": 300
+            "access_token_ttl_seconds": 300,
+            "clients": []
           }
         }
       },
