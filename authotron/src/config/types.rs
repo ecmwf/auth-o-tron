@@ -14,6 +14,7 @@ use std::env;
 
 use super::logging::LoggingConfig;
 use super::store::StoreConfig;
+use super::ui::UiConfig;
 use crate::augmenters::AugmenterConfig;
 use crate::providers::ProviderConfig;
 
@@ -56,6 +57,8 @@ pub struct ConfigV2 {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
 }
 
 fn default_host() -> String {
@@ -137,6 +140,7 @@ fn convert_v1_to_v2(v1: ConfigV1) -> Result<ConfigV2, String> {
         include_legacy_headers: v1.include_legacy_headers,
         logging: v1.logging,
         auth: v1.auth,
+        ui: UiConfig::default(),
     })
 }
 
@@ -259,6 +263,7 @@ services: []
         assert_eq!(c.logging.level, "info");
         assert_eq!(c.jwt.iss, "issuer");
         assert_eq!(c.auth.timeout_in_ms, 5000);
+        assert!(!c.ui.enabled);
     }
 
     #[test]
@@ -459,6 +464,7 @@ services: []
         assert!(v2.metrics.enabled);
         assert_eq!(v2.metrics.port, 9090);
         assert_eq!(v2.jwt.iss, "issuer");
+        assert!(!v2.ui.enabled);
     }
 
     #[test]

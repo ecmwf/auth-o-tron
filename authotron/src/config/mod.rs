@@ -11,7 +11,9 @@
 pub mod logging;
 pub mod store;
 pub mod types;
+pub mod ui;
 
 pub use logging::*;
 pub use store::*;
 pub use types::*;
+pub use ui::*;

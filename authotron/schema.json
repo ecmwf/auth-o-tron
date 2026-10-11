@@ -593,7 +593,7 @@
         },
         "service_version": {
           "type": "string",
-          "default": "0.2.12"
+          "default": "0.3.7"
         }
       },
       "required": [
@@ -704,6 +704,207 @@
         }
       }
     },
+    "UiConfig": {
+      "description": "Controls branding, trusted browser sign-in links, and optional direct login.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "branding": {
+          "$ref": "#/$defs/BrandingConfig",
+          "default": {
+            "application_name": "Auth-O-Tron",
+            "logo_url": null,
+            "title": null,
+            "description": null
+          }
+        },
+        "sign_in_actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/BrowserSignInAction"
+          },
+          "default": []
+        },
+        "ecmwf_api_key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DirectLoginConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "basic": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DirectLoginConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "browser_session": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BrowserSessionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "BrandingConfig": {
+      "description": "Application-owned branding; all text is rendered as escaped plain text.",
+      "type": "object",
+      "properties": {
+        "application_name": {
+          "type": "string",
+          "default": "Auth-O-Tron"
+        },
+        "logo_url": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UiUrl"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "UiUrl": {
+      "description": "A URL for escaped UI image and navigation attributes.\n\nHTTPS URLs and root-relative paths such as `/assets/aviso.png` are accepted.\nScheme-relative URLs such as `//other.example/logo.png`, script URLs such\nas `javascript:alert(1)`, and URLs containing credentials are rejected.",
+      "type": "string"
+    },
+    "BrowserSignInAction": {
+      "description": "An operator-configured entry into an application's browser login flow.",
+      "type": "object",
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "start_url": {
+          "$ref": "#/$defs/UiUrl"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "start_url"
+      ]
+    },
+    "DirectLoginConfig": {
+      "description": "Direct browser login selects one configured provider, never a submitted URL.",
+      "type": "object",
+      "properties": {
+        "provider_name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "provider_name"
+      ]
+    },
+    "BrowserSessionConfig": {
+      "description": "One origin and absolute session lifetime shared by all direct login flows.",
+      "type": "object",
+      "properties": {
+        "public_origin": {
+          "$ref": "#/$defs/UiUrl"
+        },
+        "session_ttl_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 60,
+          "maximum": 86400,
+          "default": 300
+        },
+        "backend": { "$ref": "#/$defs/BrowserBackendConfig" },
+        "transaction_ttl_seconds": {
+          "type": "integer", "format": "uint64", "minimum": 30, "maximum": 900, "default": 300
+        },
+        "max_forms": {
+          "type": "integer", "format": "uint", "minimum": 1, "maximum": 100000, "default": 1024
+        },
+        "max_sessions": {
+          "type": "integer", "format": "uint", "minimum": 1, "maximum": 100000, "default": 1024
+        },
+        "max_forms_per_window": {
+          "type": "integer", "format": "uint", "minimum": 1, "maximum": 100000, "default": 120
+        },
+        "max_logins_per_window": {
+          "type": "integer", "format": "uint", "minimum": 1, "maximum": 100000, "default": 60
+        },
+        "rate_window_seconds": {
+          "type": "integer", "format": "uint64", "minimum": 1, "maximum": 3600, "default": 60
+        },
+        "max_inflight_logins": {
+          "type": "integer", "format": "uint", "minimum": 1, "maximum": 256, "default": 8
+        },
+        "max_shared_inflight_logins": {
+          "type": ["integer", "null"], "format": "uint", "minimum": 1, "maximum": 65536, "default": null
+        },
+        "verification_timeout_seconds": {
+          "type": "integer", "format": "uint64", "minimum": 1, "maximum": 30, "default": 10
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "public_origin", "backend"
+      ]
+    },
+    "BrowserBackendConfig": {
+      "description": "A single primary endpoint; Cluster and Sentinel discovery are not supported.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": { "type": { "type": "string", "const": "memory" } },
+          "required": ["type"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "url": { "type": "string" },
+            "key_prefix": { "type": "string" },
+            "password": { "type": "string", "writeOnly": true },
+            "connect_timeout_ms": {
+              "type": "integer", "format": "uint64", "minimum": 1, "maximum": 30000, "default": 2000
+            },
+            "operation_timeout_ms": {
+              "type": "integer", "format": "uint64", "minimum": 1, "maximum": 10000, "default": 1000
+            },
+            "type": { "type": "string", "const": "valkey" }
+          },
+          "additionalProperties": false,
+          "required": ["type", "url", "key_prefix", "password"]
+        }
+      ]
+    },
     "ConfigV2": {
       "type": "object",
       "properties": {
@@ -755,6 +956,19 @@
           "$ref": "#/$defs/AuthConfig",
           "default": {
             "timeout_in_ms": 5000
+          }
+        },
+        "ui": {
+          "$ref": "#/$defs/UiConfig",
+          "default": {
+            "enabled": false,
+            "branding": {
+              "application_name": "Auth-O-Tron",
+              "logo_url": null,
+              "title": null,
+              "description": null
+            },
+            "sign_in_actions": []
           }
         }
       },
