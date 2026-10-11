@@ -306,6 +306,44 @@ mod tests {
             left.err().or(right.err()),
             Some(StoreError::Missing)
         ));
+        let staged = a.create(request(&cfg), [7; 32]).await.unwrap();
+        let (left_record, left_bytes) = a.read(&staged.id, &[7; 32]).await.unwrap();
+        let (right_record, right_bytes) = b.read(&staged.id, &[7; 32]).await.unwrap();
+        assert!(left_bytes == right_bytes);
+        assert_eq!(left_record.expires_at_ms(), right_record.expires_at_ms());
+        let (left, right) = tokio::join!(
+            a.call(
+                "consume",
+                &staged.id,
+                left_record.expires_at_ms(),
+                &left_bytes
+            ),
+            b.call(
+                "consume",
+                &staged.id,
+                right_record.expires_at_ms(),
+                &right_bytes
+            )
+        );
+        let statuses = [left.unwrap(), right.unwrap()];
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|reply| matches!(reply.as_slice(), [status] if status == b"ok"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|reply| matches!(reply.as_slice(), [status] if status == b"missing"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            b.lookup(&staged.id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
         let (seconds, micros): (u64, u64) = command(&a, &redis::cmd("TIME")).await;
         let expiry = seconds * 1000 + micros / 1000 + 1000;
         let short = TransactionId::generate().unwrap();
