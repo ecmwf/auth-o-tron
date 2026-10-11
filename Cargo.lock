@@ -139,16 +139,19 @@ dependencies = [
  "http",
  "jsonwebtoken",
  "ldap3",
+ "libc",
  "maud",
  "mockito",
  "mongodb",
  "prometheus",
  "redis",
  "reqwest",
+ "rsa",
  "schemars 1.2.1",
  "serde",
  "serde_json",
  "subtle",
+ "tempfile",
  "tokio",
  "tower",
  "tracing",
@@ -156,6 +159,7 @@ dependencies = [
  "tracing-test",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

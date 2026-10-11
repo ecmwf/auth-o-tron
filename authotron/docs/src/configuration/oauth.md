@@ -100,8 +100,9 @@ Fixed errors distinguish invalid configuration/client/resource/scope and access 
 
 ## RS256 signing references
 
-`oauth.signing` is optional and defaults to absent. This slice validates **file
-references only**; it does not read files, load keys, sign tokens, or publish JWKS.
+`oauth.signing` is optional and defaults to absent. Configuration validation checks
+**references only** and performs no file I/O. The key manager loads only on an
+explicit `oauth::keys::KeyManager::load` call; startup does not invoke it.
 Supplying references is allowed while OAuth is disabled. Example under `oauth`:
 
 ```yaml
@@ -125,10 +126,20 @@ byte limits. Paths are trusted
 admin configuration, never request-selected. Inline key material, algorithm
 selection, and unknown fields are rejected.
 
-File existence, bounded PEM reads, 2048–4096-bit RSA checks, key-pair matching, RS256
-encoding, and public-only JWK projection require the next key-loader slice.
-That loader must support mounted Secret projected-symlink paths while checking
-that the opened target is a regular file.
+The Unix loader accepts PKCS8/PKCS1 private PEM and SPKI/PKCS1 public PEM, enforcing
+2048–4096-bit RSA, private-key consistency, and matching public/private modulus and
+exponent when both files are supplied. It derives missing public keys and preserves
+configured key order, including inactive public-only rotation keys. Loads are
+all-or-nothing. Nonblocking opens follow mounted Secret projected symlinks and
+check the opened target is regular; reads are bounded to 16 KiB plus one overflow
+byte before PEM parsing. Loader-owned temporary PEM read buffers are zeroized.
+Dependency parsing is not claimed to wipe every intermediate allocation. Errors contain fixed
+classes/messages without paths, key contents, or underlying crypto errors.
+Private manager state has no Debug/Serialize or public signing API. The internal
+signing capability is limited to sibling OAuth modules, with a load-time RS256
+sign/verify consistency probe (not an access token). Public JWKS serialization
+contains only `kty`, `alg`, `use`, `kid`, `n`, and `e`; integers are unpadded
+base64url. This is an in-process capability, not an HTTP JWKS endpoint.
 Missing signing config does not replace the current Unsupported startup guard;
 a future operational authorization server must require usable signing keys.
 No automatic reload or rotation is implemented. Future deployments must coordinate
@@ -137,6 +148,6 @@ issued access-token lifetime plus clock skew before retirement.
 
 Authorization codes, PKCE S256, RS256 access tokens, discovery/JWKS, browser CORS,
 and MCP integration remain future capabilities. No tokens are issued and
-`enabled: true` still fails startup as Unsupported. Only OAuth signing file references
-are configured here. The legacy HMAC `jwt.secret` must never be published through
+`enabled: true` still fails startup as Unsupported. The legacy HMAC `jwt.secret`
+must never be published through
 future JWKS or reused as an OAuth asymmetric signing key.

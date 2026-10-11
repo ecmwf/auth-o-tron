@@ -21,6 +21,7 @@ pub mod config;
 pub mod metrics;
 pub mod middleware;
 pub mod models;
+pub mod oauth;
 pub mod providers;
 pub mod routes;
 pub mod startup;
