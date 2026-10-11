@@ -242,6 +242,27 @@ allocations are wire-bounded, not an end-to-end hard memory guarantee. Fixed cod
 errors add TooLarge, InvalidRecord and UnsupportedVersion. The development-memory
 and Valkey stores below use this private codec; no HTTP flow is wired.
 
+## Explicit in-process consent
+
+`oauth::consent::ConsentSession::new(context, source_id, config, browser_hash, now_ms)`
+requires a source-bound, unexpired authenticated context and rechecks current policy
+and browser binding before returning a session and secret `ConsentToken`.
+The token is canonical 43-character base64url from 32 OS-random bytes; only its
+SHA-256 hash is retained in the session. Render via `as_secret_str`, never URLs/logs.
+`decide` consumes the owned session, accepts only exact `approve` or `deny`, checks
+canonical submitted CSRF and constant-time hash equality, then rechecks source ID,
+binding, context time/freshness and all current requested-scope policy. Missing or
+unknown decisions never autoapprove. Approve returns opaque `ConsentedAuthorization`
+with read-only identity/scope/client/resource/callback/time getters; deny returns
+only a Denied marker. There is no partial scope selection or first-party skip.
+Session/approval expiry cannot extend the original checked context deadline, even
+if policy is relaxed later. These types have no public raw constructors, Clone,
+Debug or serde traits. Fixed errors are InvalidToken, InvalidDecision, InvalidContext,
+Unavailable. Callers still enforce Origin, strict duplicate/unknown-field request
+parsing and bound request context. Single use is Rust ownership only: no cross-pod
+atomic replay guarantee or remote fencing is provided. Consent is not an authorization
+code, grant issuance or token mint. No codec/backend state kind, HTTP or startup hook is added.
+
 ## Typed access-token capability
 
 `oauth::tokens::TokenIssuer::new(&config, &key_manager)` validates config, requires
