@@ -374,4 +374,44 @@ mod tests {
             Some(InvalidRequest)
         );
     }
+
+    #[test]
+    fn strict_decoding_and_boundaries_use_otherwise_valid_requests() {
+        let cfg = config();
+        let valid = query(&parameters());
+        for suffix in [
+            "state=%ZZ",
+            "state=%",
+            "state=%FF",
+            "unknown=%ZZ",
+            "unknown=%FF",
+        ] {
+            assert_eq!(
+                parse(&cfg, format!("{valid}&{suffix}").as_bytes()).err(),
+                Some(InvalidRequest)
+            );
+        }
+        let mut invalid_utf8 = format!("{valid}&state=").into_bytes();
+        invalid_utf8.push(0xff);
+        assert_eq!(parse(&cfg, &invalid_utf8).err(), Some(InvalidRequest));
+        for (encoded, decoded) in [("a+b", "a b"), ("a%2Bb", "a+b")] {
+            let request = parse(&cfg, format!("{valid}&state={encoded}").as_bytes()).unwrap();
+            assert_eq!(request.state(), Some(decoded));
+        }
+        for length in [1024, 1025] {
+            let raw = format!("{valid}&state={}", "x".repeat(length));
+            assert_eq!(parse(&cfg, raw.as_bytes()).is_ok(), length == 1024);
+        }
+        let prefix = format!("{valid}&ignored=");
+        let exact = format!("{prefix}{}", "x".repeat(8192 - prefix.len()));
+        assert!(parse(&cfg, exact.as_bytes()).is_ok());
+        assert_eq!(
+            parse(&cfg, format!("{exact}x").as_bytes()).err(),
+            Some(InvalidRequest)
+        );
+        for count in [32, 33] {
+            let raw = format!("{valid}{}", "&unknown=x".repeat(count - parameters().len()));
+            assert_eq!(parse(&cfg, raw.as_bytes()).is_ok(), count == 32);
+        }
+    }
 }
