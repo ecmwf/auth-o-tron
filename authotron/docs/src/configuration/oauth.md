@@ -244,6 +244,20 @@ restart persistence. Tune capacity to process budgets (up to 16 KiB per record;
 contracts are future work. Transactions prove input validation only, never login,
 consent or grants. No backend is wired at startup; OAuth remains Unsupported.
 
+### Shared Valkey connector foundation
+
+The crate-internal connector now reuses the existing validated
+`BrowserBackendConfig::Valkey` credentials, TLS and timeout settings independently
+of browser-session policy. Browser Valkey operations use that same bounded
+connection-manager implementation. Defaults remain 2 seconds to connect and
+1 second per operation; only explicit connection calls perform network I/O.
+It supports one primary endpoint, with verified `rediss` TLS and no memory fallback.
+Connector errors expose only Configuration/Unavailable classes. Connection-manager
+reconnect is distinct from command replay: commands are issued once, and timeout
+or lost-response mutation outcomes may be ambiguous; callers must not blindly retry.
+OAuth transaction Lua, dedicated namespaces and cross-replica persistence remain
+the next separately reviewed slice. No OAuth backend or connection is initialized at startup.
+
 Authorization codes, HTTP token issuance, discovery/JWKS, browser CORS,
 and MCP integration remain future capabilities. No HTTP tokens are issued and
 `enabled: true` still fails startup as Unsupported. The legacy HMAC `jwt.secret`

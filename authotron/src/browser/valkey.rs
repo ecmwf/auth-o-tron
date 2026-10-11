@@ -1,68 +1,39 @@
 use super::{BrowserVerifyError, opaque_id};
 use crate::config::ui::BrowserBackendConfig;
+use crate::utils::valkey::ValkeyConnection;
+#[cfg(test)]
 use std::time::Duration;
 
 #[derive(Clone)]
 pub(super) struct Valkey {
-    connection: redis::aio::ConnectionManager,
+    connection: ValkeyConnection,
     prefix: String,
-    timeout: Duration,
 }
 
 impl Valkey {
     pub async fn connect(settings: &BrowserBackendConfig) -> Result<Self, BrowserVerifyError> {
-        let BrowserBackendConfig::Valkey {
-            url,
-            key_prefix,
-            password,
-            connect_timeout_ms,
-            operation_timeout_ms,
-        } = settings
-        else {
+        let BrowserBackendConfig::Valkey { key_prefix, .. } = settings else {
             return Err(BrowserVerifyError::Unavailable);
         };
-        let mut info: redis::ConnectionInfo =
-            url.parse().map_err(|_| BrowserVerifyError::Unavailable)?;
-        info.redis.password = Some(password.clone());
-        let client = redis::Client::open(info).map_err(|_| BrowserVerifyError::Unavailable)?;
-        let manager = redis::aio::ConnectionManagerConfig::new()
-            .set_connection_timeout(Duration::from_millis(*connect_timeout_ms))
-            .set_response_timeout(Duration::from_millis(*operation_timeout_ms))
-            .set_number_of_retries(0);
-        let connection = tokio::time::timeout(
-            Duration::from_millis(*connect_timeout_ms),
-            redis::aio::ConnectionManager::new_with_config(client, manager),
-        )
-        .await
-        .map_err(|_| BrowserVerifyError::Unavailable)?
-        .map_err(|_| BrowserVerifyError::Unavailable)?;
-        let backend = Self {
+        let connection = ValkeyConnection::connect(settings)
+            .await
+            .map_err(|_| BrowserVerifyError::Unavailable)?;
+        Ok(Self {
             connection,
             prefix: key_prefix.clone(),
-            timeout: Duration::from_millis(*operation_timeout_ms),
-        };
-        let mut connection = backend.connection.clone();
-        tokio::time::timeout(
-            backend.timeout,
-            redis::cmd("PING").query_async::<String>(&mut connection),
-        )
-        .await
-        .map_err(|_| BrowserVerifyError::Unavailable)?
-        .map_err(|_| BrowserVerifyError::Unavailable)?;
-        Ok(backend)
+        })
     }
 
     pub async fn call(&self, args: &[String]) -> Result<Vec<String>, BrowserVerifyError> {
-        let mut connection = self.connection.clone();
         let mut command = redis::cmd("EVAL");
         command
             .arg(include_str!("valkey.lua"))
             .arg(1)
             .arg(&self.prefix)
             .arg(args);
-        tokio::time::timeout(self.timeout, command.query_async(&mut connection))
+        self.connection
+            .query(&command)
             .await
-            .map_err(|_| BrowserVerifyError::Unavailable)?
             .map_err(|_| BrowserVerifyError::Unavailable)
     }
 
@@ -169,9 +140,9 @@ mod tests {
     }
 
     async fn command<T: redis::FromRedisValue>(backend: &Valkey, name: &str, args: &[&str]) -> T {
-        redis::cmd(name)
-            .arg(args)
-            .query_async(&mut backend.connection.clone())
+        backend
+            .connection
+            .query(redis::cmd(name).arg(args))
             .await
             .unwrap()
     }

@@ -194,13 +194,20 @@ impl BrowserSessionConfig {
                 return Err(error);
             }
         }
+        self.backend.validate()
+    }
+}
+
+impl BrowserBackendConfig {
+    /// Validate connection settings independently of browser-session policy, without I/O.
+    pub(crate) fn validate(&self) -> Result<(), &'static str> {
         if let BrowserBackendConfig::Valkey {
             url,
             key_prefix,
             password,
             connect_timeout_ms,
             operation_timeout_ms,
-        } = &self.backend
+        } = self
         {
             let parsed = url::Url::parse(url).map_err(|_| "invalid browser Valkey URL")?;
             if !matches!(parsed.scheme(), "redis" | "rediss")
