@@ -310,7 +310,6 @@ async fn retrieve_ldap_user_roles(
     debug!(
         event_name = "augmenters.ldap.lookup.connecting",
         event_domain = "augmenters",
-        username = uid.as_str(),
         "connecting to LDAP to retrieve user roles"
     );
 
@@ -396,8 +395,7 @@ impl Augmenter for LDAPAugmenter {
             event_domain = "augmenters",
             augmenter_name = self.config.name.as_str(),
             augmenter_type = "ldap",
-            username = username.as_str(),
-            realm = realm.as_str(),
+            realm = self.config.realm.as_str(),
             "retrieving LDAP roles for user"
         );
         match retrieve_ldap_user_roles(self.config.clone(), username.clone()).await {
@@ -426,8 +424,7 @@ impl Augmenter for LDAPAugmenter {
                         event_domain = "augmenters",
                         augmenter_name = self.config.name.as_str(),
                         augmenter_type = "ldap",
-                        username = username.as_str(),
-                        realm = realm.as_str(),
+                        realm = self.config.realm.as_str(),
                         "LDAP augmenter returned no roles"
                     );
                 } else {
@@ -437,8 +434,7 @@ impl Augmenter for LDAPAugmenter {
                         event_domain = "augmenters",
                         augmenter_name = self.config.name.as_str(),
                         augmenter_type = "ldap",
-                        username = username.as_str(),
-                        realm = realm.as_str(),
+                        realm = self.config.realm.as_str(),
                         added_roles_count = fetched_roles_count,
                         "LDAP augmenter added roles"
                     );
@@ -451,8 +447,7 @@ impl Augmenter for LDAPAugmenter {
                     event_domain = "augmenters",
                     augmenter_name = self.config.name.as_str(),
                     augmenter_type = "ldap",
-                    username = username.as_str(),
-                    realm = realm.as_str(),
+                    realm = self.config.realm.as_str(),
                     error = err.as_str(),
                     "LDAP role lookup failed"
                 );
@@ -477,6 +472,66 @@ mod tests {
             bind_dn: Some("cn=public-fixture".into()),
             ldap_password: "public-test-password".into(),
         }
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn connection_failure_logs_omit_identity_and_connector_payloads() {
+        let mut settings = config();
+        // Invalid port rejects URL parsing before any network connection.
+        settings.uri = "ldap://127.0.0.1:invalid".into();
+        settings.bind_dn = Some("cn=ldap-private-bind-12df".into());
+        settings.ldap_password = "ldap-private-password-12df".into();
+        settings.search_base = "dc=ldap-private-base-12df".into();
+        settings.filter = Some("ldap-private-filter-12df".into());
+        let user = Arc::new(Mutex::new(User {
+            username: "ldap-private-uid-12df".into(),
+            realm: "test".into(),
+            roles: vec!["ldap-private-role-12df".into()],
+            ..Default::default()
+        }));
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            LDAPAugmenter::new(&settings).augment(user.clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(
+            error,
+            format!("Failed to retrieve LDAP user roles: {LDAP_LOOKUP_ERROR}")
+        );
+        assert_eq!(user.lock().await.roles, ["ldap-private-role-12df"]);
+        for event in [
+            "initialization",
+            "lookup.started",
+            "lookup.connecting",
+            "lookup.failed",
+        ] {
+            assert!(logs_contain(&format!("augmenters.ldap.{event}")));
+        }
+        assert!(logs_contain(LDAP_LOOKUP_ERROR));
+        assert!(!logs_contain("ldap-private-"));
+        assert!(!logs_contain(&settings.uri));
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn realm_mismatch_preserves_roles_and_omits_identity() {
+        let augmenter = LDAPAugmenter::new(&config());
+        let user = Arc::new(Mutex::new(User {
+            username: "ldap-private-uid-mismatch-49f2".into(),
+            realm: "ldap-private-realm-mismatch-49f2".into(),
+            roles: vec!["ldap-private-role-mismatch-49f2".into()],
+            ..Default::default()
+        }));
+        assert_eq!(
+            augmenter.augment(user.clone()).await.unwrap_err(),
+            "LDAP augmenter realm mismatch"
+        );
+        assert_eq!(user.lock().await.roles, ["ldap-private-role-mismatch-49f2"]);
+        assert!(logs_contain("augmenters.ldap.initialization"));
+        assert!(!logs_contain("ldap-private-"));
     }
 
     fn entry(dn: &str, roles: Vec<String>) -> SearchEntry {

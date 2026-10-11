@@ -70,8 +70,6 @@ impl Augmenter for PlainAugmenter {
                 event_domain = "augmenters",
                 augmenter_name = self.config.name.as_str(),
                 augmenter_type = "plain",
-                username = username.as_str(),
-                user_realm = realm.as_str(),
                 augmenter_realm = self.config.realm.as_str(),
                 "skipping plain augmenter because realms do not match"
             );
@@ -92,23 +90,19 @@ impl Augmenter for PlainAugmenter {
                 event_domain = "augmenters",
                 augmenter_name = self.config.name.as_str(),
                 augmenter_type = "plain",
-                username = username.as_str(),
-                realm = realm.as_str(),
+                realm = self.config.realm.as_str(),
                 "plain augmenter made no role changes"
             );
         } else {
             let added_count = additional_roles.len();
-            let added_roles = additional_roles.clone();
             user.lock().await.roles.extend(additional_roles);
             info!(
                 event_name = "augmenters.plain.roles_added",
                 event_domain = "augmenters",
                 augmenter_name = self.config.name.as_str(),
                 augmenter_type = "plain",
-                username = username.as_str(),
-                realm = realm.as_str(),
+                realm = self.config.realm.as_str(),
                 added_roles_count = added_count,
-                added_roles = ?added_roles,
                 "plain augmenter added roles"
             );
         }
@@ -154,6 +148,43 @@ roles:
             .merge(Yaml::string(config_str))
             .extract()
             .expect("Failed to parse test config")
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn logs_omit_identity_and_roles_without_changing_augmentation() {
+        const UID: &str = "plain-private-uid-7ac9";
+        const ROLE: &str = "plain-private-role-7ac9";
+        const OTHER_REALM: &str = "plain-private-realm-7ac9";
+        let mut config = make_test_config();
+        config.roles = HashMap::from([(ROLE.into(), vec![UID.into()])]);
+        let augmenter = PlainAugmenter::new(&config);
+        for (username, realm, expected) in [
+            (UID, "test-realm", vec![ROLE.to_string()]),
+            ("plain-private-unmatched-7ac9", "test-realm", vec![]),
+            (UID, OTHER_REALM, vec![]),
+        ] {
+            let user = Arc::new(Mutex::new(User {
+                username: username.into(),
+                realm: realm.into(),
+                ..Default::default()
+            }));
+            augmenter.augment(user.clone()).await.unwrap();
+            assert_eq!(user.lock().await.roles, expected);
+        }
+        for event in [
+            "initialization",
+            "roles_added",
+            "no_change",
+            "realm_mismatch",
+        ] {
+            assert!(logs_contain(&format!("augmenters.plain.{event}")));
+        }
+        assert!(logs_contain("added_roles_count=1"));
+        assert!(logs_contain("test-realm"));
+        for private in [UID, ROLE, OTHER_REALM, "plain-private-unmatched-7ac9"] {
+            assert!(!logs_contain(private));
+        }
     }
 
     #[tokio::test]

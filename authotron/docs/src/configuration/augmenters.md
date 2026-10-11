@@ -10,6 +10,18 @@ All augmenters share these common fields:
 | name | string | yes | A unique identifier for this augmenter |
 | realm | string | yes | Only apply to users authenticated through this realm |
 
+## Built-in Augmenter Logging
+
+The built-in `plain`, `plain_advanced`, and `ldap` implementations omit user
+identities, user-derived realms, and raw role/attribute payloads from their logs
+for all calls. They retain configured augmenter names/types/realms, counts,
+outcomes, and fixed diagnostics. LDAP logs omit DNs, filters, credentials, and
+raw directory diagnostics; lookup identities remain in private cache keys.
+Configured names and realms are trusted operator metadata, so avoid sensitive
+values there. Third-party augmenters are responsible for their own logging.
+This boundary does not cover central authentication logs, other application
+logs, or logs emitted by external dependencies such as the LDAP driver.
+
 ## Augmenter Types
 
 ### 1. Plain Augmenter

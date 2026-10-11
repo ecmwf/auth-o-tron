@@ -84,8 +84,6 @@ impl Augmenter for PlainAdvancedAugmenter {
                 event_domain = "augmenters",
                 augmenter_name = self.config.name.as_str(),
                 augmenter_type = "plain_advanced",
-                username = username.as_str(),
-                user_realm = realm.as_str(),
                 augmenter_realm = self.config.realm.as_str(),
                 "skipping advanced plain augmenter because realms do not match"
             );
@@ -107,8 +105,7 @@ impl Augmenter for PlainAdvancedAugmenter {
                 event_domain = "augmenters",
                 augmenter_name = self.config.name.as_str(),
                 augmenter_type = "plain_advanced",
-                username = username.as_str(),
-                realm = realm.as_str(),
+                realm = self.config.realm.as_str(),
                 "advanced plain augmenter did not match user"
             );
             return Ok(());
@@ -123,7 +120,6 @@ impl Augmenter for PlainAdvancedAugmenter {
         }
 
         let mut added_roles_count = 0usize;
-        let added_roles_for_log = roles_to_add.clone();
         let mut user_guard = user.lock().await;
         if !roles_to_add.is_empty() {
             added_roles_count = roles_to_add.len();
@@ -144,8 +140,7 @@ impl Augmenter for PlainAdvancedAugmenter {
                 event_domain = "augmenters",
                 augmenter_name = self.config.name.as_str(),
                 augmenter_type = "plain_advanced",
-                username = username.as_str(),
-                realm = realm.as_str(),
+                realm = self.config.realm.as_str(),
                 "advanced plain augmenter made no changes"
             );
         } else {
@@ -154,10 +149,8 @@ impl Augmenter for PlainAdvancedAugmenter {
                 event_domain = "augmenters",
                 augmenter_name = self.config.name.as_str(),
                 augmenter_type = "plain_advanced",
-                username = username.as_str(),
-                realm = realm.as_str(),
+                realm = self.config.realm.as_str(),
                 added_roles_count,
-                added_roles = ?added_roles_for_log,
                 upserted_attributes_count,
                 "advanced plain augmenter applied changes"
             );
@@ -207,6 +200,73 @@ augment:
     team: polytope
     location: cloud
 "#;
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn logs_omit_identity_and_payloads_without_changing_augmentation() {
+        const UID: &str = "advanced-private-uid-c85e";
+        const ROLE: &str = "advanced-private-role-c85e";
+        const OTHER_REALM: &str = "advanced-private-realm-c85e";
+        let mut config = make_test_config(YAML_1);
+        config.r#match.username = vec![UID.into()];
+        config.r#match.role = vec![ROLE.into()];
+        config.augment.roles = vec![ROLE.into()];
+        config.augment.attributes =
+            HashMap::from([("private-key-c85e".into(), "private-value-c85e".into())]);
+        let augmenter = PlainAdvancedAugmenter::new(&config);
+        for (username, realm, existing, matched) in [
+            (UID, "ecmwf", vec![], true),
+            ("advanced-private-unmatched-c85e", "ecmwf", vec![], false),
+            (UID, OTHER_REALM, vec![], false),
+            (
+                "advanced-private-rolematch-c85e",
+                "ecmwf",
+                vec![ROLE.to_string()],
+                true,
+            ),
+        ] {
+            let user = Arc::new(Mutex::new(User {
+                username: username.into(),
+                realm: realm.into(),
+                roles: existing.clone(),
+                ..Default::default()
+            }));
+            augmenter.augment(user.clone()).await.unwrap();
+            let guard = user.lock().await;
+            assert_eq!(
+                guard.roles,
+                if matched {
+                    vec![ROLE.to_string()]
+                } else {
+                    existing
+                }
+            );
+            assert_eq!(
+                guard.attributes,
+                if matched {
+                    config.augment.attributes.clone()
+                } else {
+                    HashMap::new()
+                }
+            );
+        }
+        for event in ["initialization", "applied", "no_match", "realm_mismatch"] {
+            assert!(logs_contain(&format!("augmenters.plain_advanced.{event}")));
+        }
+        assert!(logs_contain("added_roles_count=1"));
+        assert!(logs_contain("ecmwf"));
+        for private in [
+            UID,
+            ROLE,
+            OTHER_REALM,
+            "advanced-private-unmatched-c85e",
+            "advanced-private-rolematch-c85e",
+            "private-key-c85e",
+            "private-value-c85e",
+        ] {
+            assert!(!logs_contain(private));
+        }
+    }
+
     #[tokio::test]
     async fn adds_roles_and_attributes_when_username_matches() {
         // matches on username list and applies configured augmentation
