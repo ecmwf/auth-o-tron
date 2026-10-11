@@ -40,6 +40,9 @@ pub struct PkceChallenge {
     digest: [u8; 32],
 }
 impl PkceChallenge {
+    pub(super) fn digest(&self) -> &[u8; 32] {
+        &self.digest
+    }
     pub fn verify(&self, verifier: &str) -> bool {
         if !(43..=128).contains(&verifier.len())
             || !verifier

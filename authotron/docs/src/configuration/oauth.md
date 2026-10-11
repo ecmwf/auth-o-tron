@@ -188,6 +188,26 @@ consent or grant proof. Fixed-error failures **stay local; never redirect to raw
 submitted callbacks**. Error-redirect routing, extensions, authorization HTTP routes,
 transaction storage and code issuance are future work.
 
+## Authorization-transaction record codec
+
+`oauth::records::AuthorizationTransaction::new` owns a validated request, a
+32-byte browser-binding hash (not a raw cookie), and trusted absolute expiry in
+Unix milliseconds. Version-1 JSON contains only client ID, callback, resource,
+scopes, opaque state, S256 challenge digest, binding digest, expiry and version.
+The record/DTO have no Debug or public Deserialize; state remains untrusted text,
+never identity or a logging field. No identity, consent flag, grant or code is stored.
+`encode`/`decode` enforce a 16 KiB wire cap; decode checks it before JSON parsing.
+The canonical reconstructed known query must also fit the 8 KiB request gate,
+including at construction, so persisted records can round-trip without loosening validation.
+Decode rejects unknown fields/versions, malformed timestamps, expiry at or before
+trusted `server_now_ms`, and requests invalid under the current registry/bindings.
+Expiry must be positive and representable through year 9999. Browser digest
+matching is constant-time. Callers supply trusted server/backend time and enforce
+TTL computation; timestamps are never request-selected. This codec is not a MAC
+or cache authenticator and assumes trusted storage. Role eligibility, login and
+consent still require later fresh identity checks. No backend, nonce generation,
+atomic consumption, HTTP route or startup hook is implemented; startup remains Unsupported.
+
 Authorization codes, HTTP token issuance, discovery/JWKS, browser CORS,
 and MCP integration remain future capabilities. No HTTP tokens are issued and
 `enabled: true` still fails startup as Unsupported. The legacy HMAC `jwt.secret`

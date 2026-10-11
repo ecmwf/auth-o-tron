@@ -2,4 +2,5 @@
 
 pub mod authorization;
 pub mod keys;
+pub mod records;
 pub mod tokens;
