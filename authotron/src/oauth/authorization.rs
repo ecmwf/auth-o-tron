@@ -14,6 +14,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use subtle::ConstantTimeEq;
 
+pub(super) const MAX_AUTHORIZATION_QUERY_BYTES: usize = 8 * 1024;
+
 const KNOWN: [&str; 8] = [
     "client_id",
     "redirect_uri",
@@ -117,7 +119,7 @@ pub fn validate_authorization_request(
     raw: &[u8],
 ) -> Result<ValidatedAuthorizationRequest, AuthorizationError> {
     use AuthorizationError::*;
-    if raw.len() > 8192 || raw.split(|c| *c == b'&').count() > 32 {
+    if raw.len() > MAX_AUTHORIZATION_QUERY_BYTES || raw.split(|c| *c == b'&').count() > 32 {
         return Err(InvalidRequest);
     }
     config.validate().map_err(|_| ServerError)?;

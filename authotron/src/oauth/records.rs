@@ -8,7 +8,9 @@
 
 //! Bounded server transaction records; no backend, identity, grant or code issuance.
 
-use super::authorization::{ValidatedAuthorizationRequest, validate_authorization_request};
+use super::authorization::{
+    MAX_AUTHORIZATION_QUERY_BYTES, ValidatedAuthorizationRequest, validate_authorization_request,
+};
 use crate::config::OAuthConfig;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
@@ -123,7 +125,7 @@ impl AuthorizationTransaction {
     }
     pub fn encode(&self) -> Result<Vec<u8>, RecordError> {
         let dto = self.dto();
-        if dto.query().len() > 8192 {
+        if dto.query().len() > MAX_AUTHORIZATION_QUERY_BYTES {
             return Err(RecordError::TooLarge);
         }
         let bytes = serde_json::to_vec(&dto).map_err(|_| RecordError::InvalidRecord)?;
@@ -248,6 +250,54 @@ mod tests {
                 .request()
                 .state()
                 .is_none()
+        );
+    }
+    #[test]
+    fn valid_raw_query_rejects_oversized_canonical_transaction() {
+        let (mut config, _) = fixture();
+        let callback = format!("https://app.example.org/{}", "!".repeat(2000));
+        let resource = format!("https://mcp.example.org/{}", "!".repeat(2000));
+        config.clients[0].redirect_uris = vec![callback.clone()];
+        config.clients[0].resources[0].resource = resource.clone();
+        config.resources[0].resource = resource.clone();
+        assert!(callback.len() <= 2048 && resource.len() <= 2048);
+        let raw = format!(
+            "client_id=desktop&redirect_uri={callback}&response_type=code&resource={resource}&scope=read&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256"
+        );
+        assert_eq!(MAX_AUTHORIZATION_QUERY_BYTES, 8 * 1024);
+        assert!(raw.len() < MAX_AUTHORIZATION_QUERY_BYTES);
+        let request = validate_authorization_request(&config, raw.as_bytes()).unwrap();
+        let dto = TransactionDto {
+            version: 1,
+            client_id: request.client_id().into(),
+            redirect_uri: request.redirect_uri().into(),
+            resource: request.resource().into(),
+            scopes: request.scopes().to_vec(),
+            state: None,
+            pkce_challenge: *request.challenge().digest(),
+            browser_binding: [7; 32],
+            expires_at_ms: 60000,
+        };
+        assert!(dto.query().len() > MAX_AUTHORIZATION_QUERY_BYTES);
+        assert_eq!(
+            AuthorizationTransaction::new(request, [7; 32], 60000).err(),
+            Some(RecordError::TooLarge)
+        );
+    }
+    #[test]
+    fn valid_json_at_wire_limit_round_trips_but_one_extra_byte_fails() {
+        let (config, record) = fixture();
+        let original = record.encode().unwrap();
+        let mut padded = original.clone();
+        padded.resize(MAX_TRANSACTION_BYTES, b' ');
+        let restored = AuthorizationTransaction::decode(&padded, &config, 1999).unwrap();
+        assert_eq!(restored.encode().unwrap(), original);
+        assert!(restored.matches_browser_binding(&[7; 32]));
+        assert!(restored.request().challenge().verify(VERIFIER));
+        padded.push(b' ');
+        assert_eq!(
+            AuthorizationTransaction::decode(&padded, &config, 1999).err(),
+            Some(RecordError::TooLarge)
         );
     }
     #[test]
