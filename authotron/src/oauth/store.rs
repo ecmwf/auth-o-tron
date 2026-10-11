@@ -332,4 +332,46 @@ mod tests {
         );
         assert!(MemoryTransactionStore::new(Arc::new(OAuthConfig::default())).is_err());
     }
+
+    #[test]
+    fn malformed_ids_and_poisoned_lock_fail_closed() {
+        assert!(TransactionId::parse(&URL_SAFE_NO_PAD.encode([0; 32])).is_ok());
+        for value in [
+            format!("{}!", "A".repeat(42)),
+            format!("{}B", "A".repeat(42)),
+            format!("{}=", "A".repeat(42)),
+        ] {
+            assert_eq!(
+                TransactionId::parse(&value).err(),
+                Some(StoreError::Missing)
+            );
+        }
+        let config = config();
+        let store = Arc::new(MemoryTransactionStore::new(config.clone()).unwrap());
+        let created = store
+            .create_at(request(&config), [7; 32], at(1000))
+            .unwrap();
+        let worker = store.clone();
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = worker.entries.lock().unwrap();
+                panic!("synthetic lock poisoning");
+            })
+            .join()
+            .is_err()
+        );
+        assert_eq!(
+            store.create_at(request(&config), [7; 32], at(1001)).err(),
+            Some(StoreError::Unavailable)
+        );
+        for consume in [false, true] {
+            assert_eq!(
+                store
+                    .access_at(&created.id, &[7; 32], at(1001), consume)
+                    .err(),
+                Some(StoreError::Unavailable)
+            );
+        }
+        assert_eq!(store.entries.lock().err().unwrap().into_inner().len(), 1);
+    }
 }
