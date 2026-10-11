@@ -98,6 +98,10 @@ pub struct RedeemedAuthorization {
     issuer: String,
 }
 impl RedeemedAuthorization {
+    /// Store backends call this only after confirmed atomic code consumption.
+    pub(super) fn from_consumed(grant: CodeGrant, issuer: String) -> Self {
+        Self { grant, issuer }
+    }
     // Only OAuth capabilities may inspect the consumed-code proof.
     pub(super) fn grant(&self) -> &CodeGrant {
         &self.grant
@@ -261,7 +265,7 @@ impl MemoryTransactionStore {
             })?;
         codes.remove(&key).ok_or(Missing)?;
         // This proof is constructed only after successful removal under the same lock.
-        Ok(RedeemedAuthorization { grant, issuer })
+        Ok(RedeemedAuthorization::from_consumed(grant, issuer))
     }
     fn issue_code_at(
         &self,

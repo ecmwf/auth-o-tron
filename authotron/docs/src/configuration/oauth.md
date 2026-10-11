@@ -549,8 +549,8 @@ persistence and its atomic consent transition are described below.
 `max_authorization_codes` sets a separate Memory code count cap, default 1024 and range
 1–100000. At the maximum, 96 KiB payloads alone permit 9.8304 GB (about 9.15 GiB), plus
 overhead. CodeStoreError classes are Missing, Limited, InvalidToken, InvalidDecision
-and Unavailable. Memory persistence/redemption and shared Valkey issuance are described
-below; shared redemption and HTTP/startup integration remain future work. OAuth enablement remains
+and Unavailable. Memory and shared Valkey persistence/redemption are described
+below; HTTP/startup integration remains future work. OAuth enablement remains
 Unsupported.
 
 ### Development-memory atomic code issuance
@@ -600,8 +600,8 @@ OAuth-internal grant/issuer readers. It retains the cached originating issuer sp
 (including a trailing slash) for the signing bridge to bind exactly. The bridge
 rechecks its active policy/freshness and issuer; redemption itself neither signs
 nor issues a token. One use and capacity reclamation are per Memory instance only,
-without restart or distributed guarantees. HTTP and shared Valkey redemption remain
-future work; OAuth enablement remains Unsupported.
+without restart or distributed guarantees. Shared Valkey redemption is described
+below; HTTP integration remains future work and OAuth enablement remains Unsupported.
 
 ### Store-provided source witnesses
 
@@ -737,12 +737,40 @@ coherent issuer/policy/capacity settings and trusted authenticated storage, not 
 This uses the existing bounded connector on one primary; Cluster/Sentinel discovery
 is unsupported. Unexpected OOM/write failures or lost responses can leave ambiguous
 outcomes: atomic execution is not rollback, and there is no automatic replay or
-fallback. Shared code lookup/redemption remains unimplemented; its next slice must
-bound hash shape/metadata and HSTRLEN before HGET, validate the cached issuer/actual
-code hash and grant/PKCE, and CAS-consume before returning redemption authority.
+fallback. Shared code redemption is described below.
 No HTTP or startup hook is added; OAuth enablement remains Unsupported.
 
-Shared Valkey code redemption, HTTP token issuance, discovery/JWKS, browser CORS,
+### Shared Valkey one-use code redemption
+
+`ValkeyTransactionStore::redeem_code(code, client_id, redirect_uri, resource,
+code_verifier)` uses a two-key Lua read to obtain server `TIME` and unchanged code
+metadata/payload. It checks index/record types, exactly four hash fields, index-score
+agreement and positive canonical decimal expiry through year 9999. Before any HGET,
+HSTRLEN enforces a 43-byte hash, 1–2048-byte issuer, 1–15-byte expiry and nonempty
+payload of at most 96 KiB.
+Rust restores the bounded envelope, checks the actual handle hash and exact cached
+issuer against store config, then revalidates current grant policy/freshness/time,
+mandatory exact client/callback/resource and S256 PKCE. No verifier is sent to Valkey.
+
+After validation, a second Lua call compares **all four** fields and index score at
+current server time, including the recomputed effective grant deadline when it is
+earlier than stored expiry. DEL/ZREM permissions are preflighted before deletion.
+Only the confirmed CAS winner constructs `RedeemedAuthorization` with the cached
+originating issuer; another consumer or changed snapshot returns Missing with no proof.
+Missing/expired codes and invalid public inputs are Missing. Wrong types, shape,
+metadata, issuer/hash binding, config/context or transport failures are fixed
+Unavailable. Failed checks preserve unexpired records; reads never refresh TTL.
+
+Atomic consumption is shared across replicas on the configured primary, assuming
+trusted authenticated storage and coherent config; it is not a MAC or fresh provider
+verification. Effective-deadline failure can leave a stored record readable under
+broader policy until its original expiry. Lost mutation responses may be ambiguous,
+with no replay or fallback; timeout/cancellation exposes no proof. There is no public
+code lookup authority. Callers may pass successful proof to `issue_from_redeemed`,
+which separately consumes it and rechecks issuer/current eligibility before signing.
+No token is signed by redemption itself, and no HTTP/startup hook is installed.
+
+HTTP token issuance, discovery/JWKS, browser CORS,
 and MCP integration remain future capabilities. No HTTP tokens are issued and
 `enabled: true` still fails startup as Unsupported. The legacy HMAC `jwt.secret`
 must never be published through
