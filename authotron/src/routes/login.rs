@@ -24,6 +24,7 @@ use crate::config::UiConfig;
 use crate::state::AppState;
 
 const STYLESHEET: &str = include_str!("../static/login.css");
+const SCRIPT: &str = include_str!("../static/login.js");
 const DIALOG_POLICY: &str = "default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 // Curated Aviso branding fixture from https://aviso-playground.ecmwf.int/static/logo.png.
 // The official 650x650 RGBA artwork is resized to a 192x192, 16-colour PNG.
@@ -44,6 +45,7 @@ pub fn routes(config: &UiConfig) -> Router<AppState> {
     Router::new()
         .route("/login", get(login))
         .route("/static/login.css", get(stylesheet))
+        .route("/static/login.js", get(script))
         .route("/static/aviso-logo.png", get(aviso_logo))
 }
 
@@ -114,6 +116,17 @@ async fn stylesheet() -> impl IntoResponse {
     )
 }
 
+async fn script() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        SCRIPT,
+    )
+}
+
 async fn aviso_logo() -> Response {
     let mut response = secure_response(AVISO_LOGO.as_slice().into_response(), false);
     response.headers_mut().insert(
@@ -162,10 +175,10 @@ fn render_login(config: &UiConfig) -> String {
                 }
                 div class="login-actions" {
                     @if config.basic.is_some() {
-                        a class="login-action" href="/login/basic" { "Username and password" }
+                        a class="login-action" href="/login/basic" data-login-dialog="basic" { "Username and password" }
                     }
                     @if config.ecmwf_api_key.is_some() {
-                        a class="login-action" href="/login/ecmwf-api-key" { "ECMWF API key" }
+                        a class="login-action" href="/login/ecmwf-api-key" data-login-dialog="api-key" { "ECMWF API key" }
                     }
                     @for action in &config.sign_in_actions {
                         a class="login-action" href=(action.start_url.as_str()) { (&action.label) }
@@ -173,7 +186,7 @@ fn render_login(config: &UiConfig) -> String {
                 }
             }
         },
-        false,
+        config.has_direct_login(),
     )
 }
 
@@ -201,7 +214,7 @@ fn render_page_with_dialog(config: &UiConfig, content: Markup, dialog: bool) -> 
                 link rel="icon" type="image/x-icon" href=(FAVICON_PATH);
                 link rel="stylesheet" href="/static/login.css";
                 @if dialog {
-                    script src="/static/login.js" defer {}
+                    script src="/static/login.js" defer {} 
                 }
             }
             body class="login-page" {

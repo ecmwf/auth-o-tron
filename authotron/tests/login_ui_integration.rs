@@ -355,3 +355,145 @@ async fn configured_sign_in_action_is_escaped_and_ignores_request_destinations()
     assert!(!html.contains("<dialog"));
     assert!(!html.contains("data-login-dialog"));
 }
+
+fn direct_config() -> ConfigV2 {
+    let mut config = config(json!({
+        "enabled": true,
+        "branding": {"application_name": "Aviso", "logo_url": "/static/aviso-logo.png"},
+        "basic": {"provider_name": "local"},
+        "ecmwf_api_key": {"provider_name": "key-provider"},
+        "browser_session": {"public_origin": "https://login.example.test", "backend": {"type": "memory"}},
+        "sign_in_actions": [
+            {"label": "Continue with SSO", "start_url": "https://app.example.test/sso/start"},
+            {"label": "Configured basic link", "start_url": "/login/basic"}
+        ]
+    }));
+    config.providers.push(
+        serde_json::from_value(json!({
+            "type": "ecmwf-api", "name": "key-provider", "realm": "ecmwf",
+            "uri": "http://127.0.0.1:9"
+        }))
+        .unwrap(),
+    );
+    config
+}
+
+#[tokio::test]
+async fn direct_chooser_marks_only_direct_links_and_does_not_create_form_transactions() {
+    let (app, _) = startup::build_app(Arc::new(direct_config())).await.unwrap();
+    let response = get(app, "/login?flow=basic&action=https://untrusted.example").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key("set-cookie"));
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["referrer-policy"], "strict-origin");
+    assert_eq!(
+        response.headers()["content-security-policy"],
+        "default-src 'none'; style-src 'self'; img-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    );
+    let html = body(response).await;
+    assert!(html.contains("<script src=\"/static/login.js\" defer></script>"));
+    assert!(html.contains("href=\"/login/basic\" data-login-dialog=\"basic\""));
+    assert!(html.contains("href=\"/login/ecmwf-api-key\" data-login-dialog=\"api-key\""));
+    assert_eq!(html.matches("data-login-dialog=").count(), 2);
+    assert!(
+        html.contains("<a class=\"login-action\" href=\"/login/basic\">Configured basic link</a>")
+    );
+    assert!(html.contains("href=\"https://app.example.test/sso/start\">Continue with SSO</a>"));
+    assert!(html.contains("<dialog id=\"login-dialog\""));
+    assert!(html.contains("aria-labelledby=\"login-dialog-title\""));
+    assert!(html.contains("aria-live=\"polite\""));
+    let dialog = html.split("<dialog").nth(1).unwrap();
+    assert!(dialog.contains("class=\"login-dialog-brand\""));
+    assert!(dialog.contains("class=\"login-dialog-logo\" src=\"/static/aviso-logo.png\""));
+    assert!(dialog.contains("<span>Aviso</span>"));
+    assert_eq!(html.matches("id=\"login-card-title\"").count(), 1);
+    assert_eq!(html.matches("id=\"login-dialog-title\"").count(), 1);
+    for absent in [
+        "<form",
+        "<input",
+        "untrusted.example",
+        "onload=",
+        "onclick=",
+        "style=",
+    ] {
+        assert!(!html.contains(absent), "unexpected {absent}");
+    }
+}
+
+#[tokio::test]
+async fn standalone_forms_keep_native_post_fallback_and_no_dialog_script() {
+    let (app, _) = startup::build_app(Arc::new(direct_config())).await.unwrap();
+    for (path, fields) in [
+        ("/login/basic", vec!["username", "password"]),
+        ("/login/ecmwf-api-key", vec!["api_key"]),
+    ] {
+        let response = get(app.clone(), path).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers()["set-cookie"]
+                .to_str()
+                .unwrap()
+                .starts_with("__Host-authotron_form=")
+        );
+        assert_eq!(response.headers()["referrer-policy"], "strict-origin");
+        let policy = response.headers()["content-security-policy"]
+            .to_str()
+            .unwrap();
+        assert!(policy.contains("img-src 'self';"));
+        assert!(policy.contains("form-action 'self'"));
+        assert!(!policy.contains("script-src"));
+        let html = body(response).await;
+        assert!(html.contains(&format!(
+            "<form class=\"key-form\" method=\"post\" action=\"{path}\""
+        )));
+        assert!(html.contains("type=\"hidden\" name=\"csrf\""));
+        for field in fields {
+            assert!(html.contains(&format!("name=\"{field}\"")));
+        }
+        assert!(!html.contains("<script"));
+        assert!(!html.contains("<dialog"));
+    }
+}
+
+#[tokio::test]
+async fn dialog_script_is_explicitly_served_and_absent_on_metrics_router() {
+    let (app, state) = startup::build_app(Arc::new(direct_config())).await.unwrap();
+    let response = get(app, "/static/login.js").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/javascript; charset=utf-8"
+    );
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert!(!body(response).await.is_empty());
+    assert_eq!(
+        get(create_metrics_router(state), "/static/login.js")
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn ui_does_not_change_the_homepage_or_credential_authentication() {
+    let (app, _) = startup::build_app(Arc::new(config(json!({"enabled": true}))))
+        .await
+        .unwrap();
+    assert_eq!(get(app.clone(), "/").await.status(), StatusCode::OK);
+    let mut request = Request::get("/authenticate")
+        .header("authorization", "Basic YWxpY2U6ZXhhbXBsZS1wYXNzd29yZA==")
+        .body(Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(axum::extract::ConnectInfo(
+        "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers()["authorization"]
+            .to_str()
+            .unwrap()
+            .starts_with("Bearer ")
+    );
+}
