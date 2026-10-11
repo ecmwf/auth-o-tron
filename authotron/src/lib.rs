@@ -16,6 +16,7 @@
 
 pub mod augmenters;
 pub mod auth;
+pub mod browser;
 pub mod config;
 pub mod metrics;
 pub mod middleware;

@@ -33,6 +33,7 @@ pub async fn build_app(config: ConfigV2) -> (Router, Arc<ConfigV2>) {
 #[allow(dead_code)]
 pub async fn build_app_with_state(config: ConfigV2) -> (Router, Arc<ConfigV2>, AppState) {
     let config = Arc::new(config);
+    let browser = Arc::new(authotron::browser::BrowserLoginState::new(&config).unwrap());
     let store = create_store(&config.store).await;
     let auth = Arc::new(Auth::new(
         &config.providers,
@@ -45,6 +46,7 @@ pub async fn build_app_with_state(config: ConfigV2) -> (Router, Arc<ConfigV2>, A
     let metrics = Metrics::new();
 
     let state = AppState {
+        browser,
         config: config.clone(),
         auth,
         store,

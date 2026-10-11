@@ -29,6 +29,14 @@ use crate::store::create_store;
 pub async fn build_app(
     config: Arc<ConfigV2>,
 ) -> Result<(axum::Router, AppState), Box<dyn std::error::Error>> {
+    let mut browser = crate::browser::BrowserLoginState::new(&config)?;
+    browser
+        .initialize(config.ui.enabled && config.ui.has_direct_login())
+        .await?;
+    let browser = Arc::new(browser);
+    if config.ui.enabled && config.ui.has_direct_login() {
+        browser.start_cleanup_task();
+    }
     let store = create_store(&config.store).await;
     let auth_config = config.auth.clone();
     let auth = Arc::new(Auth::new(
@@ -67,6 +75,7 @@ pub async fn build_app(
     metrics.preinit_series(&provider_desc, &augmenter_desc);
 
     let state = AppState {
+        browser,
         config: config.clone(),
         auth,
         store,
