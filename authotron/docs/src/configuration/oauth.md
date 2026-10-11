@@ -14,6 +14,7 @@ oauth:
   authorization_code_ttl_seconds: 60
   access_token_ttl_seconds: 300
   clients: []
+  resources: []
 ```
 
 | Setting | Default | Validation |
@@ -60,6 +61,39 @@ Static queries are allowed except for response names `code`, `state`, `iss`,
 `error`, `error_description`, and `error_uri` (including percent-encoded names).
 Callback strings are retained verbatim for future exact matching of the complete
 URI, including port, path and query; there is no variable-port exemption.
+
+## Explicit resource/scope policy
+
+Both `oauth.resources` and each client's `resources` default to `[]`; a client
+without an explicit binding receives no grants. Example under `oauth`:
+
+```yaml
+resources:
+  - resource: https://mcp.example.org/mcp
+    allowed_realms: [ecmwf, local]
+    scopes:
+      - name: notifications:read
+        required_roles: [reader]
+# Add this binding to a preregistered client's entry:
+# resources:
+#   - resource: https://mcp.example.org/mcp
+#     scopes: [notifications:read]
+```
+
+Resources must be canonical absolute HTTPS URLs (lowercase scheme/host; no
+userinfo, query, fragment, whitespace, backslash, or explicit default port).
+Strings are retained exactly; paths/trailing slashes are distinct, with no prefix matching.
+Limits: 64 resources/bindings, 2048 URI bytes, 1–16 unique realms (1–128 ASCII bytes,
+letters/digits/`._-`), 1–32 unique scopes (1–64 RFC 6749 scope-token bytes), and
+0–32 unique required roles per scope (nonblank, control-free, ≤128 UTF-8 bytes).
+Unknown fields, duplicates and dangling references fail validation even when disabled.
+`authorize_scopes` assumes fresh verification and trusted successful augmentation;
+it does not authenticate or repair upstream fail-open augmentation. A bounded
+nonblank username, allowed realm, exact client binding and **all** required roles
+are required. Empty roles still require that authenticated realm. Attributes and
+existing user scopes never grant permissions. Requests require 1–32 unique valid
+scopes; failures reject the whole request, and success retains request order.
+Fixed errors distinguish invalid configuration/client/resource/scope and access denial.
 
 Authorization codes, PKCE S256, RS256 access tokens, discovery/JWKS, browser CORS,
 and MCP integration remain future capabilities. No tokens are issued and

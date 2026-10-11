@@ -1012,6 +1012,14 @@
           },
           "maxItems": 64,
           "default": []
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OAuthResource"
+          },
+          "maxItems": 64,
+          "default": []
         }
       },
       "additionalProperties": false
@@ -1040,6 +1048,14 @@
           },
           "minItems": 1,
           "maxItems": 8
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ClientResource"
+          },
+          "maxItems": 64,
+          "default": []
         }
       },
       "additionalProperties": false,
@@ -1055,6 +1071,77 @@
       "enum": [
         "web",
         "native"
+      ]
+    },
+    "ClientResource": {
+      "type": "object",
+      "properties": {
+        "resource": {
+          "type": "string"
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "resource",
+        "scopes"
+      ]
+    },
+    "OAuthResource": {
+      "type": "object",
+      "properties": {
+        "resource": {
+          "type": "string"
+        },
+        "allowed_realms": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "maxItems": 16
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ResourceScope"
+          },
+          "minItems": 1,
+          "maxItems": 32
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "resource",
+        "allowed_realms",
+        "scopes"
+      ]
+    },
+    "ResourceScope": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "required_roles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "required_roles"
       ]
     },
     "ConfigV2": {
@@ -1130,7 +1217,8 @@
             "issuer": null,
             "authorization_code_ttl_seconds": 60,
             "access_token_ttl_seconds": 300,
-            "clients": []
+            "clients": [],
+            "resources": []
           }
         }
       },

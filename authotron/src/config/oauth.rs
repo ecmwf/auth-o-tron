@@ -8,6 +8,7 @@
 
 //! Configuration contract for future OAuth authorization-server support.
 
+use super::oauth_policy::{ClientResource, OAuthResource};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +23,8 @@ pub struct OAuthConfig {
     pub access_token_ttl_seconds: u64,
     #[schemars(length(max = 64))]
     pub clients: Vec<OAuthClient>,
+    #[schemars(length(max = 64))]
+    pub resources: Vec<OAuthResource>,
 }
 
 impl Default for OAuthConfig {
@@ -32,6 +35,7 @@ impl Default for OAuthConfig {
             authorization_code_ttl_seconds: 60,
             access_token_ttl_seconds: 300,
             clients: Vec::new(),
+            resources: Vec::new(),
         }
     }
 }
@@ -60,7 +64,7 @@ impl OAuthConfig {
                 return Err("oauth.clients contains duplicate client_id values");
             }
         }
-        Ok(())
+        self.validate_resources()
     }
 }
 
@@ -75,6 +79,9 @@ pub struct OAuthClient {
     pub application_type: ApplicationType,
     #[schemars(length(min = 1, max = 8))]
     pub redirect_uris: Vec<String>,
+    #[serde(default)]
+    #[schemars(length(max = 64))]
+    pub resources: Vec<ClientResource>,
 }
 
 /// Uses the OpenID Connect `application_type` terminology.
