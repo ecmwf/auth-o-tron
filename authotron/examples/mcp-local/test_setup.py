@@ -144,6 +144,7 @@ class SetupTests(unittest.TestCase):
                 "client.py",
                 "test_setup.py",
                 "test_auth.py",
+                "test_e2e.py",
                 "README.md",
                 "pyproject.toml",
                 ".gitignore",

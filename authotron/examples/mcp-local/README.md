@@ -160,6 +160,8 @@ credential-output suppression. The end-to-end tests obtain an authorization code
 using PKCE, validate authorization-server and protected-resource metadata, invoke
 the official MCP SDK tool, and exercise the actual native client callback. They
 also check claim and scope rejection and authorization-code replay rejection.
+`test_e2e.py` additionally verifies secret-free client diagnostics after a failed
+code exchange and uses bounded MCP deadlines and process-group cleanup.
 
 After stopping the runner, remove the disposable runtime and isolated environment:
 
