@@ -378,8 +378,9 @@ characters. The server stores only its SHA-256 hash. Each login starts a *family
 holding the client, resource, granted scopes, realm, username and the roles the
 provider returned before augmentation. Families live in the browser-session backend:
 Memory (development, per process, lost on restart) or Valkey under
-`<key_prefix>:oauth:refresh-tokens:v1:`. Each Valkey operation is one Lua script, and
-keys expire at the family's idle deadline. Restricted ACLs must allow `EVAL`, `GET`,
+`<key_prefix>:oauth:refresh-tokens:v2:`. Each Valkey operation is one Lua script, and
+keys expire at the family's idle deadline. Moving from the `v1` namespace drops existing families, and
+users must log in again. Restricted ACLs must allow `EVAL`, `GET`,
 `SET`, `DEL`, `EXISTS`, `TYPE`, the hash commands `HSET`/`HGET`, the sorted-set commands
 `ZADD`/`ZRANGE`/`ZREM`/`ZCARD`, and `PEXPIREAT`/`PEXPIRETIME` under that prefix.
 
@@ -419,6 +420,14 @@ presents the token it rotated *within the last 30 seconds*, the server returns
 `invalid_grant` and leaves the family alone. This tolerates concurrent or retried
 refreshes. Presenting any other already-rotated token is treated as theft: the whole
 family is revoked, and the current token stops working too.
+
+The server remembers only recent rotated tokens: the last 32 per family. Each one is
+also forgotten once the idle deadline set at its rotation passes. Older tokens can no
+longer be told apart from unknown ones. Presenting one returns `invalid_grant` but does
+*not* revoke the family. This caps storage at 33 token hashes per family, regardless of
+how often the family refreshes. The cost is that a token stolen and replayed after
+more than 32 later refreshes, or after more than `idle_ttl_seconds`, no longer
+triggers revocation. It still grants nothing.
 
 **Per-user cap.** A user may hold at most `max_refresh_token_families_per_user` live
 families across all clients. A new login beyond the cap revokes that user's oldest
