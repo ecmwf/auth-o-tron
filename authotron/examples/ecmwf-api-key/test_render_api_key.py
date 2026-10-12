@@ -1477,6 +1477,35 @@ class RendererTests(unittest.TestCase):
         self.assertFalse(allowed("browser-demo", "someone-else"))
         self.assertFalse(allowed("ecmwf", "browser-demo"))
 
+    def test_oauth_caps_api_key_refresh_lifetime_only(self):
+        baseline, _ = self.baseline()
+
+        def browser_blocks(**options):
+            resources = renderer.transform(baseline, HOST, TOKEN, BASIC, **options)
+            config = yaml.safe_load(find(resources, "ConfigMap")["data"]["config.yaml"])
+            return {p["type"]: p["browser"] for p in config["providers"]}
+
+        self.assertEqual(
+            browser_blocks(valkey_password=VALKEY_PASSWORD, oauth_key=OAUTH_KEY),
+            {
+                "plain": {"id": "password", "label": renderer.BASIC_LABEL},
+                "ecmwf-api": {
+                    "id": "ecmwf-api-key",
+                    "label": "ECMWF API key",
+                    "refresh_max_lifetime_seconds": 30 * 86400,
+                },
+            },
+        )
+        self.assertLessEqual(
+            renderer.OAUTH_API_KEY_REFRESH_MAX_LIFETIME_SECONDS,
+            renderer.OAUTH_REFRESH_TOKENS["absolute_ttl_seconds"],
+        )
+        self.assertNotIn(
+            "refresh_max_lifetime_seconds",
+            browser_blocks(valkey_password=VALKEY_PASSWORD)["ecmwf-api"],
+        )
+        self.assertNotIn("refresh_max_lifetime_seconds", renderer.PROVIDER["browser"])
+
     def test_oauth_key_generation_reuse_permissions_and_schema(self):
         path = self.root / "oauth.json"
         pem = renderer.oauth_signing_key(path)

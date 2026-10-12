@@ -73,6 +73,9 @@ OAUTH_REFRESH_TOKENS = {
     "absolute_ttl_seconds": 90 * 86400,
 }
 OAUTH_REFRESH_TTL_RANGE = range(300, 34560000 + 1)
+# API-key sign-ins keep refresh tokens for at most 30 days after sign-in, whatever
+# the client allows; password sign-ins follow the client lifetime above.
+OAUTH_API_KEY_REFRESH_MAX_LIFETIME_SECONDS = 30 * 86400
 # Opt-in Aviso MCP resource (--oauth-aviso-resource): any authenticated browser user
 # of the playground may use it, so its scope requires no role.
 OAUTH_AVISO_SCOPE = "aviso:read"
@@ -889,6 +892,10 @@ def transform(
             }
         )
     if oauth_key is not None:
+        api_key = next(p for p in config["providers"] if p["type"] == PROVIDER["type"])
+        api_key["browser"]["refresh_max_lifetime_seconds"] = (
+            OAUTH_API_KEY_REFRESH_MAX_LIFETIME_SECONDS
+        )
         realms = [p["realm"] for p in config["providers"] if p.get("browser")]
         config["oauth"] = oauth_config(host, oauth_kid(oauth_key), realms, aviso)
     config_map["data"]["config.yaml"] = yaml.safe_dump(config)

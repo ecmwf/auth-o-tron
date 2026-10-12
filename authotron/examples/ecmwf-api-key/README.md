@@ -290,8 +290,11 @@ trailing slash), which matches `ui.browser_session.public_origin`. Its metadata 
 at `/.well-known/oauth-authorization-server`. Access tokens live **3600 seconds**
 (the server maximum; default 300). Every client registration enables rotating
 refresh tokens (`refresh_tokens: {enabled: true, idle_ttl_seconds: 2592000,
-absolute_ttl_seconds: 7776000}`): a client stays signed in for up to 90 days and
-30 days without use, then repeats the browser sign-in. `max_authorization_transactions` is set
+absolute_ttl_seconds: 7776000}`). A client stays signed in for up to 90 days after
+password sign-in, or 30 days after ECMWF API-key sign-in, and for at most 30 days
+without use. It then repeats the browser sign-in. The API-key limit comes from the
+`ecmwf-api-key` browser block's `refresh_max_lifetime_seconds: 2592000`.
+`max_authorization_transactions` is set
 explicitly to 1024; the server splits it into non-borrowable per-client shares
 (113–114 slots for each of the 9 clients). Other OAuth settings keep server defaults.
 
