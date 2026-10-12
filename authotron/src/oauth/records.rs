@@ -313,7 +313,7 @@ mod tests {
         assert_eq!(restored.request().redirect_uri(), CALLBACK);
         assert_eq!(restored.request().client_id(), "desktop");
         assert_eq!(restored.request().resource(), RESOURCE);
-        assert_eq!(restored.request().scopes(), &["open", "read"]);
+        assert_eq!(restored.request().scopes(), &["read", "open"]);
         assert_eq!(restored.request().state(), Some("opaque + café<&>"));
         assert!(restored.request().challenge().verify(VERIFIER));
         assert!(restored.matches_browser_binding(&[7; 32]));
@@ -403,6 +403,10 @@ mod tests {
             ),
             ("scopes", json!(["unknown"]), InvalidRecord),
             ("scopes", json!(["open read"]), InvalidRecord),
+            // Stored scopes must already be the narrowed, binding-ordered effective set.
+            ("scopes", json!(["open", "read"]), InvalidRecord),
+            ("scopes", json!(["read", "unknown"]), InvalidRecord),
+            ("scopes", json!(["read", "read"]), InvalidRecord),
             ("state", json!("line\n"), InvalidRecord),
             ("pkce_challenge", json!([1, 2]), InvalidRecord),
             ("browser_binding", json!([0]), InvalidRecord),

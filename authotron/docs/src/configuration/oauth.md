@@ -135,7 +135,13 @@ https://auth.example.org/oauth/authorize?client_id=mcp-desktop&redirect_uri=http
 is bound to for that resource (`clients[].resources[].scopes`). Clients such as Codex CLI
 rely on this. The defaulted scopes are recorded in the transaction exactly as if they had
 been requested explicitly, so role policy, the consent page and the token `scope` claim all
-use them. A present but empty or unknown `scope` is still rejected with `invalid_scope`.
+use them. A present `scope` is narrowed to the client's binding for the requested resource
+(RFC 6749 §3.3): unknown names and scopes bound only to other resources are dropped,
+duplicates collapse, and the remaining scopes (in binding order) are recorded exactly like
+defaulted ones. For example, `scope=aviso:read mcp:read` for an Aviso-only binding yields
+`aviso:read`, and the token response `scope` says so. A present `scope` that is empty, has
+empty tokens or invalid characters, or keeps no scope after narrowing is rejected with
+`invalid_scope`.
 
 The client must verify the callback `state` and exact `iss`, then exchange its code:
 
@@ -228,8 +234,9 @@ CORS is disabled; cross-origin public SPAs are not supported in this baseline.
 
 ## Policy, time and storage
 
-Requests require exact client/callback/resource and all requested scopes. There is no
-URI aliasing, partial consent or first-party skip.
+Requests require exact client/callback/resource. Requested scopes outside the client's
+binding for that resource are dropped; at least one must remain. Role policy applies to
+every remaining scope. There is no URI aliasing, per-scope consent or first-party skip.
 Web callbacks require HTTPS; native callbacks additionally permit HTTP loopback
 on `127.0.0.1`, `[::1]` or `localhost`, with or without a port. Accepting `localhost`
 deliberately deviates from RFC 8252 §8.3 for interoperability: Claude Code, MCP Inspector,

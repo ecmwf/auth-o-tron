@@ -193,25 +193,37 @@ pub fn validate_authorization_request(
         .find(|r| r.resource == resource)
         .ok_or(InvalidTarget)?;
     // RFC 6749 §3.3: an absent `scope` defaults to every scope the client is bound to for
-    // this resource. A present but empty or malformed `scope` remains `invalid_scope`.
-    // Example: no `scope` with binding `["read", "write"]` yields `read write`;
-    // `scope=` (empty) is rejected.
+    // this resource. A present `scope` is syntax-checked, then narrowed to the client's
+    // binding (the server may grant a subset); unknown or foreign names are dropped and
+    // duplicates collapse. The effective scopes keep the binding order and are recorded
+    // explicitly. An empty, malformed or fully dropped `scope` remains `invalid_scope`.
+    // Example: binding `["read"]`, `scope=read write` yields `read`;
+    // `scope=` (empty), `scope=read  write` (empty token) or `scope=write` are rejected.
     let scopes = match parameters.get("scope") {
-        Some(scope) => scope.split(' ').map(String::from).collect::<Vec<_>>(),
+        Some(scope) => {
+            let requested = scope.split(' ').collect::<Vec<_>>();
+            if requested.len() > 32
+                || requested.iter().any(|s| {
+                    s.is_empty()
+                        || s.len() > 64
+                        || !s
+                            .bytes()
+                            .all(|c| matches!(c, 0x21 | 0x23..=0x5b | 0x5d..=0x7e))
+                })
+            {
+                return Err(InvalidScope);
+            }
+            let requested = requested.into_iter().collect::<HashSet<_>>();
+            binding
+                .scopes
+                .iter()
+                .filter(|s| requested.contains(s.as_str()))
+                .cloned()
+                .collect::<Vec<_>>()
+        }
         None => binding.scopes.clone(),
     };
-    let mut seen = HashSet::new();
-    if !(1..=32).contains(&scopes.len())
-        || scopes.iter().any(|s| {
-            s.is_empty()
-                || s.len() > 64
-                || !s
-                    .bytes()
-                    .all(|c| matches!(c, 0x21 | 0x23..=0x5b | 0x5d..=0x7e))
-                || !seen.insert(s)
-                || !binding.scopes.contains(s)
-        })
-    {
+    if scopes.is_empty() {
         return Err(InvalidScope);
     }
     let state = parameters.get("state");
@@ -376,7 +388,7 @@ mod tests {
         params.retain(|(key, _)| *key != "scope");
         let request = parse(&cfg, query(&params).as_bytes()).unwrap();
         assert_eq!(request.scopes(), &["write", "read"]);
-        for value in ["", " ", "admin", "read admin"] {
+        for value in ["", " ", "admin", "read  admin"] {
             let mut params = parameters();
             set(&mut params, "scope", value.into());
             assert_eq!(
@@ -388,6 +400,31 @@ mod tests {
         // `scope` without `=` decodes to an empty value and is not treated as absent.
         let raw = format!("{}&scope", query(&params));
         assert_eq!(parse(&cfg, raw.as_bytes()).err(), Some(InvalidScope));
+    }
+    #[test]
+    fn present_scope_narrows_to_client_binding_in_binding_order() {
+        let mut cfg = config();
+        cfg.clients[0].resources[0].scopes = vec!["write".into(), "read".into()];
+        for (value, expected) in [
+            ("read write", &["write", "read"][..]),
+            ("read mcp:read", &["read"]),
+            ("admin read unknown", &["read"]),
+            ("read read", &["read"]),
+        ] {
+            let mut params = parameters();
+            set(&mut params, "scope", value.into());
+            let request = parse(&cfg, query(&params).as_bytes()).unwrap();
+            assert_eq!(request.scopes(), expected, "{value:?}");
+        }
+        for value in ["mcp:read", "admin unknown", "read\"x"] {
+            let mut params = parameters();
+            set(&mut params, "scope", value.into());
+            assert_eq!(
+                parse(&cfg, query(&params).as_bytes()).err(),
+                Some(InvalidScope),
+                "{value:?}"
+            );
+        }
     }
     #[test]
     fn registry_scope_and_s256_restrictions() {
@@ -402,7 +439,6 @@ mod tests {
             ("response_type", "token", UnsupportedResponseType),
             ("resource", "https://mcp.example.org/mcp/", InvalidTarget),
             ("scope", "write", InvalidScope),
-            ("scope", "read read", InvalidScope),
             ("scope", "read  read", InvalidScope),
             ("scope", "read\twrite", InvalidScope),
             ("code_challenge_method", "plain", InvalidRequest),

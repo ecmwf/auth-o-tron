@@ -783,6 +783,119 @@ async fn codex_style_request_without_scope_defaults_to_client_bound_scopes() {
     .unwrap();
     assert_eq!(claims["scope"], "read write");
 }
+/// Metadata advertises the union of all resource scopes, so clients such as Codex request
+/// every advertised scope. Scopes outside the client's binding for the requested resource
+/// are dropped (RFC 6749 §3.3) and the token reflects the narrowed set.
+#[tokio::test]
+async fn requested_scopes_narrow_to_client_binding_for_resource() {
+    for deny in [false, true] {
+        let (_key, mut config) = fixture("http://127.0.0.1:9");
+        let mut other = config.oauth.resources[0].clone();
+        other.resource = "https://mcp.example.test/other".into();
+        other.scopes[0].name = "mcp:read".into();
+        config.oauth.resources.push(other);
+        if deny {
+            config.oauth.resources[0].scopes[0]
+                .required_roles
+                .push("public-admin".into());
+        }
+        let (app, _) = startup::build_app(Arc::new(config)).await.unwrap();
+        let query =
+            |scope: &str| authorize_query().replace("scope=read", &encoded(&[("scope", scope)]));
+        for rejected in ["mcp:read", "mcp:read unknown", "read  mcp:read"] {
+            let response = get(
+                &app,
+                &format!("/oauth/authorize?{}", query(rejected)),
+                &Jar::default(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{rejected}");
+            assert!(response.headers().get(header::LOCATION).is_none());
+        }
+        let mut jar = Jar::default();
+        let response = get(
+            &app,
+            &format!("/oauth/authorize?{}", query("mcp:read read unknown")),
+            &jar,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        jar.update(&response);
+        let response = get(&app, "/login/method/password", &jar).await;
+        jar.update(&response);
+        let html = text(response).await;
+        let (csrf, tx) = (hidden(&html, "csrf"), hidden(&html, "oauth_transaction"));
+        let fields = [
+            ("csrf", csrf.as_str()),
+            ("oauth_transaction", tx.as_str()),
+            ("username", "alice"),
+            ("password", "päss:秘密"),
+        ];
+        let response = send(
+            &app,
+            post("/login/method/password", &jar, &fields, Some(ORIGIN)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        if deny {
+            // Narrowing never bypasses role policy on the remaining scopes.
+            let location =
+                url::Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+            let params: HashMap<_, _> = location.query_pairs().into_owned().collect();
+            assert_eq!(params["error"], "access_denied");
+            assert!(!params.contains_key("code"));
+            continue;
+        }
+        jar.update(&response);
+        let response = get(&app, "/oauth/continue", &jar).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = text(response).await;
+        assert!(html.contains("read") && !html.contains("mcp:read") && !html.contains("unknown"));
+        let (csrf, tx) = (hidden(&html, "csrf"), hidden(&html, "oauth_transaction"));
+        let response = send(
+            &app,
+            post(
+                "/oauth/consent",
+                &jar,
+                &[
+                    ("csrf", &csrf),
+                    ("oauth_transaction", &tx),
+                    ("decision", "approve"),
+                ],
+                Some(ORIGIN),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location =
+            url::Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+        let params: HashMap<_, _> = location.query_pairs().into_owned().collect();
+        let fields = [
+            ("grant_type", "authorization_code"),
+            ("client_id", "desktop"),
+            ("code", params["code"].as_str()),
+            ("redirect_uri", CALLBACK),
+            ("resource", RESOURCE),
+            ("code_verifier", VERIFIER),
+        ];
+        let response = send(&app, post("/oauth/token", &Jar::default(), &fields, None)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let token: Value = serde_json::from_str(&text(response).await).unwrap();
+        assert_eq!(token["scope"], "read");
+        let payload = token["access_token"]
+            .as_str()
+            .unwrap()
+            .split('.')
+            .nth(1)
+            .unwrap();
+        let claims: Value = serde_json::from_slice(
+            &base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, payload)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(claims["scope"], "read");
+    }
+}
 #[tokio::test]
 async fn invalid_authorization_and_stale_login_forms_never_verify_or_redirect() {
     let mut mock = mockito::Server::new_async().await;
