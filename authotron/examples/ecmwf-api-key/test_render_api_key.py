@@ -34,11 +34,11 @@ OTHER_OAUTH_KEY = renderer.oauth_pem(
 # re-captured when the Ingress moved from per-method Exact paths to one `/login/` Prefix
 # (the only difference from the previous digests), and again when provider `browser`
 # blocks gained stable ids and the Valkey key_prefix dropped its `v1` segment, and
-# again when the source manifest gained the refresh-token modules.
+# again whenever the source manifest gains modules (refresh tokens, rate limits).
 PRE_OAUTH_DIGESTS = {
-    "plain": "c07634eff8fdda36739bbf4a05ea180ed88fa6efd5f766a89f99c5ffe5b245ee",
-    "basic": "a310d2f79ddd02106cc18d73560f00e268b22f99f40241c37e80443e55e8f1e0",
-    "shared": "54d1c45f0f78bea7e064c32cd7c38b6dc3866261128ac29a053af8c083ab2b77",
+    "plain": "cb7a33d6a27652628ca312602f83ebcd1da41cb13abddf4a9a77793df2be301d",
+    "basic": "c95c1ca4cc759f626efbc914524b3fc7e52982207091af6c522c5db676452a9c",
+    "shared": "4d20c669d4c08ee7dab2f1bea89361e9e12679ea9ccef14fcd9f29a0ead32ef3",
 }
 # One `/login/` Prefix replaces per-method Exact paths, independent of method count.
 API_KEY_PATH_RULES = [

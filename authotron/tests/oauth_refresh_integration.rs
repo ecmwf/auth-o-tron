@@ -317,6 +317,83 @@ async fn revocation_is_client_bound_and_always_succeeds_for_unknown_tokens() {
     error(refresh_as(&app, "desktop", &current).await, "invalid_grant");
 }
 
+#[tokio::test]
+async fn token_and_revocation_endpoints_are_rate_limited_per_client_ip() {
+    let (_key, mut config) = fixture();
+    config.oauth.endpoint_rate_limit.token_requests_per_window = 2;
+    config.oauth.endpoint_rate_limit.revoke_requests_per_window = 1;
+    config.oauth.endpoint_rate_limit.trusted_proxies = vec!["10.0.0.0/8".into()];
+    let (app, _) = startup::build_app(Arc::new(config)).await.unwrap();
+    let call =
+        |path: &'static str, peer: &'static str, forwarded: Option<&'static str>| {
+            let app = app.clone();
+            async move {
+                let mut request = Request::post(path)
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+                if let Some(forwarded) = forwarded {
+                    request = request.header("x-forwarded-for", forwarded);
+                }
+                let mut request = request
+                    .body(Body::from(encoded(&[
+                        ("client_id", "desktop"),
+                        ("grant_type", "refresh_token"),
+                        ("refresh_token", "unknown"),
+                        ("token", "unknown"),
+                    ])))
+                    .unwrap();
+                request.extensions_mut().insert(axum::extract::ConnectInfo(
+                    std::net::SocketAddr::new(peer.parse().unwrap(), 443),
+                ));
+                send(&app, request).await
+            }
+        };
+    for _ in 0..2 {
+        let response = call("/oauth/token", "192.0.2.1", None).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    let limited = call("/oauth/token", "192.0.2.1", None).await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited.headers()[header::CACHE_CONTROL], "no-store");
+    let retry: u64 = limited.headers()[header::RETRY_AFTER]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!((1..=60).contains(&retry));
+    assert_eq!(
+        text(limited).await,
+        json!({"error": "temporarily_unavailable"}).to_string()
+    );
+    // A spoofed X-Forwarded-For from an untrusted peer is ignored.
+    let spoofed = call("/oauth/token", "192.0.2.1", Some("198.51.100.9")).await;
+    assert_eq!(spoofed.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        call("/oauth/token", "192.0.2.2", None).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+    // Behind a trusted proxy each forwarded client has its own window.
+    for client in ["198.51.100.7", "198.51.100.8"] {
+        for _ in 0..2 {
+            let response = call("/oauth/token", "10.0.0.5", Some(client)).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+    assert_eq!(
+        call("/oauth/token", "10.0.0.5", Some("198.51.100.7"))
+            .await
+            .status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        call("/oauth/revoke", "192.0.2.1", None).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        call("/oauth/revoke", "192.0.2.1", None).await.status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
 struct Container(String);
 impl Drop for Container {
     fn drop(&mut self) {

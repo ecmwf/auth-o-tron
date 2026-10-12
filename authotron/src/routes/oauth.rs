@@ -12,6 +12,7 @@ use crate::{
     oauth::{
         authorization::{decode_component, validate_authorization_request},
         codes::{AuthorizationCode, CodeIssueOutcome, CodeStoreError},
+        rate_limit::Endpoint,
         refresh_grant::{RefreshGrantError, RefreshRequest},
         runtime::{ActiveFlow, OAuthRuntime},
         store::{StoreError, TransactionId},
@@ -19,9 +20,9 @@ use crate::{
     state::AppState,
 };
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, RawQuery, State, rejection::BytesRejection},
+    extract::{ConnectInfo, DefaultBodyLimit, RawQuery, State, rejection::BytesRejection},
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
@@ -30,7 +31,7 @@ use cookie::{Cookie, SameSite, time::Duration};
 use maud::html;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::{collections::HashMap, net::SocketAddr};
 
 const TX: &str = "__Host-authotron_oauth";
 const BROWSER: &str = "__Host-authotron_oauth_browser";
@@ -481,12 +482,39 @@ async fn store_failure(
 fn token_error(status: StatusCode, error: &'static str) -> Response {
     secure_oauth_response((status, Json(json!({"error": error}))).into_response())
 }
+type Peer = Option<Extension<ConnectInfo<SocketAddr>>>;
+/// 429 with `Retry-After` and the RFC 6749 §4.1.2.1 `temporarily_unavailable` code,
+/// the closest registered OAuth error for an overloaded endpoint.
+fn rate_limited(
+    runtime: &OAuthRuntime,
+    endpoint: Endpoint,
+    peer: Peer,
+    headers: &HeaderMap,
+) -> Option<Response> {
+    let peer = peer.map(|Extension(ConnectInfo(addr))| addr.ip());
+    let ip = runtime.rate_limit.client_ip(peer, headers);
+    let retry_after = runtime.rate_limit.admit(endpoint, ip).err()?;
+    tracing::debug!(
+        event_name = "oauth.endpoint.rate_limited",
+        endpoint = ?endpoint,
+        retry_after_seconds = retry_after,
+    );
+    let mut response = token_error(StatusCode::TOO_MANY_REQUESTS, "temporarily_unavailable");
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, retry_after.into());
+    Some(response)
+}
 async fn token(
     State(state): State<AppState>,
+    peer: Peer,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let runtime = state.oauth.as_ref().unwrap();
+    if let Some(response) = rate_limited(runtime, Endpoint::Token, peer, &headers) {
+        return response;
+    }
     if headers.contains_key(header::AUTHORIZATION) {
         return token_error(StatusCode::BAD_REQUEST, "invalid_client");
     }
@@ -601,10 +629,14 @@ async fn refresh_token(
 /// unknown, malformed or foreign tokens still yield 200.
 async fn revoke(
     State(state): State<AppState>,
+    peer: Peer,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let runtime = state.oauth.as_ref().unwrap();
+    if let Some(response) = rate_limited(runtime, Endpoint::Revoke, peer, &headers) {
+        return response;
+    }
     if headers.contains_key(header::AUTHORIZATION) {
         return token_error(StatusCode::BAD_REQUEST, "invalid_client");
     }

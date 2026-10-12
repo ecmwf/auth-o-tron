@@ -14,6 +14,7 @@ use super::{
     consent::ConsentToken,
     context::AuthenticatedAuthorization,
     keys::KeyManager,
+    rate_limit::EndpointRateLimiter,
     records::BoundAuthorizationTransaction,
     refresh_grant::RefreshBackend,
     refresh_store::MemoryRefreshStore,
@@ -60,6 +61,7 @@ pub struct OAuthRuntime {
     pub(crate) keys: KeyManager,
     pub(crate) origin: String,
     backend: Backend,
+    pub(crate) rate_limit: EndpointRateLimiter,
     /// Present only when at least one client enables refresh tokens.
     pub(super) refresh: Option<RefreshBackend>,
 }
@@ -156,11 +158,13 @@ impl OAuthRuntime {
                     .map_err(|_| "OAuth refresh-token Valkey unavailable")?,
             )))
         };
+        let rate_limit = EndpointRateLimiter::new(&cfg.endpoint_rate_limit)?;
         Ok(Some(Arc::new(Self {
             config: cfg,
             keys,
             origin: session.origin()?,
             backend,
+            rate_limit,
             refresh,
         })))
     }
