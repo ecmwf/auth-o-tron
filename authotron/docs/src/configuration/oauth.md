@@ -109,11 +109,14 @@ automatic fallback are not implemented. Backend durability depends on its config
 | `POST` to the selected login form | Single trusted Origin, one-use flow CSRF, exact hidden-ID/cookie match and pending lookup before fresh strict verification; promotes authenticated state and redirects to fixed `/oauth/continue` |
 | `GET /oauth/continue` | Always a local consent page, not an automatic callback redirect; refresh rotates the challenge |
 | `POST /oauth/consent` | Explicit approve/deny with Origin, transaction binding and consent CSRF; atomic code issuance or denial, then 303 to the registered callback |
-| `POST /oauth/token` | Backchannel public-client code exchange with exact callback/resource and PKCE; atomic redemption followed by the proof-consuming signing bridge |
+| `POST /oauth/token` | Backchannel public-client code exchange with exact callback/resource and PKCE; atomic redemption followed by the proof-consuming signing bridge. With refresh enabled, also the `refresh_token` grant (see [Refresh tokens](#refresh-tokens)) |
+| `POST /oauth/revoke` | RFC 7009 revocation of a refresh-token family by a public client (`token`, `client_id`, optional `token_type_hint`) |
 
 These routes are absent on the metrics router. Existing HTTP route/status metrics and
 direct-login admission/deadline metrics cover the flow without identity, URL, state,
-code or token labels. Metadata advertises no registration endpoint or refresh grant.
+code or token labels. Metadata advertises no registration endpoint. When any client
+enables refresh tokens, `grant_types_supported` adds `refresh_token` and metadata adds
+`revocation_endpoint` with `revocation_endpoint_auth_methods_supported: ["none"]`.
 
 ## Client flow
 
@@ -307,12 +310,102 @@ there is no automatic replay or fallback. Memory is development-only, per-instan
 without restart persistence. Capacity bounds logical records, not total allocation;
 100000 96 KiB records alone permit about 9.15 GiB payload plus overhead.
 
-The v4 transaction namespace introduces client capacity indexes. Upgrading from
-v3 requires draining/restarting in-flight authorization attempts; the authorization
-code namespace is unchanged. Do not mix v3/v4 application replicas behind one
-login endpoint. Restricted backend ACLs must permit `ZRANGE` as well as the
-existing sorted-set/hash operations, with access to all keys beneath the configured
-OAuth transaction prefix, including its client indexes.
+The v5 transaction and v2 code namespaces store the provider's pre-augmentation roles
+that refresh tokens need. Upgrading from v4/v1 drops in-flight authorization attempts
+and unredeemed codes, so users must restart those logins. Do not mix old and new
+application replicas behind one login endpoint. Restricted backend ACLs must permit
+`ZRANGE` as well as the existing sorted-set/hash operations, with access to all keys
+beneath the configured OAuth transaction prefix, including its client indexes.
+
+## Refresh tokens
+
+Refresh tokens are opt-in per client:
+
+```yaml
+oauth:
+  max_refresh_token_families_per_user: 50 # 1..1000, default 50
+  clients:
+    - client_id: mcp-cli
+      # ...
+      refresh_tokens:
+        enabled: true
+        idle_ttl_seconds: 2592000      # 30 days without use; default 30 days
+        absolute_ttl_seconds: 7776000  # 90 days after login; default 90 days
+```
+
+Both lifetimes must be between 300 seconds and 400 days (34560000 seconds), and
+`idle_ttl_seconds` must not exceed `absolute_ttl_seconds`; startup rejects other values.
+For an enabled client, every authorization-code exchange returns a `refresh_token`
+next to the access token. The client does not need to request `offline_access`,
+because common MCP clients never send it.
+
+**Format and storage.** A refresh token is 256 random bits encoded as 43 base64url
+characters. The server stores only its SHA-256 hash. Each login starts a *family*
+holding the client, resource, granted scopes, realm, username and the roles the
+provider returned before augmentation. Families live in the browser-session backend:
+Memory (development, per process, lost on restart) or Valkey under
+`<key_prefix>:oauth:refresh-tokens:v1:`. Each Valkey operation is one Lua script, and
+keys expire at the family's idle deadline. Restricted ACLs must allow `EVAL`, `GET`,
+`SET`, `DEL`, `EXISTS`, `TYPE`, the hash commands `HSET`/`HGET`, the sorted-set commands
+`ZADD`/`ZRANGE`/`ZREM`/`ZCARD`, and `PEXPIREAT`/`PEXPIRETIME` under that prefix.
+
+**Lifetimes.** A family expires `idle_ttl_seconds` after its last use, and never later
+than `absolute_ttl_seconds` after login. A refresh moves the idle deadline but never the
+absolute one. Lowering `absolute_ttl_seconds` also shortens existing families. Raising
+it does not extend them.
+
+**Refresh grant.** `POST /oauth/token` with `grant_type=refresh_token`,
+`refresh_token` and `client_id` (the client the family was issued to). Two optional
+parameters are accepted:
+
+- `scope`: a space-separated subset of the family's scopes.
+- `resource`: must equal the family's resource.
+
+On every refresh the server:
+
+1. Checks that the client still exists and still has refresh tokens enabled.
+2. Re-runs **strict** augmentation, starting from the stored provider roles. Roles
+   that the augmenters no longer grant are dropped.
+3. Re-evaluates the current client/resource/scope policy.
+
+Only after these checks pass does it issue a new access token and a new refresh token,
+which replaces the presented one. Responses are `Cache-Control: no-store`. Errors:
+
+| Condition | Response |
+| --- | --- |
+| Unknown, expired, rotated or revoked token; token issued to another client; user no longer meets policy | 400 `invalid_grant` |
+| Client no longer enabled, or absolute lifetime shortened past now | 400 `invalid_grant`, family revoked |
+| `scope` not a unique subset of the granted scopes | 400 `invalid_scope` |
+| `resource` differs from the family | 400 `invalid_target` (RFC 8707) |
+| Unknown `client_id` | 400 `invalid_client` |
+| Augmentation failure/timeout or backend unavailable | 503 `server_error`; the token stays valid |
+
+**Rotation and reuse detection.** Each refresh token can be used once. If a client
+presents the token it rotated *within the last 30 seconds*, the server returns
+`invalid_grant` and leaves the family alone. This tolerates concurrent or retried
+refreshes. Presenting any other already-rotated token is treated as theft: the whole
+family is revoked, and the current token stops working too.
+
+**Per-user cap.** A user may hold at most `max_refresh_token_families_per_user` live
+families across all clients. A new login beyond the cap revokes that user's oldest
+family. It never rejects the new login.
+
+**Revocation.** `POST /oauth/revoke` with `token` and `client_id` (no client
+authentication; public clients) revokes the whole family of any refresh token it
+belongs to. Unknown, malformed, foreign-client or access tokens return 200 with no
+effect (RFC 7009 §2.2). Signed access tokens cannot be revoked and remain valid until
+their `exp`.
+
+**Caveats.**
+
+- Provider-side revocation is not observed on refresh, because refresh has no user
+  credentials. Examples are a disabled API key or a removed password user. Only
+  augmenter-derived roles and current policy are re-evaluated. Bound this window with
+  `absolute_ttl_seconds`, or revoke families explicitly.
+- With the Memory backend, families are per process. A refresh token works only on the
+  replica that issued it and is lost on restart. Multi-replica deployments need Valkey.
+- Metrics: `authotron_oauth_refresh_tokens_total{event}` with `issued`, `rotated`,
+  `reuse_detected` and `family_revoked`.
 
 ## Signing and deferred capabilities
 
@@ -334,7 +427,7 @@ and only the required-role union, with no username/email/credentials or unrelate
 Resource servers must enforce RS256, at+jwt, exact issuer/audience and current validity.
 The MCP resource server owns its protected-resource metadata and access-token validation.
 
-External SSO/OIDC, refresh tokens, dynamic/CIMD registration, confidential-client
+External SSO/OIDC, dynamic/CIMD registration, confidential-client
 authentication, browser token CORS and automatic operational key rotation are deferred.
 The first supported flow is preregistered public clients with fresh Basic/API-key login,
 explicit consent and code/S256 exchange; no separate production demo or deployment is required.
