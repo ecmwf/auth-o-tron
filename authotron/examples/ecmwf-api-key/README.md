@@ -442,9 +442,14 @@ archived source directories, including when the project has no `.git` directory.
 
 Output is only `resources.yaml`, mode `0600`, containing **six resources** by default:
 
-1. Public application ConfigMap, with `jwt.secret: ''`.
-2. Deployment retaining the baseline non-root source-build pod.
-3. Internal ClusterIP Service.
+1. Public application ConfigMap, with `jwt.secret: ''` and
+   `metrics: {enabled: true, port: 9090}`.
+2. Deployment retaining the baseline non-root source-build pod, with an added
+   `http-metrics` container port 9090.
+3. Internal ClusterIP Service, with an added `http-metrics` port 9090. The Ingress
+   never routes to it. Prometheus metrics (`/metrics`) are reachable only inside the
+   cluster or through `kubectl port-forward svc/authotron-login-preview 9090`. No
+   ServiceMonitor is rendered, so scrape configuration is left to the cluster.
 4. Ingress with the existing `/login` Exact, `/static/` Prefix and `/favicon.ico`
    ImplementationSpecific paths, with the preview's Exact `/login/` widened to a
    single `/login/` Prefix. It covers every `/login/method/<id>` form,

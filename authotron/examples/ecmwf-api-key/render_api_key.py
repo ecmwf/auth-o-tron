@@ -51,6 +51,10 @@ VALKEY_PASSWORD_ENV = "AOT_UI__BROWSER_SESSION__BACKEND__PASSWORD"
 BASIC_REALM = "browser-demo"
 # Opt-in OAuth profile matching the mcp-local remote-mode client registration;
 # test_render_api_key.py guards these values against ../mcp-local/demo_settings.py.
+# Prometheus metrics on a separate in-cluster port: the Service exposes it, the
+# Ingress never routes to it. Scrape it via the Service or `kubectl port-forward`.
+METRICS_PORT = 9090
+METRICS_PORT_NAME = "http-metrics"
 OAUTH_KEY_DIR = "/run/secrets/oauth"
 OAUTH_KEY_NAME = "signing.pem"
 OAUTH_SECRET_KEY = "oauth-signing.pem"
@@ -898,12 +902,25 @@ def transform(
         )
         realms = [p["realm"] for p in config["providers"] if p.get("browser")]
         config["oauth"] = oauth_config(host, oauth_kid(oauth_key), realms, aviso)
+    config["metrics"] = {"enabled": True, "port": METRICS_PORT}
     config_map["data"]["config.yaml"] = yaml.safe_dump(config)
+    service = next(d for d in resources if d["kind"] == "Service")
+    service["spec"]["ports"].append(
+        {
+            "name": METRICS_PORT_NAME,
+            "port": METRICS_PORT,
+            "targetPort": METRICS_PORT,
+            "protocol": "TCP",
+        }
+    )
     deployment = next(d for d in resources if d["kind"] == "Deployment")
     deployment["spec"]["replicas"] = replicas
     template = deployment["spec"]["template"]
     template["metadata"]["annotations"]["authotron.ecmwf.int/signing-sha256"] = (
         hashlib.sha256(token.encode()).hexdigest()
+    )
+    template["spec"]["containers"][0]["ports"].append(
+        {"name": METRICS_PORT_NAME, "containerPort": METRICS_PORT, "protocol": "TCP"}
     )
     mounted_yaml = config_map["data"]["config.yaml"]
     template["spec"]["containers"][0]["env"].append(

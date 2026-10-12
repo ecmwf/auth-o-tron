@@ -34,11 +34,12 @@ OTHER_OAUTH_KEY = renderer.oauth_pem(
 # re-captured when the Ingress moved from per-method Exact paths to one `/login/` Prefix
 # (the only difference from the previous digests), and again when provider `browser`
 # blocks gained stable ids and the Valkey key_prefix dropped its `v1` segment, and
-# again whenever the source manifest gains modules (refresh tokens, rate limits).
+# again whenever the source manifest gains modules (refresh tokens, rate limits), and
+# again when every playground profile enabled the in-cluster metrics port.
 PRE_OAUTH_DIGESTS = {
-    "plain": "cb7a33d6a27652628ca312602f83ebcd1da41cb13abddf4a9a77793df2be301d",
-    "basic": "c95c1ca4cc759f626efbc914524b3fc7e52982207091af6c522c5db676452a9c",
-    "shared": "4d20c669d4c08ee7dab2f1bea89361e9e12679ea9ccef14fcd9f29a0ead32ef3",
+    "plain": "07337b6aa32f379a821916586666d8aa1abf94c065e4082206562c2010f21830",
+    "basic": "ef3c1199f4b5eeb4c55c45cc7a0bbba018e95793e36bc48896402621ec5ec558",
+    "shared": "55809ff1a4b91d0c4bb7f21acddf33efe82cb1c3b4aebe09bc3bcbfbed7a1ae5",
 }
 # One `/login/` Prefix replaces per-method Exact paths, independent of method count.
 API_KEY_PATH_RULES = [
@@ -255,6 +256,10 @@ class RendererTests(unittest.TestCase):
         baseline_pod = find(baseline, "Deployment")["spec"]["template"]["spec"]
         actual_pod = copy.deepcopy(pod)
         actual_pod["containers"][0]["env"].pop()
+        self.assertEqual(
+            actual_pod["containers"][0]["ports"].pop(),
+            {"name": "http-metrics", "containerPort": 9090, "protocol": "TCP"},
+        )
         self.assertEqual(actual_pod, baseline_pod)
         annotations = deployment["spec"]["template"]["metadata"]["annotations"]
         self.assertEqual(
@@ -278,6 +283,30 @@ class RendererTests(unittest.TestCase):
             [(p["path"], p["pathType"]) for p in paths],
             API_KEY_PATH_RULES,
         )
+
+    def test_metrics_are_served_in_cluster_but_never_routed_by_the_ingress(self):
+        baseline, _ = self.baseline()
+        for options in ({}, dict(valkey_password=VALKEY_PASSWORD, oauth_key=OAUTH_KEY)):
+            resources = renderer.transform(baseline, HOST, TOKEN, BASIC, **options)
+            config = yaml.safe_load(find(resources, "ConfigMap")["data"]["config.yaml"])
+            self.assertEqual(config["metrics"], {"enabled": True, "port": 9090})
+            self.assertNotEqual(config["server"]["port"], 9090)
+            service_ports = {
+                p["name"]: p["port"]
+                for p in find(resources, "Service")["spec"]["ports"]
+            }
+            self.assertEqual(service_ports["http-metrics"], 9090)
+            app = renderer.preview.RELEASE
+            backends = [
+                p["backend"]["service"]
+                for p in find(resources, "Ingress")["spec"]["rules"][0]["http"]["paths"]
+            ]
+            self.assertTrue(backends)
+            for backend in backends:
+                self.assertEqual(backend["name"], app)
+                self.assertNotEqual(backend["port"].get("number"), 9090)
+                self.assertNotEqual(backend["port"].get("name"), "http-metrics")
+            self.assertFalse([d for d in resources if d["kind"] == "ServiceMonitor"])
 
     def test_oauth_allowed_realms_are_deduplicated_in_order(self):
         config = renderer.oauth_config(
