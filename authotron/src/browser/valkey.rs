@@ -547,7 +547,10 @@ mod tests {
         ] {
             tasks.push(tokio::spawn(async move {
                 state
-                    .admitted_with_metrics(std::future::pending(), Some(&metrics))
+                    .admitted_with_metrics(
+                        std::future::pending::<Result<User, _>>(),
+                        Some(&metrics),
+                    )
                     .await
             }));
         }
@@ -748,7 +751,10 @@ mod tests {
             let metrics = metrics.clone();
             tokio::spawn(async move {
                 departing
-                    .admitted_with_metrics(std::future::pending(), Some(&metrics))
+                    .admitted_with_metrics(
+                        std::future::pending::<Result<User, _>>(),
+                        Some(&metrics),
+                    )
                     .await
             })
         };
@@ -832,7 +838,7 @@ mod tests {
                         )
                         .await;
                         captured = Some((id, expiry));
-                        std::future::pending().await
+                        std::future::pending::<Result<User, _>>().await
                     },
                     Some(&metrics)
                 )

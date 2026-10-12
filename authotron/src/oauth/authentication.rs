@@ -29,11 +29,17 @@ pub enum AuthenticationError {
 /// No Debug, Clone, Serialize or Deserialize.
 pub struct VerifiedOAuthIdentity {
     user: User,
+    provider_roles: Vec<String>,
     verified_at_ms: u64,
 }
 impl VerifiedOAuthIdentity {
     pub fn as_user(&self) -> &User {
         &self.user
+    }
+    /// Roles asserted by the provider before augmentation; refresh re-runs augmenters
+    /// from this base so roles removed upstream since login are not retained.
+    pub fn provider_roles(&self) -> &[String] {
+        &self.provider_roles
     }
     pub fn verified_at_ms(&self) -> u64 {
         self.verified_at_ms
@@ -51,7 +57,7 @@ pub async fn verify_identity(
 ) -> Result<VerifiedOAuthIdentity, AuthenticationError> {
     let deadline = tokio::time::Instant::now() + browser.verification_timeout();
     let result = tokio::time::timeout_at(deadline, async {
-        let user = browser
+        let (user, provider_roles) = browser
             .verify_identity_strict(method, credentials, auth, metrics, projection)
             .await
             .map_err(|error| match error {
@@ -71,8 +77,11 @@ pub async fn verify_identity(
         if tokio::time::Instant::now() >= deadline {
             return Err(AuthenticationError::Timeout);
         }
+        validate_identity_fields(&user.username, &user.realm, &provider_roles)
+            .map_err(|_| AuthenticationError::Rejected)?;
         Ok(VerifiedOAuthIdentity {
             user,
+            provider_roles,
             verified_at_ms,
         })
     })
@@ -121,15 +130,18 @@ pub(super) fn restore_from_trusted_storage(
     username: String,
     realm: String,
     roles: Vec<String>,
+    provider_roles: Vec<String>,
     verified_at_ms: u64,
 ) -> Result<VerifiedOAuthIdentity, AuthenticationError> {
     validate_identity_fields(&username, &realm, &roles)
+        .and_then(|()| validate_identity_fields(&username, &realm, &provider_roles))
         .map_err(|_| AuthenticationError::Rejected)?;
     if !valid_time(verified_at_ms) {
         return Err(AuthenticationError::Unavailable);
     }
     Ok(VerifiedOAuthIdentity {
         user: User::new(realm, username, Some(roles), None, None, None),
+        provider_roles,
         verified_at_ms,
     })
 }
@@ -294,6 +306,8 @@ mod tests {
                 .unwrap();
             assert_eq!(proof.as_user().username, "alice");
             assert!(proof.as_user().roles.contains(&"derived".into()));
+            let base: &[&str] = if method == "password" { &["base"] } else { &[] };
+            assert_eq!(proof.provider_roles(), base);
             assert!(proof.as_user().attributes.is_empty() && proof.as_user().scopes.is_empty());
             assert!(u128::from(proof.verified_at_ms()) >= before);
         }

@@ -691,11 +691,11 @@ impl BrowserLoginState {
 
     /// Local-first, nonblocking admission bounds pending backend requests as well
     /// as provider work. Only locally admitted attempts spend backend quota.
-    async fn admitted_with_metrics(
+    async fn admitted_with_metrics<T>(
         &self,
-        operation: impl std::future::Future<Output = Result<User, BrowserVerifyError>>,
+        operation: impl std::future::Future<Output = Result<T, BrowserVerifyError>>,
         metrics: Option<&Metrics>,
-    ) -> Result<User, BrowserVerifyError> {
+    ) -> Result<T, BrowserVerifyError> {
         let _permit = self
             .inflight
             .try_acquire()
@@ -777,6 +777,7 @@ impl BrowserLoginState {
     ) -> Result<User, BrowserVerifyError> {
         self.verify_identity_with(method, credentials, auth, metrics, false, browser_identity)
             .await
+            .map(|(user, _)| user)
     }
 
     pub(crate) async fn verify_identity_strict(
@@ -786,7 +787,7 @@ impl BrowserLoginState {
         auth: &Auth,
         metrics: &Metrics,
         projection: fn(&User) -> Result<User, BrowserVerifyError>,
-    ) -> Result<User, BrowserVerifyError> {
+    ) -> Result<(User, Vec<String>), BrowserVerifyError> {
         self.verify_identity_with(method, credentials, auth, metrics, true, projection)
             .await
     }
@@ -799,7 +800,7 @@ impl BrowserLoginState {
         metrics: &Metrics,
         strict: bool,
         projection: fn(&User) -> Result<User, BrowserVerifyError>,
-    ) -> Result<User, BrowserVerifyError> {
+    ) -> Result<(User, Vec<String>), BrowserVerifyError> {
         self.admitted_with_metrics(
             async {
                 let user = match credentials {
@@ -829,6 +830,7 @@ impl BrowserLoginState {
                             .map_err(|_| BrowserVerifyError::Rejected)?
                     }
                 };
+                let provider_roles = user.roles.clone();
                 let user = if strict {
                     auth.check_augmenters_strict(user, metrics)
                         .await
@@ -838,7 +840,7 @@ impl BrowserLoginState {
                         .await
                         .ok_or(BrowserVerifyError::Rejected)?
                 };
-                projection(&user)
+                Ok((projection(&user)?, provider_roles))
             },
             Some(metrics),
         )
@@ -983,11 +985,11 @@ async fn within_deadline<T>(
     result
 }
 
-async fn complete_verification(
+async fn complete_verification<T>(
     deadline: tokio::time::Instant,
-    operation: impl std::future::Future<Output = Result<User, BrowserVerifyError>>,
+    operation: impl std::future::Future<Output = Result<T, BrowserVerifyError>>,
     cleanup: impl std::future::Future<Output = Result<(), BrowserVerifyError>>,
-) -> Result<User, BrowserVerifyError> {
+) -> Result<T, BrowserVerifyError> {
     let result = within_deadline(deadline, operation).await;
     let released = within_deadline(deadline, cleanup).await;
     // An elapsed deadline overrides even a Rejected result.
