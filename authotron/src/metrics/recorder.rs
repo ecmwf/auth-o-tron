@@ -179,13 +179,16 @@ pub enum RefreshTokenEvent {
     Rotated,
     ReuseDetected,
     FamilyRevoked,
+    /// Code exchange succeeded but the family could not be stored.
+    IssueFailed,
 }
 impl RefreshTokenEvent {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Issued,
         Self::Rotated,
         Self::ReuseDetected,
         Self::FamilyRevoked,
+        Self::IssueFailed,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -193,6 +196,7 @@ impl RefreshTokenEvent {
             Self::Rotated => "rotated",
             Self::ReuseDetected => "reuse_detected",
             Self::FamilyRevoked => "family_revoked",
+            Self::IssueFailed => "issue_failed",
         }
     }
 }
@@ -587,6 +591,7 @@ mod tests {
             ("rotated", 0),
             ("reuse_detected", 1),
             ("family_revoked", 0),
+            ("issue_failed", 0),
         ] {
             assert!(
                 output.contains(&format!(

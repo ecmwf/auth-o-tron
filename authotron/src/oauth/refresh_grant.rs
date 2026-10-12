@@ -98,6 +98,8 @@ impl OAuthRuntime {
     }
     /// Signs the access token for consumed code proof and, for opted-in clients,
     /// starts a refresh-token family bound to the same client, resource and scopes.
+    /// The code is already consumed, so a family that cannot be stored is logged and
+    /// counted, and the access token is returned without a `refresh_token`.
     pub(crate) async fn exchange(
         &self,
         proof: RedeemedAuthorization,
@@ -115,18 +117,43 @@ impl OAuthRuntime {
         let response = self
             .token(proof)
             .map_err(|_| RefreshGrantError::Unavailable)?;
+        Ok(self.with_new_family(response, &grant, metrics).await)
+    }
+    async fn with_new_family(
+        &self,
+        response: TokenResponse,
+        grant: &RefreshGrant,
+        metrics: &Metrics,
+    ) -> TokenResponse {
         let (Some(backend), Some(policy)) = (&self.refresh, self.refresh_policy(&grant.client_id))
         else {
-            return Ok(response);
+            return response;
         };
-        let token = RefreshToken::generate()?;
-        let now = self
-            .now()
-            .await
-            .map_err(|_| RefreshGrantError::Unavailable)?;
-        refresh_dispatch!(backend, issue(&grant, token.hash(), now, policy))?;
-        metrics.record_refresh_token(RefreshTokenEvent::Issued);
-        Ok(response.with_refresh_token(&token))
+        let issued = async {
+            let token = RefreshToken::generate()?;
+            let now = self
+                .now()
+                .await
+                .map_err(|_| RefreshStoreError::Unavailable)?;
+            refresh_dispatch!(backend, issue(grant, token.hash(), now, policy))?;
+            Ok::<_, RefreshStoreError>(token)
+        };
+        match issued.await {
+            Ok(token) => {
+                metrics.record_refresh_token(RefreshTokenEvent::Issued);
+                response.with_refresh_token(&token)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event_name = "oauth.refresh_token.issue_failed",
+                    client_id = %grant.client_id,
+                    error = ?error,
+                    "refresh token family not stored; returning the access token alone"
+                );
+                metrics.record_refresh_token(RefreshTokenEvent::IssueFailed);
+                response
+            }
+        }
     }
 
     pub(crate) async fn refresh(
@@ -348,6 +375,49 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn unstorable_family_still_returns_the_access_token() {
+        let (_file, _config, runtime) = runtime().await;
+        let metrics = Metrics::new();
+        let issuer = TokenIssuer::new(&runtime.config, &runtime.keys).unwrap();
+        let user = User::new(
+            "local".into(),
+            "alice".into(),
+            Some(vec!["reader".into()]),
+            None,
+            None,
+            None,
+        );
+        let issued = || {
+            issuer
+                .issue_refreshed(
+                    "desktop",
+                    "https://mcp.example.org/mcp",
+                    &["read".into()],
+                    &user,
+                    1_700_000_000_000,
+                )
+                .unwrap()
+        };
+        let response = runtime.with_new_family(issued(), &grant(), &metrics).await;
+        assert!(serde_json::to_value(response).unwrap()["refresh_token"].is_string());
+        let mut oversized = grant();
+        oversized.provider_roles = vec!["r".repeat(64); 1024];
+        let response = runtime
+            .with_new_family(issued(), &oversized, &metrics)
+            .await;
+        let body = serde_json::to_value(response).unwrap();
+        assert!(body["access_token"].is_string());
+        assert!(body.get("refresh_token").is_none());
+        let output = metrics.render().unwrap();
+        for line in [
+            "authotron_oauth_refresh_tokens_total{event=\"issued\"} 1",
+            "authotron_oauth_refresh_tokens_total{event=\"issue_failed\"} 1",
+        ] {
+            assert!(output.contains(line), "{line}");
+        }
     }
 
     #[test]
