@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import aiohttp
+import demo_settings
 import jsonschema
 import prepare_demo as setup
 import run_demo
@@ -51,7 +52,7 @@ class SetupTests(unittest.TestCase):
             jsonschema.validate(dict(config, version="invalid"), schema)
         credentials = json.loads((self.runtime / "credentials.json").read_text())
         settings = json.loads((self.runtime / "settings.json").read_text())
-        self.assertEqual(settings, setup.SETTINGS)
+        self.assertEqual(settings, demo_settings.LOCAL_SETTINGS)
         self.assertEqual(config["version"], "2.0.0")
         self.assertEqual(config["server"], {"host": "127.0.0.1", "port": 8000})
         self.assertFalse(config["metrics"]["enabled"])
@@ -63,11 +64,13 @@ class SetupTests(unittest.TestCase):
         self.assertGreaterEqual(len(credentials["password"]), 32)
         self.assertGreaterEqual(len(config["jwt"]["secret"]), 32)
         self.assertEqual(config["ui"]["basic"], {"provider_name": "basic"})
-        self.assertEqual(config["ui"]["browser_session"]["public_origin"], setup.ISSUER.rstrip("/"))
+        self.assertEqual(
+            config["ui"]["browser_session"]["public_origin"], demo_settings.LOCAL_ISSUER.rstrip("/")
+        )
         self.assertEqual(config["ui"]["browser_session"]["backend"], {"type": "memory"})
         oauth = config["oauth"]
         self.assertTrue(oauth["enabled"])
-        self.assertEqual(oauth["issuer"], setup.ISSUER)
+        self.assertEqual(oauth["issuer"], demo_settings.LOCAL_ISSUER)
         self.assertEqual(oauth["clients"][0]["client_id"], setup.CLIENT_ID)
         self.assertEqual(oauth["clients"][0]["application_type"], "native")
         self.assertEqual(oauth["clients"][0]["redirect_uris"], [setup.CALLBACK])
@@ -138,6 +141,7 @@ class SetupTests(unittest.TestCase):
         files = [
             Path(__file__).with_name(name)
             for name in (
+                "demo_settings.py",
                 "prepare_demo.py",
                 "run_demo.py",
                 "server.py",
@@ -145,6 +149,7 @@ class SetupTests(unittest.TestCase):
                 "test_setup.py",
                 "test_auth.py",
                 "test_e2e.py",
+                "test_remote.py",
                 "README.md",
                 "pyproject.toml",
                 ".gitignore",
@@ -260,7 +265,7 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
                 url,
                 data=b"synthetic-form",
                 headers={
-                    "Origin": setup.ISSUER.rstrip("/"),
+                    "Origin": demo_settings.LOCAL_ISSUER.rstrip("/"),
                     "X-Forwarded-Host": "invalid",
                 },
                 allow_redirects=False,
@@ -272,7 +277,7 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             received,
             {
-                "origin": setup.ISSUER.rstrip("/"),
+                "origin": demo_settings.LOCAL_ISSUER.rstrip("/"),
                 "path": "/oauth/consent?q=a%2Fb",
                 "body": b"synthetic-form",
                 "forwarded": None,

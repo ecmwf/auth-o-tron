@@ -1,4 +1,8 @@
-"""Run the local Authotron/MCP backends and loopback-only HTTPS proxies."""
+"""Run the local Authotron/MCP backends and loopback-only HTTPS proxies.
+
+With a remote-issuer runtime (prepared with --issuer), only the MCP backend and its
+8444 HTTPS proxy are started; the issuer is reached with system TLS trust.
+"""
 
 import argparse
 import asyncio
@@ -14,7 +18,8 @@ from pathlib import Path
 import aiohttp
 from aiohttp import web
 from multidict import CIMultiDict
-from prepare_demo import ISSUER, SETTINGS, outside_repository
+from demo_settings import endpoints, is_remote, load_settings, system_tls_context
+from prepare_demo import outside_repository
 from yarl import URL
 
 HOP_HEADERS = {
@@ -81,10 +86,18 @@ def proxy_app(session: aiohttp.ClientSession, backend_port: int) -> web.Applicat
     return app
 
 
-def check_ports() -> None:
+LOCAL_PORTS = (8000, 8001, 8443, 8444)
+REMOTE_PORTS = (8001, 8444)
+
+
+class UsageError(ValueError):
+    """Option combination that does not fit the runtime's mode; the message is safe to print."""
+
+
+def check_ports(ports=LOCAL_PORTS) -> None:
     sockets = []
     try:
-        for port in (8000, 8001, 8443, 8444):
+        for port in ports:
             sock = socket.socket()
             sockets.append(sock)
             sock.bind(("127.0.0.1", port))
@@ -106,20 +119,27 @@ async def stop_process(process) -> None:
             await process.wait()
 
 
-async def wait_ready(session, context, processes, timeout: float) -> None:
+async def wait_ready(session, settings, contexts, processes, timeout: float) -> None:
+    """Ready once issuer metadata names the configured issuer and MCP answers 401."""
+    issuer = settings["issuer"]
+    issuer_tls, resource_tls = contexts
+
     async def poll():
+        issuer_ok = False
         while True:
             if any(process.returncode is not None for process in processes):
                 raise RuntimeError("a local backend exited during startup")
             try:
-                async with session.get(
-                    ISSUER + ".well-known/oauth-authorization-server", ssl=context
-                ) as response:
-                    issuer_ok = (
-                        response.status == 200 and (await response.json()).get("issuer") == ISSUER
-                    )
-                async with session.get(SETTINGS["resource"], ssl=context) as response:
-                    mcp_ok = response.status in (200, 401, 405)
+                if not issuer_ok:
+                    async with session.get(
+                        endpoints(issuer)["metadata"], ssl=issuer_tls
+                    ) as response:
+                        issuer_ok = (
+                            response.status == 200
+                            and (await response.json()).get("issuer") == issuer
+                        )
+                async with session.get(settings["resource"], ssl=resource_tls) as response:
+                    mcp_ok = response.status == 401
                 if issuer_ok and mcp_ok:
                     return
             except (TimeoutError, aiohttp.ClientError, ValueError):
@@ -129,20 +149,34 @@ async def wait_ready(session, context, processes, timeout: float) -> None:
     await asyncio.wait_for(poll(), timeout)
 
 
+def commands(runtime: Path, remote: bool, binary: Path | None) -> list[list[str]]:
+    server = [sys.executable, str(Path(__file__).with_name("server.py")), "--runtime-dir"]
+    server.append(str(runtime))
+    return [server] if remote else [[str(binary)], server]
+
+
 async def run(args) -> None:
     runtime = outside_repository(args.runtime_dir)
     if runtime.stat().st_mode & 0o077:
         raise ValueError("runtime directory must be private (0700)")
-    if json.loads((runtime / "settings.json").read_text()) != SETTINGS:
-        raise ValueError("runtime settings do not match this demo")
-    binary = args.authotron_bin.expanduser().resolve(strict=True)
-    check_ports()
+    settings = load_settings(runtime)
+    remote = is_remote(settings)
+    if remote and (args.authotron_bin is not None or args.show_credentials):
+        raise UsageError(
+            "--authotron-bin and --show-credentials are not used with a remote-issuer runtime"
+        )
+    if not remote and args.authotron_bin is None:
+        raise UsageError("--authotron-bin is required for a local-issuer runtime")
+    binary = None if remote else args.authotron_bin.expanduser().resolve(strict=True)
+    check_ports(REMOTE_PORTS if remote else LOCAL_PORTS)
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.minimum_version = ssl.TLSVersion.TLSv1_2
     tls.load_cert_chain(runtime / "tls-cert.pem", runtime / "tls-key.pem")
     verify = ssl.create_default_context(cafile=str(runtime / "tls-ca.pem"))
+    contexts = (system_tls_context() if remote else verify, verify)
     env = clean_environment()
-    env["AOT_CONFIG_PATH"] = str(runtime / "authotron.json")
+    if not remote:
+        env["AOT_CONFIG_PATH"] = str(runtime / "authotron.json")
     processes, runners = [], []
     stopped = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -150,15 +184,7 @@ async def run(args) -> None:
         loop.add_signal_handler(sig, stopped.set)
     startup_task = stop_task = None
     try:
-        for command in (
-            [str(binary)],
-            [
-                sys.executable,
-                str(Path(__file__).with_name("server.py")),
-                "--runtime-dir",
-                str(runtime),
-            ],
-        ):
+        for command in commands(runtime, remote, binary):
             processes.append(
                 await asyncio.create_subprocess_exec(
                     *command,
@@ -175,7 +201,8 @@ async def run(args) -> None:
             skip_auto_headers={"Accept-Encoding", "Content-Type"},
             timeout=aiohttp.ClientTimeout(total=None, sock_connect=2, sock_read=30),
         ) as session:
-            for port, backend in ((8443, 8000), (8444, 8001)):
+            proxies = ((8444, 8001),) if remote else ((8443, 8000), (8444, 8001))
+            for port, backend in proxies:
                 runner = web.AppRunner(
                     proxy_app(session, backend), access_log=None, shutdown_timeout=2
                 )
@@ -183,7 +210,7 @@ async def run(args) -> None:
                 await runner.setup()
                 await web.TCPSite(runner, "127.0.0.1", port, ssl_context=tls).start()
             startup_task = asyncio.create_task(
-                wait_ready(session, verify, processes, args.startup_timeout)
+                wait_ready(session, settings, contexts, processes, args.startup_timeout)
             )
             stop_task = asyncio.create_task(stopped.wait())
             done, _ = await asyncio.wait(
@@ -193,10 +220,16 @@ async def run(args) -> None:
                 return
             await startup_task
             print(
-                "Local demo ready: issuer https://127.0.0.1:8443/; MCP https://127.0.0.1:8444/mcp",
+                f"{'Remote-issuer' if remote else 'Local'} demo ready: "
+                f"issuer {settings['issuer']}; MCP {settings['resource']}",
                 flush=True,
             )
-            if args.show_credentials:
+            if remote:
+                print(
+                    "Sign in at the remote issuer in your browser; Ctrl-C stops the demo.",
+                    flush=True,
+                )
+            elif args.show_credentials:
                 credentials = json.loads((runtime / "credentials.json").read_text())
                 print(
                     f"Demo username: {credentials['username']}\nDemo password: {credentials['password']}",
@@ -230,7 +263,11 @@ async def run(args) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-dir", type=Path, required=True)
-    parser.add_argument("--authotron-bin", type=Path, required=True)
+    parser.add_argument(
+        "--authotron-bin",
+        type=Path,
+        help="Authotron executable; required for local-issuer runtimes, rejected for remote",
+    )
     parser.add_argument("--startup-timeout", type=float, default=30)
     parser.add_argument(
         "--show-credentials",
@@ -243,6 +280,8 @@ def main() -> None:
     logging.getLogger("aiohttp.server").disabled = True
     try:
         asyncio.run(run(args))
+    except UsageError as exc:
+        parser.exit(2, f"{exc}\n")
     except (TimeoutError, OSError, ValueError, RuntimeError):
         parser.exit(
             1,

@@ -62,7 +62,7 @@ From the repository root, start the runner in one terminal:
   --show-credentials
 ```
 
-`--authotron-bin` is required and accepts an external executable path. The runner
+`--authotron-bin` is required for a local runtime and accepts an external executable path. The runner
 passes `AOT_CONFIG_PATH` pointing to the generated `authotron.json` and removes
 inherited `AOT_*` overrides and proxy environment variables. It launches:
 
@@ -102,7 +102,12 @@ OAuth client.
 
 ## Shared settings contract
 
-`prepare_demo.py`, `server.py`, and `client.py` share exactly these six keys:
+`demo_settings.py` is the single source of these values and of the derived
+endpoints (`<issuer>oauth/authorize`, `<issuer>oauth/token`, `<issuer>oauth/jwks`,
+`<issuer>.well-known/oauth-authorization-server`). `prepare_demo.py` writes
+`settings.json`; `server.py`, `client.py`, and `run_demo.py` load and strictly
+validate it (exact keys, HTTPS issuer with trailing slash). A local runtime has
+exactly these seven keys:
 
 ```json
 {
@@ -111,6 +116,7 @@ OAuth client.
   "callback": "http://127.0.0.1:49152/callback",
   "client_id": "mcp-local",
   "scope": "mcp:read",
+  "required_role": "reader",
   "jwks_uri": "https://127.0.0.1:8443/oauth/jwks"
 }
 ```
@@ -122,6 +128,69 @@ bodies, and do not follow OAuth redirects. They strip hop-by-hop and untrusted
 forwarding headers. This demo uses stateless MCP HTTP responses; WebSockets are
 not supported. Authotron uses an in-memory browser session backend and no store
 or metrics listener. Restarting it invalidates active browser transactions.
+
+A remote-issuer runtime additionally contains `"issuer_tls": "system"`, its
+`issuer`/`jwks_uri` point at the remote issuer, and `"required_role"` is `null`;
+all other keys are identical. `server.py` enforces `required_role` only when it is
+set; it always requires a `roles` claim that is a list of at most 64 non-empty
+strings (an empty list is valid). The local Authotron grants `reader` and
+requires it for `mcp:read`; the playground grants `mcp:read` without roles.
+
+## Use the Kubernetes playground as issuer
+
+Instead of a local Authotron, the deployed playground can act as the OAuth issuer
+while the MCP resource server still runs locally on `https://127.0.0.1:8444/mcp`.
+This requires that the playground's Authotron configuration registers exactly
+the values this demo uses:
+
+| Setting | Value |
+| --- | --- |
+| OAuth client | `mcp-local` (public native client) |
+| Redirect URI | `http://127.0.0.1:49152/callback` |
+| Resource | `https://127.0.0.1:8444/mcp` |
+| Scope | `mcp:read`, granted to any authenticated user (`required_roles: []`; tokens carry `roles: []`) |
+
+If any of these differ on the cluster, authorization or token validation fails.
+From the repository root, prepare a remote-issuer runtime (no Authotron binary needed):
+
+```sh
+export MCP_RUNTIME="/tmp/authotron-mcp-remote-$(date +%s)-$$"
+/tmp/authotron-mcp-venv/bin/python authotron/examples/mcp-local/prepare_demo.py \
+  --runtime-dir "$MCP_RUNTIME" \
+  --issuer https://authotron-palyground.lumi.apps.dte.destination-earth.eu/
+```
+
+`--issuer` must be a lowercase `https://` DNS origin ending in `/`, without path,
+query, credentials, or default port. The runtime then contains only
+`settings.json` and the local TLS CA/leaf for `127.0.0.1:8444`; there is no
+`authotron.json`, signing key, or `credentials.json`.
+
+Start only the MCP server and its HTTPS proxy:
+
+```sh
+/tmp/authotron-mcp-venv/bin/python authotron/examples/mcp-local/run_demo.py \
+  --runtime-dir "$MCP_RUNTIME"
+```
+
+The runner refuses `--authotron-bin` and `--show-credentials` for a remote-issuer
+runtime, needs only ports `8001` and `8444`, and is ready once the MCP endpoint
+answers `401` and the playground's
+`.well-known/oauth-authorization-server` reports the configured issuer.
+
+In another terminal run the client exactly as in local mode:
+
+```sh
+/tmp/authotron-mcp-venv/bin/python authotron/examples/mcp-local/client.py \
+  --runtime-dir "$MCP_RUNTIME"
+```
+
+Issuer, JWKS, and token requests use the operating system's trust store with
+certificate and hostname verification (proxy environment variables are ignored);
+only the local MCP resource uses `tls-ca.pem`. The playground has a publicly
+trusted certificate, so the browser needs no certificate exception for the
+issuer. Sign in with the playground's Basic demo user or with a real ECMWF API
+key, then approve `mcp:read`. The resource server must be able to reach the
+playground to fetch its JWKS.
 
 ## Security and limitations
 
@@ -146,6 +215,9 @@ fields, random credentials, source archive exclusion, certificate verification
 and hostname rejection, environment sanitization, proxy preservation of
 browser/OAuth HTTP data, and access-token validation. Pytest runs both the
 pytest-based authorization tests and the unittest-compatible setup tests.
+
+`test_remote.py` covers remote-issuer settings validation, endpoint derivation,
+TLS trust selection, and the reduced runner without contacting the playground.
 
 Opt in to all real-process tests by supplying the built Authotron binary. Stop
 other local demos and leave ports `8000`, `8001`, `8443`, `8444`, and `49152` free:

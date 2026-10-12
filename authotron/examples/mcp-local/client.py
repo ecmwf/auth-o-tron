@@ -23,28 +23,26 @@ import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-from server import (
+from demo_settings import (
     CALLBACK,
     CLIENT_ID,
-    ISSUER,
-    MAX_TOKEN_BYTES,
     RESOURCE,
     SCOPE,
-    bounded_json,
+    endpoints,
+    issuer_tls_context,
     load_settings,
     local_tls_context,
 )
+from server import MAX_TOKEN_BYTES, bounded_json
 
 CALLBACK_TIMEOUT = 180
-AUTHORIZATION_ENDPOINT = "https://127.0.0.1:8443/oauth/authorize"
-TOKEN_ENDPOINT = "https://127.0.0.1:8443/oauth/token"
 
 
 class CallbackError(ValueError):
     pass
 
 
-def parse_callback(target: str, expected_state: str) -> str | None:
+def parse_callback(target: str, expected_state: str, issuer: str) -> str | None:
     """Valid: /callback?code=x&state=s&iss=…; invalid: duplicate state or %ZZ."""
     if len(target) > 8192 or any(ord(c) < 33 or ord(c) > 126 for c in target):
         raise CallbackError("Invalid callback")
@@ -75,7 +73,7 @@ def parse_callback(target: str, expected_state: str) -> str | None:
         raise CallbackError("Incomplete callback")
     if not hmac.compare_digest(values["state"].encode(), expected_state.encode()):
         raise CallbackError("State mismatch")
-    if values["iss"] != ISSUER:
+    if values["iss"] != issuer:
         raise CallbackError("Issuer mismatch")
     if "error" in values:
         if values["error"] != "access_denied":
@@ -89,8 +87,9 @@ def parse_callback(target: str, expected_state: str) -> str | None:
 class CallbackListener:
     """Bind before authorization; invalid requests cannot consume the callback."""
 
-    def __init__(self, state: str):
+    def __init__(self, state: str, issuer: str):
         self.state = state
+        self.issuer = issuer
         self.completed = False
         self.code: str | None = None
         listener = self
@@ -121,7 +120,7 @@ class CallbackListener:
                         raise CallbackError("Unexpected request body")
                     if listener.completed:
                         raise CallbackError("Callback already consumed")
-                    code = parse_callback(self.path, listener.state)
+                    code = parse_callback(self.path, listener.state, listener.issuer)
                 except (ValueError, UnicodeError):
                     self.reply(400, b"Invalid OAuth callback.")
                     return
@@ -175,10 +174,10 @@ class CallbackListener:
         self.server.server_close()
 
 
-def authorization_url(state: str, verifier: str) -> str:
+def authorization_url(state: str, verifier: str, issuer: str) -> str:
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest())
     return (
-        AUTHORIZATION_ENDPOINT
+        endpoints(issuer)["authorization_endpoint"]
         + "?"
         + urlencode(
             {
@@ -195,11 +194,11 @@ def authorization_url(state: str, verifier: str) -> str:
     )
 
 
-async def exchange_code(client: httpx.AsyncClient, code: str, verifier: str) -> str:
+async def exchange_code(client: httpx.AsyncClient, code: str, verifier: str, issuer: str) -> str:
     response = await bounded_json(
         client,
         "POST",
-        TOKEN_ENDPOINT,
+        endpoints(issuer)["token_endpoint"],
         data={
             "grant_type": "authorization_code",
             "client_id": CLIENT_ID,
@@ -243,27 +242,27 @@ async def call_demo(client: httpx.AsyncClient) -> None:
             )
 
 
+def http_client(tls) -> httpx.AsyncClient:
+    # Proxy and CA environment variables are ignored; verification is never disabled.
+    return httpx.AsyncClient(verify=tls, trust_env=False, follow_redirects=False, timeout=10)
+
+
 async def run(runtime_dir: Path, no_browser: bool) -> None:
-    load_settings(runtime_dir)
-    tls = local_tls_context(runtime_dir)
+    settings = load_settings(runtime_dir)
+    issuer = settings["issuer"]
+    issuer_tls = issuer_tls_context(settings, runtime_dir)
+    resource_tls = local_tls_context(runtime_dir)
     state, verifier = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-    with CallbackListener(state) as listener:
-        url = authorization_url(state, verifier)
-        print(
-            "Open this URL, sign in with the synthetic demo account, and approve consent:",
-            flush=True,
-        )
+    with CallbackListener(state, issuer) as listener:
+        url = authorization_url(state, verifier, issuer)
+        print("Open this URL, sign in, and approve consent:", flush=True)
         print(url, flush=True)
         if not no_browser:
             webbrowser.open(url)
         code = await asyncio.to_thread(listener.wait_for_code)
-    async with httpx.AsyncClient(
-        verify=tls,
-        trust_env=False,
-        follow_redirects=False,
-        timeout=10,
-    ) as client:
-        token = await exchange_code(client, code, verifier)
+    async with http_client(issuer_tls) as client:
+        token = await exchange_code(client, code, verifier, issuer)
+    async with http_client(resource_tls) as client:
         client.headers["Authorization"] = "Bearer " + token
         await call_demo(client)
 

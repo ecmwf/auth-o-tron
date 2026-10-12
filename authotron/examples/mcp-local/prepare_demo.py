@@ -14,20 +14,17 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-ISSUER = "https://127.0.0.1:8443/"
-RESOURCE = "https://127.0.0.1:8444/mcp"
-CALLBACK = "http://127.0.0.1:49152/callback"
-CLIENT_ID = "mcp-local"
-SCOPE = "mcp:read"
+from demo_settings import (
+    CALLBACK,
+    CLIENT_ID,
+    RESOURCE,
+    ROLE,
+    SCOPE,
+    make_settings,
+    validate_remote_issuer,
+)
+
 REPOSITORY = Path(__file__).resolve().parents[3]
-SETTINGS = {
-    "issuer": ISSUER,
-    "resource": RESOURCE,
-    "callback": CALLBACK,
-    "client_id": CLIENT_ID,
-    "scope": SCOPE,
-    "jwks_uri": ISSUER + "oauth/jwks",
-}
 
 
 def outside_repository(path: Path) -> Path:
@@ -134,7 +131,11 @@ def generate_tls(runtime: Path) -> None:
     # The CA signing key is discarded; this demo never installs trust or issues more leaves.
 
 
-def prepare(runtime_dir: Path) -> Path:
+def prepare(runtime_dir: Path, issuer: str | None = None) -> Path:
+    """Local mode (issuer None) writes a full Authotron runtime; remote mode writes only
+    the resource server's TLS material and settings.json pointing at the remote issuer.
+    """
+    settings = make_settings(issuer)
     # Check the unresolved spelling too: an existing symlink must never be overridden.
     original = runtime_dir.expanduser()
     runtime = outside_repository(original)
@@ -143,6 +144,11 @@ def prepare(runtime_dir: Path) -> Path:
     runtime.mkdir(mode=0o700)
     try:
         runtime.chmod(0o700)
+        if issuer is not None:
+            generate_tls(runtime)
+            write_json(runtime / "settings.json", settings)
+            return runtime
+        issuer = settings["issuer"]
         signing = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         write_private(runtime / "oauth-private.pem", private_pem(signing))
         generate_tls(runtime)
@@ -156,7 +162,7 @@ def prepare(runtime_dir: Path) -> Path:
                     "type": "plain",
                     "name": "basic",
                     "realm": "local",
-                    "users": [{"username": "alice", "password": password, "roles": ["reader"]}],
+                    "users": [{"username": "alice", "password": password, "roles": [ROLE]}],
                 }
             ],
             "augmenters": [],
@@ -170,13 +176,13 @@ def prepare(runtime_dir: Path) -> Path:
                 "enabled": True,
                 "basic": {"provider_name": "basic"},
                 "browser_session": {
-                    "public_origin": ISSUER.rstrip("/"),
+                    "public_origin": issuer.rstrip("/"),
                     "backend": {"type": "memory"},
                 },
             },
             "oauth": {
                 "enabled": True,
-                "issuer": ISSUER,
+                "issuer": issuer,
                 "signing": {
                     "active_kid": "mcp-local",
                     "keys": [
@@ -196,26 +202,39 @@ def prepare(runtime_dir: Path) -> Path:
                     {
                         "resource": RESOURCE,
                         "allowed_realms": ["local"],
-                        "scopes": [{"name": SCOPE, "required_roles": ["reader"]}],
+                        "scopes": [{"name": SCOPE, "required_roles": [ROLE]}],
                     }
                 ],
             },
         }
         write_json(runtime / "authotron.json", config)
         write_json(runtime / "credentials.json", {"username": "alice", "password": password})
-        write_json(runtime / "settings.json", SETTINGS)
+        write_json(runtime / "settings.json", settings)
     except BaseException:
         shutil.rmtree(runtime)
         raise
     return runtime
 
 
+def issuer_argument(value: str) -> str:
+    """Report make_settings' issuer rule as a usage error (exit 2) instead of a runtime failure."""
+    try:
+        return validate_remote_issuer(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-dir", type=Path, required=True)
+    parser.add_argument(
+        "--issuer",
+        type=issuer_argument,
+        help="remote HTTPS issuer origin with trailing slash, e.g. https://issuer.example.org/",
+    )
     args = parser.parse_args()
     try:
-        runtime = prepare(args.runtime_dir)
+        runtime = prepare(args.runtime_dir, args.issuer)
     except (OSError, ValueError):
         parser.exit(
             1,

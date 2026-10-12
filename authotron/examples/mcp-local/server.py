@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import re
 import ssl
 import time
@@ -19,67 +18,17 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import AnyHttpUrl
 
-ISSUER = "https://127.0.0.1:8443/"
-RESOURCE = "https://127.0.0.1:8444/mcp"
-CALLBACK = "http://127.0.0.1:49152/callback"
-CLIENT_ID = "mcp-local"
-SCOPE = "mcp:read"
-ROLE = "reader"
-JWKS_URI = "https://127.0.0.1:8443/oauth/jwks"
+from demo_settings import (
+    CLIENT_ID,
+    MAX_JSON_BYTES,
+    RESOURCE,
+    SCOPE,
+    issuer_tls_context,
+    load_settings,
+    strict_json,
+)
+
 MAX_TOKEN_BYTES = 16384
-MAX_JSON_BYTES = 65536
-
-
-def strict_json(raw: bytes) -> dict:
-    """Accept objects with unique names: {\"a\":1}, never {\"a\":1,\"a\":2}."""
-
-    def unique(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError("Duplicate JSON field")
-            result[key] = value
-        return result
-
-    def invalid_constant(value):
-        raise ValueError("Nonstandard JSON constant")
-
-    try:
-        value = json.loads(raw, object_pairs_hook=unique, parse_constant=invalid_constant)
-    except RecursionError as exc:
-        raise ValueError("JSON nesting too deep") from exc
-    if not isinstance(value, dict):
-        raise TypeError("Expected a JSON object")
-    return value
-
-
-def load_settings(runtime_dir: Path) -> dict:
-    with (runtime_dir / "settings.json").open("rb") as source:
-        raw = source.read(MAX_JSON_BYTES + 1)
-    if len(raw) > MAX_JSON_BYTES:
-        raise ValueError("Settings too large")
-    settings = strict_json(raw)
-    expected = {
-        "issuer": ISSUER,
-        "resource": RESOURCE,
-        "callback": CALLBACK,
-        "client_id": CLIENT_ID,
-        "scope": SCOPE,
-        "jwks_uri": JWKS_URI,
-    }
-    if any(settings.get(key) != value for key, value in expected.items()):
-        raise ValueError("Settings do not match the fixed local demo")
-    if settings.get("role", ROLE) != ROLE:
-        raise ValueError("Settings do not match the demo role")
-    return settings
-
-
-def local_tls_context(runtime_dir: Path) -> ssl.SSLContext:
-    # Constructing explicitly avoids loading OS roots or SSL_CERT_FILE/SSL_CERT_DIR.
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.load_verify_locations(cafile=str(runtime_dir / "tls-ca.pem"))
-    return context
 
 
 async def bounded_json(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> dict:
@@ -104,8 +53,19 @@ async def bounded_json(client: httpx.AsyncClient, method: str, url: str, **kwarg
 class JWTVerifier:
     """Fixed trust anchors, bounded JWKS cache, and fail-closed access-token checks."""
 
-    def __init__(self, tls: ssl.SSLContext, *, transport: httpx.AsyncBaseTransport | None = None):
+    def __init__(
+        self,
+        tls: ssl.SSLContext,
+        settings: dict,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
+        # ``tls`` must trust the issuer: system roots for remote issuers, local CA otherwise.
+        # ``settings`` come from demo_settings (validated); there is no implicit local mode.
         self.tls = tls
+        self.issuer = settings["issuer"]
+        self.jwks_uri = settings["jwks_uri"]
+        self.required_role = settings["required_role"]
         self.transport = transport
         self._keys: dict[str, jwt.PyJWK] = {}
         self._expires = 0.0
@@ -127,7 +87,7 @@ class JWTVerifier:
                 timeout=5,
                 transport=self.transport,
             ) as client:
-                document = await bounded_json(client, "GET", JWKS_URI)
+                document = await bounded_json(client, "GET", self.jwks_uri)
             entries = document.get("keys")
             if not isinstance(entries, list) or not 1 <= len(entries) <= 8:
                 raise ValueError("Invalid JWKS")
@@ -187,7 +147,7 @@ class JWTVerifier:
                 token,
                 key.key,
                 algorithms=["RS256"],
-                issuer=ISSUER,
+                issuer=self.issuer,
                 audience=RESOURCE,
                 options={
                     "strict_aud": True,
@@ -225,13 +185,16 @@ class JWTVerifier:
             scopes = scope.split(" ")
             if len(set(scopes)) != len(scopes):
                 return None
+            # The roles claim must always be a bounded list of strings (possibly empty);
+            # membership is enforced only when the settings require a role.
             roles = claims["roles"]
             if (
                 not isinstance(roles, list)
-                or not 1 <= len(roles) <= 64
+                or len(roles) > 64
                 or any(not isinstance(role, str) or not 1 <= len(role) <= 128 for role in roles)
-                or ROLE not in roles
             ):
+                return None
+            if self.required_role is not None and self.required_role not in roles:
                 return None
             return AccessToken(
                 token=token,
@@ -255,7 +218,7 @@ def create_server(verifier: JWTVerifier) -> FastMCP:
         streamable_http_path="/mcp",
         token_verifier=verifier,
         auth=AuthSettings(
-            issuer_url=AnyHttpUrl(ISSUER),
+            issuer_url=AnyHttpUrl(verifier.issuer),
             resource_server_url=AnyHttpUrl(RESOURCE),
             required_scopes=[SCOPE],
         ),
@@ -279,8 +242,8 @@ def main() -> None:
     parser.add_argument("--runtime-dir", type=Path, required=True)
     args = parser.parse_args()
     try:
-        load_settings(args.runtime_dir)
-        verifier = JWTVerifier(local_tls_context(args.runtime_dir))
+        settings = load_settings(args.runtime_dir)
+        verifier = JWTVerifier(issuer_tls_context(settings, args.runtime_dir), settings)
         uvicorn.run(
             create_server(verifier).streamable_http_app(),
             host="127.0.0.1",

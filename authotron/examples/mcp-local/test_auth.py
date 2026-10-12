@@ -21,21 +21,23 @@ from cryptography.x509.oid import NameOID
 
 import client
 from client import CallbackError, authorization_url, exchange_code, parse_callback
-from server import (
+from demo_settings import (
     CALLBACK,
     CLIENT_ID,
-    ISSUER,
-    JWKS_URI,
+    LOCAL_SETTINGS,
     MAX_JSON_BYTES,
-    MAX_TOKEN_BYTES,
     RESOURCE,
     ROLE,
     SCOPE,
-    JWTVerifier,
-    create_server,
+    endpoints,
     load_settings,
     local_tls_context,
 )
+from server import MAX_TOKEN_BYTES, JWTVerifier, create_server
+
+ISSUER = LOCAL_SETTINGS["issuer"]
+JWKS_URI = LOCAL_SETTINGS["jwks_uri"]
+TOKEN_ENDPOINT = endpoints(ISSUER)["token_endpoint"]
 
 
 @pytest.fixture(scope="module")
@@ -91,7 +93,9 @@ def verifier_for(key, document=None):
         )
 
     verifier = JWTVerifier(
-        ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT), transport=httpx.MockTransport(handle)
+        ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT),
+        LOCAL_SETTINGS,
+        transport=httpx.MockTransport(handle),
     )
     return verifier, requests
 
@@ -132,6 +136,7 @@ def test_valid_token_and_bounded_jwks_cache(signing_key):
         {"scope": [SCOPE]},
         {"scope": SCOPE + " " + SCOPE},
         {"scope": SCOPE + "\tother"},
+        # Local settings require ROLE, so an empty or reader-less list is rejected.
         {"roles": []},
         {"roles": "reader"},
         {"roles": ["admin"]},
@@ -264,7 +269,9 @@ def test_jwks_retrieval_fails_closed_and_retries_are_bounded(signing_key, respon
         return response
 
     verifier = JWTVerifier(
-        ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT), transport=httpx.MockTransport(handle)
+        ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT),
+        LOCAL_SETTINGS,
+        transport=httpx.MockTransport(handle),
     )
 
     async def check():
@@ -318,17 +325,18 @@ def callback_query(**changes):
 
 
 def test_callback_success_denial_and_pkce():
-    assert parse_callback(callback_query(), "test-state") == "synthetic-code"
+    assert parse_callback(callback_query(), "test-state", ISSUER) == "synthetic-code"
     assert (
         parse_callback(
             "/callback?"
             + urlencode({"error": "access_denied", "state": "test-state", "iss": ISSUER}),
             "test-state",
+            ISSUER,
         )
         is None
     )
     verifier = "A" * 43
-    url = urlsplit(authorization_url("test-state", verifier))
+    url = urlsplit(authorization_url("test-state", verifier, ISSUER))
     query = parse_qs(url.query)
     assert url.scheme == "https" and url.netloc == "127.0.0.1:8443"
     assert query["redirect_uri"] == [CALLBACK]
@@ -370,7 +378,7 @@ def test_callback_success_denial_and_pkce():
 )
 def test_callback_rejects_invalid_queries(target):
     with pytest.raises(CallbackError):
-        parse_callback(target, "test-state")
+        parse_callback(target, "test-state", ISSUER)
 
 
 def test_listener_binds_before_authorize_and_invalid_request_does_not_consume(monkeypatch, capsys):
@@ -384,9 +392,9 @@ def test_listener_binds_before_authorize_and_invalid_request_does_not_consume(mo
             test_port = self.server_port
 
     monkeypatch.setattr(client, "HTTPServer", TestServer)
-    with client.CallbackListener("test-state") as listener:
+    with client.CallbackListener("test-state", ISSUER) as listener:
         with pytest.raises(OSError):
-            client.CallbackListener("other-state")
+            client.CallbackListener("other-state", ISSUER)
         results = []
         thread = threading.Thread(target=lambda: results.append(listener.wait_for_code(3)))
         thread.start()
@@ -409,7 +417,7 @@ def test_listener_binds_before_authorize_and_invalid_request_does_not_consume(mo
             thread.join(timeout=4)
         assert not thread.is_alive()
         assert results == ["synthetic-code"]
-    with client.CallbackListener("fresh-state") as restarted:
+    with client.CallbackListener("fresh-state", ISSUER) as restarted:
         with pytest.raises(CallbackError, match="timed out"):
             restarted.wait_for_code(timeout=0)
         restarted.completed = True
@@ -422,7 +430,7 @@ def test_token_exchange_exact_bindings(signing_key):
     token = sign(signing_key)
 
     def handle(request):
-        assert request.method == "POST" and str(request.url) == client.TOKEN_ENDPOINT
+        assert request.method == "POST" and str(request.url) == TOKEN_ENDPOINT
         assert "authorization" not in request.headers and "cookie" not in request.headers
         assert parse_qs(request.content.decode()) == {
             "grant_type": ["authorization_code"],
@@ -441,7 +449,7 @@ def test_token_exchange_exact_bindings(signing_key):
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(handle), trust_env=False
         ) as http:
-            assert await exchange_code(http, "synthetic-code", "A" * 43) == token
+            assert await exchange_code(http, "synthetic-code", "A" * 43, ISSUER) == token
 
     asyncio.run(check())
 
@@ -472,7 +480,7 @@ def test_bad_token_responses(change):
             trust_env=False,
         ) as http:
             with pytest.raises(ValueError):
-                await exchange_code(http, "synthetic-code", "A" * 43)
+                await exchange_code(http, "synthetic-code", "A" * 43, ISSUER)
 
     asyncio.run(check())
 
@@ -503,6 +511,7 @@ def test_explicit_ca_and_public_settings(tmp_path, signing_key, monkeypatch):
         "callback": CALLBACK,
         "client_id": CLIENT_ID,
         "scope": SCOPE,
+        "required_role": ROLE,
         "jwks_uri": JWKS_URI,
     }
     (tmp_path / "settings.json").write_text(json.dumps(settings))
