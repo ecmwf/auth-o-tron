@@ -383,6 +383,7 @@ class PreviewTests(unittest.TestCase):
             paths,
             [
                 {"path": "/login", "pathType": "Exact"},
+                {"path": "/login/", "pathType": "Exact"},
                 {"path": "/static/", "pathType": "Prefix"},
                 {"path": "/favicon.ico", "pathType": "ImplementationSpecific"},
             ],

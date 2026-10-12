@@ -30,12 +30,21 @@ OAUTH_KEY = renderer.oauth_pem(
 OTHER_OAUTH_KEY = renderer.oauth_pem(
     rsa.generate_private_key(public_exponent=65537, key_size=2048)
 )
-# sha256 of yaml.safe_dump_all(..., sort_keys=False) captured before the OAuth profile.
+# sha256 of yaml.safe_dump_all(..., sort_keys=False) captured before the OAuth profile,
+# re-captured when the Ingress moved from per-method Exact paths to one `/login/` Prefix
+# (the only difference from the previous digests).
 PRE_OAUTH_DIGESTS = {
-    "plain": "cff6011551e99f7a8e1317a855a1aa9452fe0531db73388c8d8e060c9a37d7ad",
-    "basic": "982c382010733538484c916592516198c286ba0e6a8e08f34cb10135430d19c4",
-    "shared": "901cacc3b8d7bc64b6b4e0941e40b2d4ef9a39e479c94b0c5d5d528d524e455b",
+    "plain": "ed0c86e904539142a522700465709ec30b3e6ddabc24cdfc24d7a41c59dca19a",
+    "basic": "a48a41307f235e45d80add7f4a42dd2d0a035579ce88b94b27fdf1eff3beda55",
+    "shared": "5fc545039564648087d1dcd7cc3902c62b257b46ffbc57ab4adac71a474157c3",
 }
+# One `/login/` Prefix replaces per-method Exact paths, independent of method count.
+API_KEY_PATH_RULES = [
+    ("/login", "Exact"),
+    ("/login/", "Prefix"),
+    ("/static/", "Prefix"),
+    ("/favicon.ico", "ImplementationSpecific"),
+]
 OAUTH_ROUTES = [
     ("/oauth/authorize", "Exact"),
     ("/oauth/continue", "Exact"),
@@ -260,8 +269,7 @@ class RendererTests(unittest.TestCase):
         paths = find(resources, "Ingress")["spec"]["rules"][0]["http"]["paths"]
         self.assertEqual(
             [(p["path"], p["pathType"]) for p in paths],
-            list(renderer.preview.PATH_RULES)
-            + [("/login/method/0", "Exact"), ("/login/account", "Exact")],
+            API_KEY_PATH_RULES,
         )
 
     def test_oauth_allowed_realms_are_deduplicated_in_order(self):
@@ -560,14 +568,8 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(volume["secret"]["secretName"], renderer.SECRET_NAME)
         self.assertNotIn("configMap", volume)
         paths = find(resources, "Ingress")["spec"]["rules"][0]["http"]["paths"]
-        login = [(p["path"], p["pathType"]) for p in paths if "/login/" in p["path"]]
         self.assertEqual(
-            login,
-            [
-                ("/login/method/0", "Exact"),
-                ("/login/method/1", "Exact"),
-                ("/login/account", "Exact"),
-            ],
+            [(p["path"], p["pathType"]) for p in paths], API_KEY_PATH_RULES
         )
 
     def test_basic_profile_guard_rejects_secret_mount_and_credential_mutations(self):
@@ -1256,11 +1258,7 @@ class RendererTests(unittest.TestCase):
                 paths = find(resources, "Ingress")["spec"]["rules"][0]["http"]["paths"]
                 self.assertEqual(
                     [(p["path"], p["pathType"]) for p in paths],
-                    list(renderer.preview.PATH_RULES)
-                    + [("/login/method/0", "Exact")]
-                    + ([("/login/method/1", "Exact")] if basic else [])
-                    + [("/login/account", "Exact")]
-                    + OAUTH_ROUTES,
+                    API_KEY_PATH_RULES + OAUTH_ROUTES,
                 )
                 self.assertEqual(len({str(p["backend"]) for p in paths}), 1)
                 self.assert_no_key_leak(resources, archive)
@@ -1337,6 +1335,8 @@ class RendererTests(unittest.TestCase):
                 }
             ),
             lambda d: paths(d)[-2].update(pathType="Prefix"),
+            lambda d: paths(d)[1].update(pathType="Exact"),
+            lambda d: paths(d)[1].update(path="/login/method/"),
             lambda d: paths(d).pop(),
             lambda d: pod(d)["volumes"][-1]["secret"].update(defaultMode=0o444),
             lambda d: pod(d)["volumes"][-1]["secret"]["items"][0].update(

@@ -83,7 +83,8 @@ Namespace objects are forbidden in the application resource bundle.
   image and a debug executable; it is not a production image strategy.
 - The existing configuration checksum triggers rollout on branding changes;
   the source digest also triggers rollout when build inputs change.
-- `/login` uses an Exact ingress path and `/static/` uses a Prefix for public
+- `/login` and `/login/` use Exact ingress paths (the app redirects `/login/` to
+  `/login`) and `/static/` uses a Prefix for public
   CSS/images. `/favicon.ico` uses a literal ImplementationSpecific path because
   this cluster's NGINX admission rejects dotted filenames with Exact/Prefix
   types. No regex annotation is enabled; API routes and health probes stay internal.

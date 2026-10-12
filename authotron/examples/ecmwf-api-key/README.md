@@ -288,9 +288,10 @@ Output is only `resources.yaml`, mode `0600`, containing **six resources** by de
 2. Deployment retaining the baseline non-root source-build pod.
 3. Internal ClusterIP Service.
 4. Ingress with the existing `/login` Exact, `/static/` Prefix and `/favicon.ico`
-   ImplementationSpecific paths, plus exactly one `/login/method/<n>` per
-   browser method (`/login/method/0`, and `/login/method/1` when Basic is
-   enabled) and `/login/account`, all Exact.
+   ImplementationSpecific paths, with the preview's Exact `/login/` widened to a
+   single `/login/` Prefix. It covers every `/login/method/<n>` form,
+   `/login/account` and their trailing-slash redirects without tracking the
+   method count; unknown subpaths reach the app and get its 404.
 5. Immutable public source-archive ConfigMap.
 6. Opaque Secret `authotron-ecmwf-browser`, using Base64 `data.jwt-secret` and,
    when Basic is enabled, `data.config.yaml`. With Valkey it additionally holds

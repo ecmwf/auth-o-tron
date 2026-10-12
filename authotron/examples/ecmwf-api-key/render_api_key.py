@@ -41,7 +41,6 @@ PROVIDER = {
     "browser": {"label": "ECMWF API key"},
 }
 BASIC_LABEL = "Username and password"
-ACCOUNT_PATH = "/login/account"
 BASIC_PROVIDER_NAME = "Playground Basic Provider"
 BASIC_USERNAME = "browser-demo"
 LOGO_PATH = "/static/aviso-logo.png"
@@ -512,12 +511,6 @@ def resource_map(resources):
     return mapped
 
 
-def browser_login_paths(config):
-    """Expose exactly one /login/method/<n> per browser-enabled provider."""
-    methods = sum("browser" in p for p in config["providers"])
-    return tuple(f"/login/method/{n}" for n in range(methods)) + (ACCOUNT_PATH,)
-
-
 def transform(
     baseline,
     host,
@@ -602,14 +595,10 @@ def transform(
     )
     ingress = next(d for d in resources if d["kind"] == "Ingress")
     paths = ingress["spec"]["rules"][0]["http"]["paths"]
-    for path in browser_login_paths(config):
-        paths.append(
-            {
-                "path": path,
-                "pathType": "Exact",
-                "backend": copy.deepcopy(paths[0]["backend"]),
-            }
-        )
+    # Widen the preview's Exact `/login/` to one Prefix covering the method forms,
+    # the account page, and their trailing-slash redirects; the app 404s the rest.
+    login_subtree = next(p for p in paths if p["path"] == "/login/")
+    login_subtree["pathType"] = "Prefix"
     if oauth_key is not None:
         for path, path_type in OAUTH_PATH_RULES:
             paths.append(

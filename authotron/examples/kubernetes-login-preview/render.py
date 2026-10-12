@@ -27,8 +27,10 @@ EXECUTABLE = f"{TARGET_DIR}/debug/authotron"
 BUILD_JOBS = 2
 # NGINX admission rejects dotted filenames with Exact/Prefix path types.
 # Keep API paths unexposed: only the login page and public image/CSS assets route.
+# Exact `/login/` reaches the app's 308 redirect to `/login` instead of an NGINX 404.
 PATH_RULES = (
     ("/login", "Exact"),
+    ("/login/", "Exact"),
     ("/static/", "Prefix"),
     ("/favicon.ico", "ImplementationSpecific"),
 )
