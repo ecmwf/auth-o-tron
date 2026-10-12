@@ -10,6 +10,7 @@ pub mod context;
 pub mod keys;
 pub mod records;
 pub mod refresh;
+pub mod refresh_grant;
 pub mod refresh_store;
 pub mod runtime;
 pub mod store;

@@ -15,11 +15,14 @@ use super::{
     context::AuthenticatedAuthorization,
     keys::KeyManager,
     records::BoundAuthorizationTransaction,
+    refresh_grant::RefreshBackend,
+    refresh_store::MemoryRefreshStore,
     store::{
         CreatedTransaction, MemoryTransactionStore, RedeemedAuthorization, StoreError,
         TransactionId,
     },
     tokens::{TokenError, TokenIssuer, TokenResponse},
+    valkey_refresh::ValkeyRefreshStore,
     valkey_transactions::ValkeyTransactionStore,
 };
 use crate::config::{ConfigV2, OAuthConfig, ui::BrowserBackendConfig};
@@ -57,6 +60,8 @@ pub struct OAuthRuntime {
     pub(crate) keys: KeyManager,
     pub(crate) origin: String,
     backend: Backend,
+    /// Present only when at least one client enables refresh tokens.
+    pub(super) refresh: Option<RefreshBackend>,
 }
 macro_rules! dispatch {
     ($self:expr, $method:ident($($arg:expr),*)) => {
@@ -134,11 +139,29 @@ impl OAuthRuntime {
                     .map_err(|_| "OAuth Valkey unavailable")?,
             )),
         };
+        let refresh = if !cfg
+            .clients
+            .iter()
+            .any(|client| client.refresh_tokens.enabled)
+        {
+            None
+        } else if let BrowserBackendConfig::Memory {} = &session.backend {
+            Some(RefreshBackend::Memory(Box::new(MemoryRefreshStore::new(
+                cfg.max_refresh_token_families_per_user,
+            ))))
+        } else {
+            Some(RefreshBackend::Valkey(Box::new(
+                ValkeyRefreshStore::new(&session.backend, cfg.max_refresh_token_families_per_user)
+                    .await
+                    .map_err(|_| "OAuth refresh-token Valkey unavailable")?,
+            )))
+        };
         Ok(Some(Arc::new(Self {
             config: cfg,
             keys,
             origin: session.origin()?,
             backend,
+            refresh,
         })))
     }
     pub(crate) async fn create(

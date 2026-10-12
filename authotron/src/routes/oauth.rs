@@ -12,6 +12,7 @@ use crate::{
     oauth::{
         authorization::{decode_component, validate_authorization_request},
         codes::{AuthorizationCode, CodeIssueOutcome, CodeStoreError},
+        refresh_grant::{RefreshGrantError, RefreshRequest},
         runtime::{ActiveFlow, OAuthRuntime},
         store::{StoreError, TransactionId},
     },
@@ -44,6 +45,7 @@ pub(super) fn routes(enabled: bool) -> Router<AppState> {
         .route("/oauth/continue", get(continue_consent))
         .route("/oauth/consent", post(consent))
         .route("/oauth/token", post(token))
+        .route("/oauth/revoke", post(revoke))
         .layer(DefaultBodyLimit::max(8192))
 }
 fn secure_oauth_response(response: Response) -> Response {
@@ -221,7 +223,13 @@ async fn metadata(State(state): State<AppState>) -> Response {
         .iter()
         .flat_map(|resource| resource.scopes.iter().map(|scope| scope.name.as_str()))
         .collect();
-    secure_oauth_response(Json(json!({"issuer": issuer, "scopes_supported": scopes, "authorization_endpoint": format!("{base}/oauth/authorize"), "token_endpoint": format!("{base}/oauth/token"), "jwks_uri": format!("{base}/oauth/jwks"), "response_types_supported": ["code"], "grant_types_supported": ["authorization_code"], "token_endpoint_auth_methods_supported": ["none"], "code_challenge_methods_supported": ["S256"], "authorization_response_iss_parameter_supported": true})).into_response())
+    let mut metadata = json!({"issuer": issuer, "scopes_supported": scopes, "authorization_endpoint": format!("{base}/oauth/authorize"), "token_endpoint": format!("{base}/oauth/token"), "jwks_uri": format!("{base}/oauth/jwks"), "response_types_supported": ["code"], "grant_types_supported": ["authorization_code"], "token_endpoint_auth_methods_supported": ["none"], "code_challenge_methods_supported": ["S256"], "authorization_response_iss_parameter_supported": true});
+    if runtime.refresh_supported() {
+        metadata["grant_types_supported"] = json!(["authorization_code", "refresh_token"]);
+        metadata["revocation_endpoint"] = json!(format!("{base}/oauth/revoke"));
+        metadata["revocation_endpoint_auth_methods_supported"] = json!(["none"]);
+    }
+    secure_oauth_response(Json(metadata).into_response())
 }
 async fn jwks(State(state): State<AppState>) -> Response {
     secure_oauth_response(Json(state.oauth.as_ref().unwrap().keys.jwks()).into_response())
@@ -323,10 +331,12 @@ async fn continue_consent(State(state): State<AppState>, headers: HeaderMap) -> 
     response
 }
 /// Valid: `code=a%2Bb`; invalid: duplicate known fields or malformed `%ZZ` escapes.
+/// Every `required` field must be present; `optional` fields may be absent.
 fn parse_urlencoded_form(
     headers: &HeaderMap,
     bytes: &[u8],
-    allowed: &[&str],
+    required: &[&str],
+    optional: &[&str],
     ignore_unknown: bool,
 ) -> Result<HashMap<String, String>, ()> {
     let mut types = headers.get_all(header::CONTENT_TYPE).iter();
@@ -346,7 +356,7 @@ fn parse_urlencoded_form(
         let split = pair.iter().position(|b| *b == b'=').ok_or(())?;
         let name = decode_component(&pair[..split]).map_err(|_| ())?;
         let value = decode_component(&pair[split + 1..]).map_err(|_| ())?;
-        if !allowed.contains(&name.as_str()) {
+        if !required.contains(&name.as_str()) && !optional.contains(&name.as_str()) {
             if ignore_unknown {
                 continue;
             }
@@ -356,7 +366,7 @@ fn parse_urlencoded_form(
             return Err(());
         }
     }
-    if allowed.iter().any(|name| !result.contains_key(*name)) {
+    if required.iter().any(|name| !result.contains_key(*name)) {
         return Err(());
     }
     Ok(result)
@@ -375,6 +385,7 @@ async fn consent(
             &headers,
             &body,
             &["csrf", "oauth_transaction", "decision"],
+            &[],
             false,
         )
         .ok()
@@ -483,13 +494,14 @@ async fn token(
         parse_urlencoded_form(
             &headers,
             &body,
+            &["grant_type", "client_id"],
             &[
-                "grant_type",
-                "client_id",
                 "code",
                 "redirect_uri",
                 "resource",
                 "code_verifier",
+                "refresh_token",
+                "scope",
             ],
             true,
         )
@@ -498,9 +510,11 @@ async fn token(
         Some(fields) => fields,
         None => return token_error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
-    if fields["grant_type"] != "authorization_code" {
-        return token_error(StatusCode::BAD_REQUEST, "unsupported_grant_type");
-    }
+    let refresh = match fields["grant_type"].as_str() {
+        "authorization_code" => false,
+        "refresh_token" if runtime.refresh_supported() => true,
+        _ => return token_error(StatusCode::BAD_REQUEST, "unsupported_grant_type"),
+    };
     if !runtime
         .config
         .clients
@@ -509,7 +523,18 @@ async fn token(
     {
         return token_error(StatusCode::BAD_REQUEST, "invalid_client");
     }
-    let code = match AuthorizationCode::parse(&fields["code"]) {
+    if refresh {
+        return refresh_token(&state, runtime, &fields).await;
+    }
+    let (Some(code), Some(redirect_uri), Some(resource), Some(verifier)) = (
+        fields.get("code"),
+        fields.get("redirect_uri"),
+        fields.get("resource"),
+        fields.get("code_verifier"),
+    ) else {
+        return token_error(StatusCode::BAD_REQUEST, "invalid_request");
+    };
+    let code = match AuthorizationCode::parse(code) {
         Ok(code) => code,
         Err(_) => return token_error(StatusCode::BAD_REQUEST, "invalid_grant"),
     };
@@ -517,9 +542,9 @@ async fn token(
         .redeem(
             &code,
             &fields["client_id"],
-            &fields["redirect_uri"],
-            &fields["resource"],
-            &fields["code_verifier"],
+            redirect_uri,
+            resource,
+            verifier,
         )
         .await
     {
@@ -529,8 +554,86 @@ async fn token(
         }
         Err(_) => return token_error(StatusCode::BAD_REQUEST, "invalid_grant"),
     };
-    match runtime.token(proof) {
+    match runtime.exchange(proof, &state.metrics).await {
         Ok(token) => secure_oauth_response(Json(token).into_response()),
+        Err(_) => token_error(StatusCode::SERVICE_UNAVAILABLE, "server_error"),
+    }
+}
+async fn refresh_token(
+    state: &AppState,
+    runtime: &OAuthRuntime,
+    fields: &HashMap<String, String>,
+) -> Response {
+    let Some(token) = fields.get("refresh_token") else {
+        return token_error(StatusCode::BAD_REQUEST, "invalid_request");
+    };
+    let request = RefreshRequest {
+        token,
+        client_id: &fields["client_id"],
+        scope: fields.get("scope").map(String::as_str),
+        resource: fields.get("resource").map(String::as_str),
+    };
+    match runtime
+        .refresh(
+            request,
+            &state.auth,
+            &state.metrics,
+            state.browser.verification_timeout(),
+        )
+        .await
+    {
+        Ok(token) => secure_oauth_response(Json(token).into_response()),
+        Err(RefreshGrantError::InvalidGrant) => {
+            token_error(StatusCode::BAD_REQUEST, "invalid_grant")
+        }
+        Err(RefreshGrantError::InvalidScope) => {
+            token_error(StatusCode::BAD_REQUEST, "invalid_scope")
+        }
+        Err(RefreshGrantError::InvalidTarget) => {
+            token_error(StatusCode::BAD_REQUEST, "invalid_target")
+        }
+        Err(RefreshGrantError::Unavailable) => {
+            token_error(StatusCode::SERVICE_UNAVAILABLE, "server_error")
+        }
+    }
+}
+/// RFC 7009 revocation for public clients: `client_id` identifies the caller and
+/// unknown, malformed or foreign tokens still yield 200.
+async fn revoke(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let runtime = state.oauth.as_ref().unwrap();
+    if headers.contains_key(header::AUTHORIZATION) {
+        return token_error(StatusCode::BAD_REQUEST, "invalid_client");
+    }
+    let fields = match body.ok().and_then(|body| {
+        parse_urlencoded_form(
+            &headers,
+            &body,
+            &["token", "client_id"],
+            &["token_type_hint"],
+            true,
+        )
+        .ok()
+    }) {
+        Some(fields) => fields,
+        None => return token_error(StatusCode::BAD_REQUEST, "invalid_request"),
+    };
+    if !runtime
+        .config
+        .clients
+        .iter()
+        .any(|client| client.client_id == fields["client_id"])
+    {
+        return token_error(StatusCode::BAD_REQUEST, "invalid_client");
+    }
+    match runtime
+        .revoke(&fields["token"], &fields["client_id"], &state.metrics)
+        .await
+    {
+        Ok(()) => secure_oauth_response(StatusCode::OK.into_response()),
         Err(_) => token_error(StatusCode::SERVICE_UNAVAILABLE, "server_error"),
     }
 }

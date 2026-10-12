@@ -223,6 +223,9 @@ impl CodeGrant {
     pub fn scopes(&self) -> &[String] {
         self.context.authorized_scopes()
     }
+    pub fn provider_roles(&self) -> &[String] {
+        self.context.provider_roles()
+    }
     pub fn client_id(&self) -> &str {
         self.request().client_id()
     }

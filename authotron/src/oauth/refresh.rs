@@ -139,6 +139,19 @@ pub(super) fn initial_expiry(now_ms: u64, policy: &RefreshTokenPolicy) -> Option
     Some((absolute, idle))
 }
 
+/// Current policy also bounds older families: a shortened absolute lifetime applies at once.
+pub(super) fn effective_absolute(
+    created_at_ms: u64,
+    stored_absolute_ms: u64,
+    policy: &RefreshTokenPolicy,
+) -> Option<u64> {
+    deadline(
+        created_at_ms,
+        policy.absolute_ttl_seconds,
+        Some(stored_absolute_ms),
+    )
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
@@ -212,5 +225,15 @@ pub(super) mod tests {
         assert_eq!(initial_expiry(u64::MAX, &policy), None);
         assert_eq!(deadline(253402300799999, 1, None), None);
         assert_eq!(deadline(0, u64::MAX, None), None);
+        let shorter = RefreshTokenPolicy {
+            absolute_ttl_seconds: 300,
+            ..policy.clone()
+        };
+        assert_eq!(effective_absolute(1_000, 601_000, &shorter), Some(301_000));
+        let longer = RefreshTokenPolicy {
+            absolute_ttl_seconds: 6000,
+            ..policy
+        };
+        assert_eq!(effective_absolute(1_000, 601_000, &longer), Some(601_000));
     }
 }

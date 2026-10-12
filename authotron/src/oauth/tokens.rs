@@ -8,7 +8,9 @@
 
 //! Typed, policy-checked access tokens issued from atomic code-redemption proof.
 
-use super::{code_grant::CodeGrant, keys::KeyManager, store::RedeemedAuthorization};
+use super::{
+    code_grant::CodeGrant, keys::KeyManager, refresh::RefreshToken, store::RedeemedAuthorization,
+};
 use crate::config::{OAuthConfig, OAuthPolicyError};
 use authotron_types::User;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -41,10 +43,16 @@ pub struct TokenResponse {
     token_type: &'static str,
     expires_in: u64,
     scope: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<String>,
 }
 impl TokenResponse {
     pub fn access_token(&self) -> &str {
         &self.access_token
+    }
+    pub(super) fn with_refresh_token(mut self, token: &RefreshToken) -> Self {
+        self.refresh_token = Some(token.as_secret_str().into());
+        self
     }
 }
 
@@ -117,6 +125,18 @@ impl<'a> TokenIssuer<'a> {
             grant.as_user(),
             now_ms / 1000,
         )
+    }
+    /// Refresh-grant issuance: the caller supplies a freshly augmented identity and the
+    /// family's bound client/resource; current scope policy is re-evaluated here.
+    pub(super) fn issue_refreshed(
+        &self,
+        client_id: &str,
+        resource: &str,
+        scopes: &[String],
+        user: &User,
+        now_ms: u64,
+    ) -> Result<TokenResponse, TokenError> {
+        self.issue_at(client_id, resource, scopes, user, now_ms / 1000)
     }
     /// Exercises signing directly in unit tests without constructing redemption proof.
     #[cfg(test)]
@@ -211,6 +231,7 @@ impl<'a> TokenIssuer<'a> {
             token_type: "Bearer",
             expires_in: ttl,
             scope,
+            refresh_token: None,
         })
     }
 }

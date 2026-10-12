@@ -95,7 +95,7 @@ pub async fn verify_identity(
     }
 }
 
-fn projection(user: &User) -> Result<User, BrowserVerifyError> {
+pub(super) fn projection(user: &User) -> Result<User, BrowserVerifyError> {
     validate_identity_fields(&user.username, &user.realm, &user.roles)?;
     Ok(User::new(
         user.realm.clone(),
