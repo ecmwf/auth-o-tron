@@ -1,8 +1,8 @@
 # Namespace-confined login preview
 
 This disposable preview reuses the existing Helm chart's ConfigMap, Service,
-Deployment and Ingress. It is restricted to **`authotron-palyground`** (the spelling
-is intentional), and the renderer cannot select another namespace or invoke
+Deployment and Ingress. It is restricted to **`authotron-playground`**, and the
+renderer cannot select another namespace or invoke
 `kubectl`. Python 3, PyYAML 6 and Helm are required. Prepare the chart's locked
 dependencies with `helm dependency build` before rendering.
 
@@ -35,7 +35,7 @@ then supply the immutable reference:
 ```bash
 python3 authotron/examples/kubernetes-login-preview/render.py \
   --chart ../auth-o-tron-chart \
-  --host authotron-palyground.lumi.apps.dte.destination-earth.eu \
+  --host authotron-playground.lumi.apps.dte.destination-earth.eu \
   --build-image docker.io/library/rust@sha256:<resolved-digest> \
   --output-dir /tmp/opencode/authotron-playground
 ```
@@ -53,15 +53,15 @@ context and namespace. Do not use these commands for another namespace:
 ```bash
 export KUBECONFIG=~/.kube/lumi-rke2-cls.yaml
 kubectl --kubeconfig="$KUBECONFIG" --context=lumi-rke2-cls \
-  --namespace=authotron-palyground apply --server-side \
+  --namespace=authotron-playground apply --server-side \
   --field-manager=authotron-playground-preview \
   -f /tmp/opencode/authotron-playground/namespace.yaml
 kubectl --kubeconfig="$KUBECONFIG" --context=lumi-rke2-cls \
-  --namespace=authotron-palyground apply --server-side --dry-run=server \
+  --namespace=authotron-playground apply --server-side --dry-run=server \
   --field-manager=authotron-playground-preview \
   -f /tmp/opencode/authotron-playground/resources.yaml
 kubectl --kubeconfig="$KUBECONFIG" --context=lumi-rke2-cls \
-  --namespace=authotron-palyground apply --server-side \
+  --namespace=authotron-playground apply --server-side \
   --field-manager=authotron-playground-preview \
   -f /tmp/opencode/authotron-playground/resources.yaml
 ```

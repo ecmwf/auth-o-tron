@@ -685,7 +685,7 @@ class RendererTests(unittest.TestCase):
             docs = list(yaml.safe_load_all(before[name]))
             self.assertTrue(
                 all(
-                    doc["metadata"]["namespace"] == "authotron-palyground"
+                    doc["metadata"]["namespace"] == "authotron-playground"
                     for doc in docs
                 )
             )

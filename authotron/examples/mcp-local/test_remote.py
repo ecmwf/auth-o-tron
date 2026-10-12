@@ -21,7 +21,7 @@ import prepare_demo
 import run_demo
 import server
 
-REMOTE = "https://authotron-palyground.lumi.apps.dte.destination-earth.eu/"
+REMOTE = "https://authotron-playground.lumi.apps.dte.destination-earth.eu/"
 HERE = Path(__file__).resolve().parent
 
 

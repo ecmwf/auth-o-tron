@@ -158,7 +158,7 @@ From the repository root, prepare a remote-issuer runtime (no Authotron binary n
 export MCP_RUNTIME="/tmp/authotron-mcp-remote-$(date +%s)-$$"
 /tmp/authotron-mcp-venv/bin/python authotron/examples/mcp-local/prepare_demo.py \
   --runtime-dir "$MCP_RUNTIME" \
-  --issuer https://authotron-palyground.lumi.apps.dte.destination-earth.eu/
+  --issuer https://authotron-playground.lumi.apps.dte.destination-earth.eu/
 ```
 
 `--issuer` must be a lowercase `https://` DNS origin ending in `/`, without path,

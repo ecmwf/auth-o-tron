@@ -107,7 +107,7 @@ fixed. Nginx and the branding preview do not depend on these credentials.
 
 These checksums trigger replacement, but do not coordinate multiple Deployments.
 For rotation, schedule a demo outage and use the same explicit kubeconfig,
-context and `authotron-palyground` namespace as the apply procedure below:
+context and `authotron-playground` namespace as the apply procedure below:
 
 1. Render and review a complete replacement bundle using a newly generated
    private credential file outside Git and the reserved source paths.
@@ -127,7 +127,7 @@ rotation. Both SSO and direct-login use the Valkey pin in `../shared_images.py`.
 
 Get independent review, run the offline tests and required workspace checks,
 then use server-side dry-run and apply with explicit kubeconfig, context and
-`--namespace=authotron-palyground`. All application resources belong only to that
+`--namespace=authotron-playground`. All application resources belong only to that
 namespace. Reuse the preview's documented SSA procedure; do not apply these
 bundles to other namespaces. Valkey and the static upstream are private to the
 BFF, and the BFF's ingress policy accepts only the configured ingress peers.

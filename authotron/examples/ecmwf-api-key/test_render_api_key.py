@@ -16,7 +16,7 @@ import yaml
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-HOST = "authotron-palyground.lumi.apps.dte.destination-earth.eu"
+HOST = "authotron-playground.lumi.apps.dte.destination-earth.eu"
 IMAGE = "docker.io/library/rust@sha256:" + "a" * 64
 TOKEN = base64.urlsafe_b64encode(bytes(range(32))).decode().rstrip("=")
 VALKEY_PASSWORD = (
@@ -35,9 +35,9 @@ OTHER_OAUTH_KEY = renderer.oauth_pem(
 # (the only difference from the previous digests), and again when provider `browser`
 # blocks gained stable ids and the Valkey key_prefix dropped its `v1` segment.
 PRE_OAUTH_DIGESTS = {
-    "plain": "8f0df75c61278e9783e6d93a058ef874ae94e702801cda18c449063cc18aa3c8",
-    "basic": "13ae205ef67116f3177090812eacc0e85208176e4ea5cfa7753a61dd6b2e0cd3",
-    "shared": "1aff8e97abbfb7667843c7675e050ec235068957fbbfca2d6107451f7fa652cb",
+    "plain": "fd33beef14859071a50ad9e93a72469cb9527b06764354f5e0407cff3984b06d",
+    "basic": "8a09d5d19c4c504a80cdef1c0d942553317ea5f347636376f712b5c239f31b29",
+    "shared": "ddb68e9d579f0a0af72f613f5aab7d6aa39d82c4164fdfb5ae02659fe6e0148d",
 }
 # One `/login/` Prefix replaces per-method Exact paths, independent of method count.
 API_KEY_PATH_RULES = [

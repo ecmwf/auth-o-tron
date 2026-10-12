@@ -17,7 +17,7 @@ from pathlib import Path
 
 import yaml
 
-NAMESPACE = "authotron-palyground"
+NAMESPACE = "authotron-playground"
 RELEASE = "authotron-login-preview"
 ARCHIVE_KEY = "source.tar.gz"
 WORK_DIR = "/work"

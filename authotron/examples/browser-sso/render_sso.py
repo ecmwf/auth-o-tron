@@ -714,7 +714,7 @@ def bind_credentials(resources, bundle):
 
 def validate_sso(resources, profile, assets):
     """Fail closed against the fixed composition, including every Pod and route field."""
-    if NAMESPACE != "authotron-palyground":
+    if NAMESPACE != "authotron-playground":
         raise ValueError("unexpected target namespace")
     expected = render_public_sso(profile, assets)
     allowed = {(doc["apiVersion"], doc["kind"]) for doc in expected} | {
@@ -823,7 +823,7 @@ def load_or_create_secrets(path, *, project=None):
 
 
 def render_bundles(project, chart, profile, bundle):
-    if NAMESPACE != "authotron-palyground":
+    if NAMESPACE != "authotron-playground":
         raise ValueError("unexpected target namespace")
     assets = project / "authotron/examples/browser-sso"
     ui, archive = preview.render_preview(
@@ -863,7 +863,7 @@ def main():
             args.build_image,
             trusted_addresses(args.trusted_proxy_addresses),
         )
-        if NAMESPACE != "authotron-palyground":
+        if NAMESPACE != "authotron-playground":
             raise ValueError("unexpected target namespace")
         project = Path(__file__).resolve().parents[3]
         output = checked_private_path(args.output_dir, project)

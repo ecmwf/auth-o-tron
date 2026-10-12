@@ -14,7 +14,7 @@ and no sliding refresh. This is
 an identity view; an Aviso application callback is not configured. The token store
 is disabled. The browser route does not issue a JWT.
 
-The namespace is fixed to **`authotron-palyground`** (intentional spelling). The
+The namespace is fixed to **`authotron-playground`**. The
 renderer imports the existing Kubernetes login-preview renderer and uses its
 provider-empty public `login-ui/aviso.yaml` fixture. By default it enables exactly:
 
@@ -52,7 +52,7 @@ of the official Rust build image (for example `rust:1.90-bookworm`):
 ```bash
 python3 authotron/examples/ecmwf-api-key/render_api_key.py \
   --chart ../auth-o-tron-chart \
-  --host authotron-palyground.lumi.apps.dte.destination-earth.eu \
+  --host authotron-playground.lumi.apps.dte.destination-earth.eu \
   --build-image docker.io/library/rust@sha256:<resolved-digest> \
   --secret-file /tmp/opencode/ecmwf-browser-signing.json \
   --output-dir /tmp/opencode/ecmwf-direct-playground
@@ -61,7 +61,7 @@ python3 authotron/examples/ecmwf-api-key/render_api_key.py \
 To show both choices in the playground, add:
 
 ```bash
---browser-start-url 'https://aviso-browser-palyground.lumi.apps.dte.destination-earth.eu/oauth2/start?rd=%2Faccount'
+--browser-start-url 'https://aviso-browser-playground.lumi.apps.dte.destination-earth.eu/oauth2/start?rd=%2Faccount'
 ```
 
 The configured URL must be an approved HTTPS browser-client start endpoint;
@@ -196,7 +196,7 @@ backend is rejected before any credential file is created. Example (Basic option
 ```bash
 python3 authotron/examples/ecmwf-api-key/render_api_key.py \
   --chart ../auth-o-tron-chart \
-  --host authotron-palyground.lumi.apps.dte.destination-earth.eu \
+  --host authotron-playground.lumi.apps.dte.destination-earth.eu \
   --build-image docker.io/library/rust@sha256:<resolved-digest> \
   --secret-file /tmp/opencode/authotron-api-key-signing.json \
   --basic-secret-file /tmp/opencode/authotron-basic-demo.json \
@@ -233,7 +233,7 @@ new key changes the configuration checksum; the pod template additionally carrie
 ```yaml
 oauth:
   enabled: true
-  issuer: https://authotron-palyground.lumi.apps.dte.destination-earth.eu/
+  issuer: https://authotron-playground.lumi.apps.dte.destination-earth.eu/
   access_token_ttl_seconds: 3600
   max_authorization_transactions: 1024
   signing:
@@ -283,7 +283,7 @@ augmenters:
 ```
 
 Clients must use the issuer
-**`https://authotron-palyground.lumi.apps.dte.destination-earth.eu/`** (with the
+**`https://authotron-playground.lumi.apps.dte.destination-earth.eu/`** (with the
 trailing slash), which matches `ui.browser_session.public_origin`. Its metadata is
 at `/.well-known/oauth-authorization-server`. Access tokens live **3600 seconds**
 (the server maximum; default 300): no refresh tokens are issued yet, so clients
@@ -495,7 +495,7 @@ Before any deployment, the deployment owner should independently verify:
 1. The packaged backend accepts the tagged memory/Valkey interface and enforces
    absolute session/transaction expiry, logout and failed-backend behavior.
 2. The rendered six/nine exact resource IDs and references remain entirely in
-   `authotron-palyground`, and the dedicated Valkey policy is enforced by the CNI.
+   `authotron-playground`, and the dedicated Valkey policy is enforced by the CNI.
 3. Credentials occur only in private files/Secret data and Secret-backed env;
    source archives, public configuration, argv, logs and annotations do not leak them.
 4. Two application replicas share form consumption, sessions and quotas, and
