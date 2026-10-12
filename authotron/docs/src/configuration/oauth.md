@@ -370,7 +370,12 @@ oauth:
 Both lifetimes must be between 300 seconds and 400 days (34560000 seconds), and
 `idle_ttl_seconds` must not exceed `absolute_ttl_seconds`; startup rejects other values.
 For an enabled client, every authorization-code exchange returns a `refresh_token`
-next to the access token. The client does not need to request `offline_access`,
+next to the access token. The code is consumed before the family is stored. If storing fails
+(for example, the backend is unavailable), the exchange still succeeds and returns the
+access token without a `refresh_token`. The server logs
+`oauth.refresh_token.issue_failed` and counts `issue_failed`, and the user signs in
+again once the access token expires. This avoids failing a login whose code can no
+longer be retried. The client does not need to request `offline_access`,
 because common MCP clients never send it.
 
 **Format and storage.** A refresh token is 256 random bits encoded as 43 base64url
@@ -448,7 +453,7 @@ their `exp`.
 - With the Memory backend, families are per process. A refresh token works only on the
   replica that issued it and is lost on restart. Multi-replica deployments need Valkey.
 - Metrics: `authotron_oauth_refresh_tokens_total{event}` with `issued`, `rotated`,
-  `reuse_detected` and `family_revoked`.
+  `reuse_detected`, `family_revoked` and `issue_failed`.
 
 ## Signing and deferred capabilities
 
