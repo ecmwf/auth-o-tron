@@ -1914,3 +1914,66 @@ async fn basic_exhausts_shared_verification_quota_and_both_direct_chooser_stays_
     assert!(html.contains(&format!("href=\"{BASIC}\"")));
     assert!(html.contains(&format!("href=\"{PATH}\"")));
 }
+
+#[tokio::test]
+async fn trailing_slash_subpages_redirect_to_canonical_paths() {
+    let (app, _) = startup::build_app(Arc::new(config("http://127.0.0.1:1", true)))
+        .await
+        .unwrap();
+    for (path, location) in [
+        ("/login/method/0/", "/login/method/0"),
+        ("/login/method/0/?a=b", "/login/method/0"),
+        ("/login/account/", "/login/account"),
+    ] {
+        for method in ["GET", "HEAD"] {
+            let response = request(
+                app.clone(),
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(header::HOST, "evil.example")
+                    .header("x-forwarded-host", "evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT, "{path}");
+            assert_eq!(response.headers()[header::LOCATION], location);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            assert_eq!(response.headers()[header::REFERRER_POLICY], "strict-origin");
+            assert_eq!(response.headers()[header::X_FRAME_OPTIONS], "DENY");
+            assert!(!response.headers().contains_key(header::SET_COOKIE));
+        }
+    }
+    for path in ["/login/method/1/", "/login/method/01/", "/login/method/x/"] {
+        assert_eq!(
+            get(app.clone(), path).await.status(),
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    for path in ["/login/method/0/", "/login/account/"] {
+        let response = request(
+            app.clone(),
+            Request::post(path).body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{path}");
+        assert!(!response.headers().contains_key(header::LOCATION));
+    }
+    for path in ["/login/method/", "/login/method/0//", "/login/accounts/"] {
+        assert!(
+            !get(app.clone(), path).await.status().is_redirection(),
+            "{path}"
+        );
+    }
+
+    let mut cfg = config("http://127.0.0.1:1", true);
+    cfg = set_browser(cfg, "ECMWF API Provider", None);
+    for cfg in [config("http://127.0.0.1:1", false), cfg] {
+        let (app, _) = startup::build_app(Arc::new(cfg)).await.unwrap();
+        for path in ["/login/method/0/", "/login/account/"] {
+            assert_eq!(get(app.clone(), path).await.status(), StatusCode::NOT_FOUND);
+        }
+    }
+}

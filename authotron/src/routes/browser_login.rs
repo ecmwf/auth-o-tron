@@ -70,7 +70,9 @@ pub fn routes(state: &AppState) -> Router<AppState> {
     }
     Router::new()
         .route("/login/method/{index}", get(method_form).post(submit))
+        .route("/login/method/{index}/", get(method_slash))
         .route("/login/account", get(account))
+        .route("/login/account/", get(account_slash))
         .layer(DefaultBodyLimit::max(8 * 1024))
 }
 
@@ -221,6 +223,22 @@ fn flow_error(flow: LoginFlow) -> &'static str {
     } else {
         "Credentials invalid or could not be verified"
     }
+}
+
+/// Redirects `/login/method/{index}/` only for a configured method; the
+/// Location is rebuilt from the resolved index, never echoed from the request.
+async fn method_slash(State(state): State<AppState>, Path(index): Path<String>) -> Response {
+    match resolve_method(&state, &index) {
+        Some(method) => private_response(super::login::canonical_redirect(
+            &method_path(method.flow.method),
+            true,
+        )),
+        None => not_found(),
+    }
+}
+
+async fn account_slash() -> Response {
+    private_response(super::login::canonical_redirect("/login/account", true))
 }
 
 async fn method_form(

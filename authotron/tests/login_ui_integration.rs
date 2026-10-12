@@ -504,3 +504,56 @@ async fn ui_does_not_change_the_homepage_or_credential_authentication() {
             .starts_with("Bearer ")
     );
 }
+
+#[tokio::test]
+async fn login_trailing_slash_redirects_get_and_head_only_when_ui_enabled() {
+    let (app, _) = startup::build_app(Arc::new(config(json!({"enabled": true}))))
+        .await
+        .unwrap();
+    for method in ["GET", "HEAD"] {
+        for path in ["/login/", "/login/?next=https://evil.example"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("host", "evil.example")
+                        .header("x-forwarded-host", "evil.example")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+            assert_eq!(response.headers()["location"], "/login");
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+            assert_eq!(response.headers()["x-frame-options"], "DENY");
+            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+            assert!(response.headers().contains_key("content-security-policy"));
+        }
+    }
+    let post = app
+        .clone()
+        .oneshot(Request::post("/login/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert!(!post.headers().contains_key("location"));
+    for path in [
+        "/login//",
+        "/static/",
+        "/static/login.css/",
+        "/whoami/",
+        "/loginx/",
+    ] {
+        let response = get(app.clone(), path).await;
+        assert!(!response.status().is_redirection(), "{path}");
+    }
+
+    for ui in [json!({}), json!({"enabled": false})] {
+        let (app, _) = startup::build_app(Arc::new(config(ui))).await.unwrap();
+        assert_eq!(get(app, "/login/").await.status(), StatusCode::NOT_FOUND);
+    }
+}

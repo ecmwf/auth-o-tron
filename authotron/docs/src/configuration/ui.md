@@ -565,7 +565,7 @@ by rendering Kubernetes objects.
 
 ## Endpoints and Image Requirement
 
-When `ui.enabled: true`, `GET /login` serves the entry page and `GET /static/login.css` serves its stylesheet. Both require no authentication and exist only on the main application port (`server.port`), not the metrics port. When disabled, neither route is registered. Existing `/` and `/authenticate` behavior is unchanged.
+When `ui.enabled: true`, `GET /login` serves the entry page and `GET /static/login.css` serves its stylesheet. Both require no authentication and exist only on the main application port (`server.port`), not the metrics port. When disabled, neither route is registered. Trailing-slash forms of the login pages (`/login/`, `/login/account/`, `/login/method/{n}/` for configured methods) redirect `GET`/`HEAD` with `308` to the relative canonical path, dropping any query string; they are registered only alongside the pages themselves. Existing `/` and `/authenticate` behavior is unchanged.
 
 The page uses origin-root asset paths (`/static/login.css` and `/favicon.ico`). If
 an ingress exposes Auth-O-Tron beneath a rewritten path prefix, route those root

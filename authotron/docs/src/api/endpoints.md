@@ -124,7 +124,9 @@ forms perform fresh strict verification and continue to explicit consent instead
 of creating an ordinary browser session. See [OAuth](../configuration/oauth.md)
 for metadata/JWKS, authorize, consent and code/S256 token endpoints. The login entry
 itself is not an application callback, and an existing browser session never proves
-OAuth authentication.
+OAuth authentication. `GET`/`HEAD` on `/login/`, `/login/account/` and
+`/login/method/{n}/` (configured methods only) answer `308 Permanent Redirect` to the
+relative canonical path without the query string; other methods are not redirected.
 
 | Aspect | Details |
 |--------|---------|

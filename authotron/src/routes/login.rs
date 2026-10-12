@@ -44,9 +44,27 @@ pub fn routes(config: &UiConfig) -> Router<AppState> {
 
     Router::new()
         .route("/login", get(login))
+        .route("/login/", get(login_slash))
         .route("/static/login.css", get(stylesheet))
         .route("/static/login.js", get(script))
         .route("/static/aviso-logo.png", get(aviso_logo))
+}
+
+/// Canonicalises `/login/` to `/login`; see [`canonical_redirect`].
+async fn login_slash() -> Response {
+    canonical_redirect("/login", false)
+}
+
+/// Builds a 308 redirect from a trailing-slash UI path to its canonical form.
+///
+/// 308 keeps the method and is cacheable as permanent, matching a fixed path
+/// alias; only GET/HEAD routes use it, so method preservation never replays a
+/// form. `location` is always a static or server-built relative path (valid:
+/// `/login/account`; invalid: `https://host/login`), so the Host and forwarded
+/// headers never influence it. Any query string is dropped because login pages
+/// ignore queries.
+pub(super) fn canonical_redirect(location: &str, form: bool) -> Response {
+    secure_response(Redirect::permanent(location).into_response(), form)
 }
 
 async fn login(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
