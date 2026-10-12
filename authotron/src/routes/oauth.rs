@@ -12,7 +12,7 @@ use crate::{
     oauth::{
         authorization::{decode_component, validate_authorization_request},
         codes::{AuthorizationCode, CodeIssueOutcome, CodeStoreError},
-        runtime::OAuthRuntime,
+        runtime::{ActiveFlow, OAuthRuntime},
         store::{StoreError, TransactionId},
     },
     state::AppState,
@@ -131,39 +131,64 @@ pub(super) async fn login_entry_recovery(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Option<Response> {
-    let binding = match parse_browser_binding(headers) {
+    let flow = match parse_browser_binding(headers) {
         Ok(None) => return None,
-        Ok(Some(binding)) => Some(binding),
-        Err(_) => None,
+        Ok(Some((id, hash))) => active_flow(state, &id, &hash).await,
+        Err(_) => Ok(ActiveFlow::Missing),
     };
-    if let (Some(runtime), Some((id, hash))) = (&state.oauth, binding) {
-        match runtime.bound(&id, &hash).await {
-            Ok(_) => return None,
-            Err(StoreError::Missing) => {}
-            Err(error) => return Some(local(store_status(error))),
-        }
-        match runtime.advanced(&id, &hash).await {
-            Ok(()) => {
-                return Some(secure_oauth_response(
-                    Redirect::to("/oauth/continue").into_response(),
-                ));
-            }
-            Err(StoreError::Missing) => {}
-            Err(error) => return Some(local(store_status(error))),
-        }
+    recovery_for_flow(state, flow)
+}
+/// Without an OAuth runtime any cookie pair is treated as an ended flow.
+async fn active_flow(
+    state: &AppState,
+    id: &TransactionId,
+    hash: &[u8; 32],
+) -> Result<ActiveFlow, StoreError> {
+    match &state.oauth {
+        Some(runtime) => runtime.active_flow(id, hash).await,
+        None => Ok(ActiveFlow::Missing),
     }
+}
+/// Pending flows need no recovery; post-login flows resume at consent; ended or
+/// malformed flows clear the cookies. Backend errors keep the cookies.
+fn recovery_for_flow(state: &AppState, flow: Result<ActiveFlow, StoreError>) -> Option<Response> {
+    match flow {
+        Ok(ActiveFlow::Pending(_)) => None,
+        Ok(ActiveFlow::PastPending(_)) => Some(secure_oauth_response(
+            Redirect::to("/oauth/continue").into_response(),
+        )),
+        Ok(ActiveFlow::Missing) => Some(session_ended(state)),
+        Err(error) => Some(local(store_status(error))),
+    }
+}
+fn notice_page(
+    state: &AppState,
+    status: StatusCode,
+    title: &str,
+    body: &str,
+    link_text: &str,
+) -> Response {
     let page = super::login::render_page(
         &super::browser_login::private_ui(state),
         html! {
-            h2 id="login-card-title" { "Authorization session ended" }
-            p { "Restart authorization from your application, or continue to sign in directly." }
-            a href="/login" { "Continue to sign in" }
+            h2 id="login-card-title" { (title) }
+            p { (body) }
+            a href="/login" { (link_text) }
         },
     );
-    let mut response = secure_oauth_response(Html(page).into_response());
+    secure_oauth_response((status, Html(page)).into_response())
+}
+fn session_ended(state: &AppState) -> Response {
+    let mut response = notice_page(
+        state,
+        StatusCode::OK,
+        "Authorization session ended",
+        "Restart authorization from your application, or continue to sign in directly.",
+        "Continue to sign in",
+    );
     cookie(&mut response, TX, "", 0);
     cookie(&mut response, BROWSER, "", 0);
-    Some(response)
+    response
 }
 pub(super) fn posted_context(
     headers: &HeaderMap,
@@ -205,28 +230,25 @@ async fn authorize(
     };
     // One active flow per browser cookie pair. Dropping cookies can bypass this
     // browser convenience guard, but cannot borrow another client's reserved share.
-    if let Ok(Some((id, hash))) = parse_browser_binding(&headers) {
-        match runtime.active_request_matches(&id, &hash, &request).await {
-            Ok(false) => {
-                let page = super::login::render_page(
-                    &super::browser_login::private_ui(&state),
-                    html! {
-                        h2 id="login-card-title" { "Another authorization is in progress" }
-                        p { "This request differs from the current authorization. Finish or deny the current authorization before restarting from your application." }
-                        a href="/login" { "Continue current authorization" }
-                    },
-                );
-                return secure_oauth_response((StatusCode::CONFLICT, Html(page)).into_response());
-            }
-            Ok(true) | Err(StoreError::Missing) => {}
-            Err(error) => return local(store_status(error)),
+    let flow = match parse_browser_binding(&headers) {
+        Ok(None) => None,
+        Ok(Some((id, hash))) => Some(runtime.active_flow(&id, &hash).await),
+        Err(_) => Some(Ok(ActiveFlow::Missing)),
+    };
+    if let Some(flow) = flow {
+        if let Ok(active) = &flow
+            && active.same_request(&request) == Some(false)
+        {
+            return notice_page(
+                &state,
+                StatusCode::CONFLICT,
+                "Another authorization is in progress",
+                "This request differs from the current authorization. Finish or deny the current authorization before restarting from your application.",
+                "Continue current authorization",
+            );
         }
-    }
-    if let Some(response) = login_entry_recovery(&state, &headers).await {
-        return response;
-    }
-    if matches!(parse_browser_binding(&headers), Ok(Some(_))) {
-        return secure_oauth_response(Redirect::to("/login").into_response());
+        return recovery_for_flow(&state, flow)
+            .unwrap_or_else(|| secure_oauth_response(Redirect::to("/login").into_response()));
     }
     let nonce = match OAuthRuntime::nonce() {
         Ok(nonce) => nonce,

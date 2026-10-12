@@ -199,7 +199,7 @@ impl MemoryTransactionStore {
         id: &TransactionId,
         browser_hash: &[u8; 32],
     ) -> Result<AuthenticatedAuthorization, StoreError> {
-        self.authenticated_at(id, browser_hash, now_ms, false)
+        self.authenticated_at(id, browser_hash, now_ms)
     }
     #[cfg(test)]
     pub async fn consume_authenticated(
@@ -207,7 +207,7 @@ impl MemoryTransactionStore {
         id: &TransactionId,
         browser_hash: &[u8; 32],
     ) -> Result<AuthenticatedAuthorization, StoreError> {
-        self.authenticated_at(id, browser_hash, now_ms, true)
+        self.take_authenticated_at(id, browser_hash, now_ms)
     }
     pub async fn prepare_consent(
         &self,
@@ -506,9 +506,30 @@ impl MemoryTransactionStore {
         id: &TransactionId,
         binding: &[u8; 32],
         clock: impl FnOnce() -> Result<u64, StoreError>,
-        _consume: bool,
     ) -> Result<AuthenticatedAuthorization, StoreError> {
         let mut entries = self.entries.lock().map_err(|_| StoreError::Unavailable)?;
+        Self::authenticated_in(&mut entries, &self.config, id, binding, clock)
+    }
+    /// Test-only consuming read: removes the entry only after it validated successfully.
+    #[cfg(test)]
+    fn take_authenticated_at(
+        &self,
+        id: &TransactionId,
+        binding: &[u8; 32],
+        clock: impl FnOnce() -> Result<u64, StoreError>,
+    ) -> Result<AuthenticatedAuthorization, StoreError> {
+        let mut entries = self.entries.lock().map_err(|_| StoreError::Unavailable)?;
+        let context = Self::authenticated_in(&mut entries, &self.config, id, binding, clock)?;
+        entries.remove(&id.hash());
+        Ok(context)
+    }
+    fn authenticated_in(
+        entries: &mut HashMap<[u8; 32], Stored>,
+        config: &OAuthConfig,
+        id: &TransactionId,
+        binding: &[u8; 32],
+        clock: impl FnOnce() -> Result<u64, StoreError>,
+    ) -> Result<AuthenticatedAuthorization, StoreError> {
         let now = clock()?;
         if !valid_time(now) {
             return Err(StoreError::Unavailable);
@@ -519,17 +540,13 @@ impl MemoryTransactionStore {
         if !matches!(stored.kind, StoredKind::Authenticated) {
             return Err(StoreError::Missing);
         }
-        let context = AuthenticatedAuthorization::decode(&stored.bytes, &self.config, binding, now)
+        let context = AuthenticatedAuthorization::decode(&stored.bytes, config, binding, now)
             .map_err(|error| match error {
                 super::context::ContextError::Binding => StoreError::Missing,
                 _ => StoreError::Unavailable,
             })?;
         if !context.matches_source(&key) || context.expires_at_ms() > stored.expires_at_ms {
             return Err(StoreError::Unavailable);
-        }
-        #[cfg(test)]
-        if _consume {
-            entries.remove(&key);
         }
         Ok(context)
     }
@@ -1374,11 +1391,7 @@ pub(super) mod tests {
         store
             .promote_at(&a.id, &[7; 32], restored, at(now))
             .unwrap();
-        assert!(
-            store
-                .authenticated_at(&a.id, &[7; 32], at(now), false)
-                .is_ok()
-        );
+        assert!(store.authenticated_at(&a.id, &[7; 32], at(now)).is_ok());
         {
             let mut entries = store.entries.lock().unwrap();
             let original = &entries[&a.id.hash()];
@@ -1390,18 +1403,18 @@ pub(super) mod tests {
             };
             entries.insert(b.id.hash(), copied);
         }
-        for consume in [false, true] {
-            assert_eq!(
-                store
-                    .authenticated_at(&b.id, &[7; 32], at(now), consume)
-                    .err(),
-                Some(StoreError::Unavailable)
-            );
-        }
+        assert_eq!(
+            store.authenticated_at(&b.id, &[7; 32], at(now)).err(),
+            Some(StoreError::Unavailable)
+        );
+        assert_eq!(
+            store.take_authenticated_at(&b.id, &[7; 32], at(now)).err(),
+            Some(StoreError::Unavailable)
+        );
         assert_eq!(store.entries.lock().unwrap().len(), 2);
         assert!(
             store
-                .authenticated_at(&a.id, &[7; 32], at(now), true)
+                .take_authenticated_at(&a.id, &[7; 32], at(now))
                 .is_ok()
         );
     }
@@ -1626,14 +1639,14 @@ pub(super) mod tests {
             .unwrap();
         assert_eq!(
             store
-                .authenticated_at(&created.id, &[7; 32], at(now + 999), false)
+                .authenticated_at(&created.id, &[7; 32], at(now + 999))
                 .unwrap()
                 .expires_at_ms(),
             now + 1000
         );
         assert_eq!(
             store
-                .authenticated_at(&created.id, &[7; 32], at(now + 1000), true)
+                .take_authenticated_at(&created.id, &[7; 32], at(now + 1000))
                 .err(),
             Some(StoreError::Missing)
         );
@@ -1684,7 +1697,7 @@ pub(super) mod tests {
             .unwrap()
             .bytes = b"invalid context".to_vec();
         assert_eq!(
-            store.authenticated_at(&id, &[7; 32], at(now), true).err(),
+            store.take_authenticated_at(&id, &[7; 32], at(now)).err(),
             Some(StoreError::Unavailable)
         );
         assert_eq!(store.entries.lock().unwrap().len(), 1);

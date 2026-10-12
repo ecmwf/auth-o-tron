@@ -28,6 +28,26 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// State of the authorization flow bound to a browser cookie pair.
+pub(crate) enum ActiveFlow {
+    /// Awaiting login.
+    Pending(Box<BoundAuthorizationTransaction>),
+    /// Logged in; awaiting or showing consent.
+    PastPending(Box<AuthenticatedAuthorization>),
+    /// Expired, consumed, or bound to another browser.
+    Missing,
+}
+impl ActiveFlow {
+    /// `None` for `Missing`; otherwise whether the stored request equals `request`.
+    pub(crate) fn same_request(&self, request: &ValidatedAuthorizationRequest) -> Option<bool> {
+        let stored = match self {
+            Self::Pending(bound) => bound.transaction().request(),
+            Self::PastPending(context) => context.transaction().request(),
+            Self::Missing => return None,
+        };
+        Some(stored.same_request(request))
+    }
+}
 enum Backend {
     Memory(Box<MemoryTransactionStore>),
     Valkey(Box<ValkeyTransactionStore>),
@@ -143,14 +163,8 @@ impl OAuthRuntime {
     ) -> Result<(), StoreError> {
         dispatch!(self, promote_authenticated(id, hash, context))
     }
-    pub(crate) async fn advanced(
-        &self,
-        id: &TransactionId,
-        hash: &[u8; 32],
-    ) -> Result<(), StoreError> {
-        self.advanced_context(id, hash).await.map(|_| ())
-    }
-    async fn advanced_context(
+    /// Reads the post-login state: a promoted (authenticated) context, or a consent-ready one.
+    pub(crate) async fn authenticated_or_consent(
         &self,
         id: &TransactionId,
         hash: &[u8; 32],
@@ -161,26 +175,21 @@ impl OAuthRuntime {
             Err(error) => Err(error),
         }
     }
-    pub(crate) async fn active_request_matches(
+    /// Classifies the browser-bound flow with one pending lookup and, only when that is
+    /// missing, one post-login lookup. Backend failures are returned unchanged.
+    pub(crate) async fn active_flow(
         &self,
         id: &TransactionId,
         hash: &[u8; 32],
-        request: &ValidatedAuthorizationRequest,
-    ) -> Result<bool, StoreError> {
-        let matches = |stored: &ValidatedAuthorizationRequest| {
-            stored.client_id() == request.client_id()
-                && stored.redirect_uri() == request.redirect_uri()
-                && stored.resource() == request.resource()
-                && stored.scopes() == request.scopes()
-                && stored.state() == request.state()
-                && stored.challenge().digest() == request.challenge().digest()
-        };
+    ) -> Result<ActiveFlow, StoreError> {
         match self.bound(id, hash).await {
-            Ok(bound) => Ok(matches(bound.transaction().request())),
-            Err(StoreError::Missing) => self
-                .advanced_context(id, hash)
-                .await
-                .map(|context| matches(context.transaction().request())),
+            Ok(bound) => return Ok(ActiveFlow::Pending(Box::new(bound))),
+            Err(StoreError::Missing) => {}
+            Err(error) => return Err(error),
+        }
+        match self.authenticated_or_consent(id, hash).await {
+            Ok(context) => Ok(ActiveFlow::PastPending(Box::new(context))),
+            Err(StoreError::Missing) => Ok(ActiveFlow::Missing),
             Err(error) => Err(error),
         }
     }

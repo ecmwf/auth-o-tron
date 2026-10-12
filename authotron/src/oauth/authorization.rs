@@ -68,6 +68,24 @@ pub struct ValidatedAuthorizationRequest {
     challenge: PkceChallenge,
 }
 impl ValidatedAuthorizationRequest {
+    /// True when both requests carry identical authorization parameters.
+    /// The destructure is exhaustive so adding a field forces this comparison to be revisited.
+    pub fn same_request(&self, other: &Self) -> bool {
+        let Self {
+            client_id,
+            redirect_uri,
+            resource,
+            scopes,
+            state,
+            challenge,
+        } = self;
+        *client_id == other.client_id
+            && *redirect_uri == other.redirect_uri
+            && *resource == other.resource
+            && *scopes == other.scopes
+            && *state == other.state
+            && challenge.digest() == other.challenge.digest()
+    }
     pub fn client_id(&self) -> &str {
         &self.client_id
     }
@@ -418,5 +436,15 @@ mod tests {
             let raw = format!("{valid}{}", "&unknown=x".repeat(count - parameters().len()));
             assert_eq!(parse(&cfg, raw.as_bytes()).is_ok(), count == 32);
         }
+    }
+
+    #[test]
+    fn same_request_compares_every_parameter() {
+        let cfg = config();
+        let base = parse(&cfg, query(&parameters()).as_bytes()).unwrap();
+        assert!(base.same_request(&parse(&cfg, query(&parameters()).as_bytes()).unwrap()));
+        let mut params = parameters();
+        set(&mut params, "state", "other".into());
+        assert!(!base.same_request(&parse(&cfg, query(&params).as_bytes()).unwrap()));
     }
 }
