@@ -191,7 +191,7 @@ def validate_inputs(host, image):
         raise ValueError("build image must be the official Rust image pinned by digest")
 
 
-def preview_values(project, host, sign_in_actions=None):
+def preview_values(project, host, sso=None):
     config = yaml.safe_load(
         checked_source_path(
             project, project / "authotron/examples/login-ui/aviso.yaml"
@@ -201,8 +201,8 @@ def preview_values(project, host, sign_in_actions=None):
         raise ValueError("the preview fixture must enable only the branding shell")
     config["server"]["host"] = "0.0.0.0"
     config["metrics"]["enabled"] = False
-    if sign_in_actions is not None:
-        config["ui"]["sign_in_actions"] = copy.deepcopy(sign_in_actions)
+    if sso is not None:
+        config["ui"]["sso"] = copy.deepcopy(sso)
     port = config["server"]["port"]
     return {
         "nameOverride": RELEASE,
@@ -345,12 +345,12 @@ def checked_resources(documents):
     return resources
 
 
-def render_preview(project, chart, host, image, sign_in_actions=None):
+def render_preview(project, chart, host, image, sso=None):
     validate_inputs(host, image)
     archive = source_archive(project)
     source_hash = hashlib.sha256(archive).hexdigest()
     source_name = f"{RELEASE}-source-{source_hash[:12]}"
-    values = preview_values(project, host, sign_in_actions)
+    values = preview_values(project, host, sso)
     rendered = subprocess.run(
         [
             "helm",

@@ -163,6 +163,7 @@ def prepare(runtime_dir: Path, issuer: str | None = None) -> Path:
                     "name": "basic",
                     "realm": "local",
                     "users": [{"username": "alice", "password": password, "roles": [ROLE]}],
+                    "browser": {"label": "Username and password"},
                 }
             ],
             "augmenters": [],
@@ -174,7 +175,6 @@ def prepare(runtime_dir: Path, issuer: str | None = None) -> Path:
             "auth": {"timeout_in_ms": 5000},
             "ui": {
                 "enabled": True,
-                "basic": {"provider_name": "basic"},
                 "browser_session": {
                     "public_origin": issuer.rstrip("/"),
                     "backend": {"type": "memory"},

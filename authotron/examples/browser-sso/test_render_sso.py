@@ -168,7 +168,7 @@ class RendererTests(unittest.TestCase):
         self.assertIn("--client-id=" + client["clientId"], args)
         self.assertIn("--oidc-issuer-url=" + self.profile.issuer, args)
         self.assertEqual(
-            self.profile.sign_in_actions,
+            self.profile.sso_links,
             [
                 {
                     "label": "Continue with demo SSO",
@@ -507,7 +507,7 @@ class RendererTests(unittest.TestCase):
             "app.kubernetes.io/instance": release,
         }
         values = preview.preview_values(
-            self.project, self.profile.ui_host, self.profile.sign_in_actions
+            self.project, self.profile.ui_host, self.profile.sso_links
         )
         docs = [
             renderer.resource("ConfigMap", release + "-config", data={}),
@@ -612,8 +612,8 @@ class RendererTests(unittest.TestCase):
             self.assertNotIn(value, ui_text)
         config = next(doc for doc in ui if doc["kind"] == "ConfigMap" and "data" in doc)
         self.assertEqual(
-            yaml.safe_load(config["data"]["config.yaml"])["ui"]["sign_in_actions"],
-            self.profile.sign_in_actions,
+            yaml.safe_load(config["data"]["config.yaml"])["ui"]["sso"],
+            self.profile.sso_links,
         )
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as source:
             names = source.getnames()

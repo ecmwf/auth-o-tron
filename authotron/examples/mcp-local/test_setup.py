@@ -63,7 +63,8 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(credentials["username"], "alice")
         self.assertGreaterEqual(len(credentials["password"]), 32)
         self.assertGreaterEqual(len(config["jwt"]["secret"]), 32)
-        self.assertEqual(config["ui"]["basic"], {"provider_name": "basic"})
+        self.assertEqual(config["providers"][0]["browser"], {"label": "Username and password"})
+        self.assertNotIn("basic", config["ui"])
         self.assertEqual(
             config["ui"]["browser_session"]["public_origin"], demo_settings.LOCAL_ISSUER.rstrip("/")
         )

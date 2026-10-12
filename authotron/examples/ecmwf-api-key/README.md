@@ -3,9 +3,11 @@
 This disposable renderer enables direct login at `/login`. API-key and optional
 Basic forms open in an accessible dialog without leaving the branded chooser;
 SSO remains a separate redirect. Standalone credential pages remain available as
-a JavaScript-free fallback. API-key credentials submit to `/login/ecmwf-api-key`
-and Basic credentials to `/login/basic`; the authenticated identity is shown at
-`/login/account`. The renderer targets the backend interface in the source being
+a JavaScript-free fallback. Each provider with a `browser` block is a numbered
+method at `/login/method/<n>` (0-based, in provider order): without Basic the API
+key form is `/login/method/0`; with Basic, the "Username and password" provider is
+listed first (`/login/method/0`) and "ECMWF API key" is `/login/method/1`. The
+authenticated identity is shown at `/login/account`. The renderer targets the backend interface in the source being
 packaged; offline renderer checks do not establish backend runtime behavior.
 Browser sessions default to **300 seconds**, with configurable absolute expiry
 and no sliding refresh. This is
@@ -21,6 +23,8 @@ type: ecmwf-api
 name: ECMWF API Provider
 realm: ecmwf
 uri: https://api.ecmwf.int/v1
+browser:
+  label: ECMWF API key
 ```
 
 The provider URI is configuration authority, never a form input. Public origin is
@@ -30,7 +34,7 @@ direct API-key button. It never changes API-key validation or adds a Keycloak
 dependency to that path. The host-based browser cookie and backend origin
 checks use that origin. No ECMWF API key is placed in cluster configuration.
 Both direct methods use the single `ui.browser_session` block for this origin and
-the session lifetime; `ui.ecmwf_api_key` and `ui.basic` select only provider names.
+the session lifetime; each provider's `browser.label` only names the chooser entry.
 Older per-provider origin/lifetime settings must be moved to that shared block.
 The direct profile explicitly selects `backend: {type: memory}`; the five-resource
 branding baseline keeps Valkey disabled and has no direct-login configuration.
@@ -61,7 +65,7 @@ To show both choices in the playground, add:
 
 The configured URL must be an approved HTTPS browser-client start endpoint;
 request parameters do not choose it. Existing direct sessions do not hide the
-chooser when alternative sign-in actions are present.
+chooser when `ui.sso` entries are present.
 
 To add Basic login alongside the API-key button and optional SSO link, also add:
 
@@ -231,7 +235,7 @@ oauth:
           scopes: [mcp:read]
   resources:
     - resource: https://127.0.0.1:8444/mcp
-      allowed_realms: [ecmwf, browser-demo] # browser-demo only with Basic
+      allowed_realms: [browser-demo, ecmwf] # browser-demo only with Basic
       scopes:
         - name: mcp:read
           required_roles: []
@@ -284,8 +288,9 @@ Output is only `resources.yaml`, mode `0600`, containing **six resources** by de
 2. Deployment retaining the baseline non-root source-build pod.
 3. Internal ClusterIP Service.
 4. Ingress with the existing `/login` Exact, `/static/` Prefix and `/favicon.ico`
-   ImplementationSpecific paths, plus exactly `/login/ecmwf-api-key` and
-   `/login/account`, both Exact, and optional `/login/basic` Exact.
+   ImplementationSpecific paths, plus exactly one `/login/method/<n>` per
+   browser method (`/login/method/0`, and `/login/method/1` when Basic is
+   enabled) and `/login/account`, all Exact.
 5. Immutable public source-archive ConfigMap.
 6. Opaque Secret `authotron-ecmwf-browser`, using Base64 `data.jwt-secret` and,
    when Basic is enabled, `data.config.yaml`. With Valkey it additionally holds

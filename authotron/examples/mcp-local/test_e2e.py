@@ -144,13 +144,13 @@ class EndToEnd(unittest.TestCase):
                 )
             )
             self.assertEqual(response.status_code, 303)
-            form = http.get(issuer + "login/basic")
+            form = http.get(issuer + "login/method/0")
             form.raise_for_status()
             fields = HiddenFields(form.text).fields
             credentials = json.loads((runtime / "credentials.json").read_text())
             fields.update(username=credentials["username"], password=credentials["password"])
             response = http.post(
-                issuer + "login/basic", data=fields, headers={"Origin": issuer.rstrip("/")}
+                issuer + "login/method/0", data=fields, headers={"Origin": issuer.rstrip("/")}
             )
             self.assertEqual(response.status_code, 303)
             consent = http.get(issuer + "oauth/continue")
@@ -268,10 +268,10 @@ class EndToEnd(unittest.TestCase):
             self.assertIsNotNone(match, "native client URL must use the configured issuer")
             response = http.get(match.group(0))
             self.assertEqual(response.status_code, 303)
-            fields = HiddenFields(http.get(issuer + "login/basic").text).fields
+            fields = HiddenFields(http.get(issuer + "login/method/0").text).fields
             fields.update(username=credentials["username"], password=credentials["password"])
             response = http.post(
-                issuer + "login/basic", data=fields, headers={"Origin": issuer.rstrip("/")}
+                issuer + "login/method/0", data=fields, headers={"Origin": issuer.rstrip("/")}
             )
             self.assertEqual(response.status_code, 303)
             fields = HiddenFields(http.get(issuer + "oauth/continue").text).fields

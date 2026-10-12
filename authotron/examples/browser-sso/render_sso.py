@@ -150,7 +150,7 @@ class Profile:
         return f"https://{self.app_host}/oauth2/start?rd={quote(self.return_path, safe='')}"
 
     @property
-    def sign_in_actions(self):
+    def sso_links(self):
         return [{"label": "Continue with demo SSO", "start_url": self.start_url}]
 
 
@@ -827,7 +827,7 @@ def render_bundles(project, chart, profile, bundle):
         raise ValueError("unexpected target namespace")
     assets = project / "authotron/examples/browser-sso"
     ui, archive = preview.render_preview(
-        project, chart, profile.ui_host, profile.build_image, profile.sign_in_actions
+        project, chart, profile.ui_host, profile.build_image, profile.sso_links
     )
     ui = preview.checked_resources(ui)
     if any(

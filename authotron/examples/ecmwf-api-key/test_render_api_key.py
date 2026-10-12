@@ -32,9 +32,9 @@ OTHER_OAUTH_KEY = renderer.oauth_pem(
 )
 # sha256 of yaml.safe_dump_all(..., sort_keys=False) captured before the OAuth profile.
 PRE_OAUTH_DIGESTS = {
-    "plain": "ab7daacb49c0dbb7e3075ebffd1758aeec36393b795d91bbbfbfe793955c2b94",
-    "basic": "b935549437525316d3f7431708e0b990c455405f75bf7e0208f5743d0d2b22c7",
-    "shared": "ebcc35c3fa9feffaa3b1ce316debb3d55d95827ef29a7faf3fa4d1790bd1068f",
+    "plain": "cff6011551e99f7a8e1317a855a1aa9452fe0531db73388c8d8e060c9a37d7ad",
+    "basic": "982c382010733538484c916592516198c286ba0e6a8e08f34cb10135430d19c4",
+    "shared": "901cacc3b8d7bc64b6b4e0941e40b2d4ef9a39e479c94b0c5d5d528d524e455b",
 }
 OAUTH_ROUTES = [
     ("/oauth/authorize", "Exact"),
@@ -202,12 +202,8 @@ class RendererTests(unittest.TestCase):
         )
         config = yaml.safe_load(config_map["data"]["config.yaml"])
         self.assertEqual(config["providers"], [renderer.PROVIDER])
-        self.assertEqual(
-            config["ui"]["ecmwf_api_key"],
-            {
-                "provider_name": "ECMWF API Provider",
-            },
-        )
+        self.assertEqual(config["providers"][0]["browser"], {"label": "ECMWF API key"})
+        self.assertNotIn("ecmwf_api_key", config["ui"])
         self.assertEqual(
             config["ui"]["browser_session"],
             {
@@ -217,7 +213,7 @@ class RendererTests(unittest.TestCase):
                 "backend": {"type": "memory"},
             },
         )
-        self.assertEqual(config["ui"]["sign_in_actions"], [])
+        self.assertEqual(config["ui"]["sso"], [])
         self.assertEqual(config["ui"]["branding"]["logo_url"], renderer.LOGO_PATH)
         self.assertFalse(config["store"]["enabled"])
         self.assertEqual(config["services"], [])
@@ -265,8 +261,14 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(
             [(p["path"], p["pathType"]) for p in paths],
             list(renderer.preview.PATH_RULES)
-            + [(p, "Exact") for p in renderer.LOGIN_PATHS],
+            + [("/login/method/0", "Exact"), ("/login/account", "Exact")],
         )
+
+    def test_oauth_allowed_realms_are_deduplicated_in_order(self):
+        config = renderer.oauth_config(
+            "login.example.test", "kid", ["b", "a", "b", "a"]
+        )
+        self.assertEqual(config["resources"][0]["allowed_realms"], ["b", "a"])
 
     def test_public_render_entry_point(self):
         with patch.object(renderer.preview.subprocess, "run") as command:
@@ -337,7 +339,7 @@ class RendererTests(unittest.TestCase):
                 )
                 if basic:
                     private = yaml.safe_load(base64.b64decode(secret["config.yaml"]))
-                    private["providers"][-1]["users"] = []
+                    private["providers"][0]["users"] = []
                     self.assertEqual(private, public)
                 else:
                     self.assertNotIn("config.yaml", secret)
@@ -530,10 +532,13 @@ class RendererTests(unittest.TestCase):
             doc for doc in resources if doc["kind"] == "ConfigMap" and "data" in doc
         )
         public = yaml.safe_load(config_map["data"]["config.yaml"])
-        self.assertEqual(public["providers"][-1]["users"], [])
+        self.assertEqual(public["providers"][0]["users"], [])
+        self.assertEqual(public["providers"][0]["name"], renderer.BASIC_PROVIDER_NAME)
         self.assertEqual(
-            public["ui"]["basic"]["provider_name"], renderer.BASIC_PROVIDER_NAME
+            [p["browser"]["label"] for p in public["providers"]],
+            ["Username and password", "ECMWF API key"],
         )
+        self.assertNotIn("basic", public["ui"])
         self.assertEqual(
             public["ui"]["browser_session"]["public_origin"], f"https://{HOST}"
         )
@@ -543,8 +548,8 @@ class RendererTests(unittest.TestCase):
         secret = find(resources, "Secret")
         private_text = base64.b64decode(secret["data"]["config.yaml"]).decode()
         private = yaml.safe_load(private_text)
-        self.assertEqual(private["providers"][-1]["users"], [{**BASIC, "roles": []}])
-        private["providers"][-1]["users"] = []
+        self.assertEqual(private["providers"][0]["users"], [{**BASIC, "roles": []}])
+        private["providers"][0]["users"] = []
         self.assertEqual(private, public)
         for doc in resources:
             if doc["kind"] != "Secret":
@@ -555,8 +560,14 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(volume["secret"]["secretName"], renderer.SECRET_NAME)
         self.assertNotIn("configMap", volume)
         paths = find(resources, "Ingress")["spec"]["rules"][0]["http"]["paths"]
-        self.assertIn(
-            ("/login/basic", "Exact"), [(p["path"], p["pathType"]) for p in paths]
+        login = [(p["path"], p["pathType"]) for p in paths if "/login/" in p["path"]]
+        self.assertEqual(
+            login,
+            [
+                ("/login/method/0", "Exact"),
+                ("/login/method/1", "Exact"),
+                ("/login/account", "Exact"),
+            ],
         )
 
     def test_basic_profile_guard_rejects_secret_mount_and_credential_mutations(self):
@@ -676,10 +687,7 @@ class RendererTests(unittest.TestCase):
             doc for doc in resources if doc["kind"] == "ConfigMap" and "data" in doc
         )
         settings = yaml.safe_load(config_map["data"]["config.yaml"])
-        self.assertEqual(settings["ui"]["sign_in_actions"], actions)
-        self.assertEqual(
-            settings["ui"]["ecmwf_api_key"]["provider_name"], renderer.PROVIDER["name"]
-        )
+        self.assertEqual(settings["ui"]["sso"], actions)
         self.assertEqual(settings["providers"], [renderer.PROVIDER])
 
     def test_all_three_choices_coexist_without_public_password(self):
@@ -695,11 +703,9 @@ class RendererTests(unittest.TestCase):
             doc for doc in resources if doc["kind"] == "ConfigMap" and "data" in doc
         )
         settings = yaml.safe_load(config_map["data"]["config.yaml"])
-        self.assertEqual(settings["ui"]["sign_in_actions"], actions)
-        self.assertIn("ecmwf_api_key", settings["ui"])
-        self.assertIn("basic", settings["ui"])
-        self.assertEqual(settings["providers"][0], renderer.PROVIDER)
-        self.assertEqual(settings["providers"][1]["users"], [])
+        self.assertEqual(settings["ui"]["sso"], actions)
+        self.assertEqual(settings["providers"][0]["users"], [])
+        self.assertEqual(settings["providers"][1], renderer.PROVIDER)
 
     def test_basic_cli_does_not_print_credentials(self):
         baseline, _ = self.baseline()
@@ -907,12 +913,13 @@ class RendererTests(unittest.TestCase):
         for mutate in [
             lambda c: c["providers"].append(renderer.PROVIDER),
             lambda c: c["providers"][0].update(uri="https://other.example.org"),
-            lambda c: c["ui"]["ecmwf_api_key"].update(provider_name="other"),
+            lambda c: c["providers"][0]["browser"].update(label="other"),
+            lambda c: c["providers"][0].pop("browser"),
             lambda c: c["ui"]["browser_session"].update(
                 public_origin="https://other.example.org"
             ),
             lambda c: c["ui"]["browser_session"].update(session_ttl_seconds=301),
-            lambda c: c["ui"].update(sign_in_actions=[{"href": "/sso"}]),
+            lambda c: c["ui"].update(sso=[{"href": "/sso"}]),
             lambda c: c["store"].update(enabled=True),
             lambda c: c["jwt"].update(secret=TOKEN),
             lambda c: c.update(services=[{"callback": "https://other.example.org"}]),
@@ -1156,7 +1163,7 @@ class RendererTests(unittest.TestCase):
     def test_oauth_config_shape_secret_mount_and_ingress(self):
         baseline, archive = self.baseline()
         kid = renderer.oauth_kid(OAUTH_KEY)
-        for basic, realms in ((None, ["ecmwf"]), (BASIC, ["ecmwf", "browser-demo"])):
+        for basic, realms in ((None, ["ecmwf"]), (BASIC, ["browser-demo", "ecmwf"])):
             with self.subTest(basic=basic is not None):
                 resources = self.oauth_resources(baseline, basic)
                 renderer.validate_resources(
@@ -1250,8 +1257,9 @@ class RendererTests(unittest.TestCase):
                 self.assertEqual(
                     [(p["path"], p["pathType"]) for p in paths],
                     list(renderer.preview.PATH_RULES)
-                    + [(p, "Exact") for p in renderer.LOGIN_PATHS]
-                    + ([("/login/basic", "Exact")] if basic else [])
+                    + [("/login/method/0", "Exact")]
+                    + ([("/login/method/1", "Exact")] if basic else [])
+                    + [("/login/account", "Exact")]
                     + OAUTH_ROUTES,
                 )
                 self.assertEqual(len({str(p["backend"]) for p in paths}), 1)

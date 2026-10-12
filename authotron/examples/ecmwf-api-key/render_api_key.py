@@ -38,8 +38,10 @@ PROVIDER = {
     "name": "ECMWF API Provider",
     "realm": "ecmwf",
     "uri": "https://api.ecmwf.int/v1",
+    "browser": {"label": "ECMWF API key"},
 }
-LOGIN_PATHS = ("/login/ecmwf-api-key", "/login/account")
+BASIC_LABEL = "Username and password"
+ACCOUNT_PATH = "/login/account"
 BASIC_PROVIDER_NAME = "Playground Basic Provider"
 BASIC_USERNAME = "browser-demo"
 LOGO_PATH = "/static/aviso-logo.png"
@@ -469,7 +471,7 @@ def oauth_config(host, kid, realms):
         "resources": [
             {
                 "resource": OAUTH_RESOURCE,
-                "allowed_realms": list(realms),
+                "allowed_realms": list(dict.fromkeys(realms)),
                 "scopes": [
                     {"name": OAUTH_SCOPE, "required_roles": list(OAUTH_REQUIRED_ROLES)}
                 ],
@@ -510,6 +512,12 @@ def resource_map(resources):
     return mapped
 
 
+def browser_login_paths(config):
+    """Expose exactly one /login/method/<n> per browser-enabled provider."""
+    methods = sum("browser" in p for p in config["providers"])
+    return tuple(f"/login/method/{n}" for n in range(methods)) + (ACCOUNT_PATH,)
+
+
 def transform(
     baseline,
     host,
@@ -532,9 +540,10 @@ def transform(
     config = yaml.safe_load(config_map["data"]["config.yaml"])
     if config["providers"] or config["store"]["enabled"] or not config["ui"]["enabled"]:
         raise ValueError("expected the provider-empty public branding fixture")
+    # Provider order is the chooser order: Basic (when enabled) precedes ECMWF.
     config["providers"] = [copy.deepcopy(PROVIDER)]
     config["jwt"]["secret"] = ""
-    config["ui"].setdefault("sign_in_actions", [])
+    config["ui"].setdefault("sso", [])
     config["ui"]["branding"]["logo_url"] = LOGO_PATH
     config["ui"]["browser_session"] = {
         "public_origin": f"https://{host}",
@@ -550,20 +559,18 @@ def transform(
             "operation_timeout_ms": 1000,
         },
     }
-    config["ui"]["ecmwf_api_key"] = {"provider_name": PROVIDER["name"]}
     if basic is not None:
         checked_basic_credentials(basic)
-        config["providers"].append(
+        config["providers"].insert(
+            0,
             {
                 "type": "plain",
                 "name": BASIC_PROVIDER_NAME,
                 "realm": BASIC_REALM,
                 "users": [],
-            }
+                "browser": {"label": BASIC_LABEL},
+            },
         )
-        config["ui"]["basic"] = {
-            "provider_name": BASIC_PROVIDER_NAME,
-        }
         config["augmenters"] = [
             {
                 "type": "plain_advanced",
@@ -577,7 +584,7 @@ def transform(
             }
         ]
     if oauth_key is not None:
-        realms = [PROVIDER["realm"]] + ([BASIC_REALM] if basic is not None else [])
+        realms = [p["realm"] for p in config["providers"] if p.get("browser")]
         config["oauth"] = oauth_config(host, oauth_kid(oauth_key), realms)
     config_map["data"]["config.yaml"] = yaml.safe_dump(config)
     deployment = next(d for d in resources if d["kind"] == "Deployment")
@@ -595,7 +602,7 @@ def transform(
     )
     ingress = next(d for d in resources if d["kind"] == "Ingress")
     paths = ingress["spec"]["rules"][0]["http"]["paths"]
-    for path in LOGIN_PATHS + (("/login/basic",) if basic is not None else ()):
+    for path in browser_login_paths(config):
         paths.append(
             {
                 "path": path,
@@ -623,7 +630,7 @@ def transform(
     )
     if basic is not None:
         private_config = copy.deepcopy(config)
-        private_config["providers"][-1]["users"] = [{**basic, "roles": []}]
+        private_config["providers"][0]["users"] = [{**basic, "roles": []}]
         private_yaml = yaml.safe_dump(private_config)
         resources[-1]["data"]["config.yaml"] = base64.b64encode(
             private_yaml.encode()
@@ -759,7 +766,7 @@ def render_api_key(
     host,
     image,
     token,
-    sign_in_actions=None,
+    sso=None,
     basic=None,
     *,
     valkey_password=None,
@@ -778,9 +785,7 @@ def render_api_key(
         checked_oauth_key({"private-key-pem": oauth_key})
     if basic is not None:
         checked_basic_credentials(basic)
-    baseline, archive = preview.render_preview(
-        project, chart, host, image, sign_in_actions
-    )
+    baseline, archive = preview.render_preview(project, chart, host, image, sso)
     options = dict(
         valkey_password=valkey_password,
         replicas=replicas,
