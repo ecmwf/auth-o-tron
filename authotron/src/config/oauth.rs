@@ -160,12 +160,14 @@ impl OAuthClient {
     }
 }
 
-/// Valid native callbacks: `http://127.0.0.1:49152/callback`, `http://localhost:49152/callback`.
-/// Invalid: `http://localhost/callback`, `http://127.0.0.2:49152/callback`.
+/// Valid native callbacks: `http://127.0.0.1:49152/callback`, `http://localhost/callback`.
+/// Invalid: `http://localhost:0/callback`, `http://127.0.0.2:49152/callback`.
+/// Loopback callbacks may omit the port because any request port matches them
+/// (see [`redirect_uri_matches`]).
 /// `localhost` is accepted as a deliberate interoperability deviation from RFC 8252 §8.3,
 /// because common native MCP clients register `localhost` loopback callbacks.
 fn validate_callback(value: &str, application_type: ApplicationType) -> Result<(), &'static str> {
-    let error = "OAuth callback must be an absolute HTTPS URI, or a native HTTP loopback URI (127.0.0.1, [::1] or localhost) with an explicit nonzero port; no userinfo, fragment, backslash, whitespace, controls or malformed percent escapes";
+    let error = "OAuth callback must be an absolute HTTPS URI, or a native HTTP loopback URI (127.0.0.1, [::1] or localhost) with an optional nonzero port; no userinfo, fragment, backslash, whitespace, controls or malformed percent escapes";
     if value.len() > 2048
         || !valid_percent_triplets(value)
         || value.contains('\\')
@@ -189,9 +191,7 @@ fn validate_callback(value: &str, application_type: ApplicationType) -> Result<(
     match uri.scheme_str() {
         Some("https") if url.scheme() == "https" => {}
         Some("http")
-            if application_type == ApplicationType::Native
-                && matches!(uri.host(), Some("127.0.0.1" | "[::1]" | "localhost"))
-                && uri.port_u16().is_some_and(|port| port != 0) => {}
+            if application_type == ApplicationType::Native && is_loopback_host(uri.host()) => {}
         _ => return Err(error),
     }
     if url.query_pairs().any(|(name, _)| {
@@ -202,8 +202,47 @@ fn validate_callback(value: &str, application_type: ApplicationType) -> Result<(
     }) {
         return Err("OAuth callback query must not contain reserved response parameters");
     }
-    // Retain the original string for exact matching, including port, path and query.
+    // Retain the original string for matching: exact, or port-agnostic for loopback.
     Ok(())
+}
+
+fn is_loopback_host(host: Option<&str>) -> bool {
+    matches!(host, Some("127.0.0.1" | "[::1]" | "localhost"))
+}
+
+/// Splits a literal `http://` loopback URI into `(host, port, path_and_query)`.
+/// Valid: `http://localhost:8080/cb?x=1` gives `("localhost", Some(8080), "/cb?x=1")`.
+/// Invalid (`None`): `https://localhost/cb`, `HTTP://localhost/cb`, `http://localhost:/cb`.
+fn split_loopback(value: &str) -> Option<(&str, Option<&str>, &str)> {
+    let rest = value.strip_prefix("http://")?;
+    let end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let (authority, path_and_query) = rest.split_at(end);
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && !authority.ends_with(']') => (host, Some(port)),
+        _ => (authority, None),
+    };
+    is_loopback_host(Some(host)).then_some((host, port, path_and_query))
+}
+
+/// Matches a requested callback against a validated registered callback. HTTPS callbacks
+/// match only by exact string. Loopback HTTP callbacks (RFC 8252 §7.3) match any
+/// canonical request port 1-65535 when host, path and query are literally identical;
+/// hosts are not interchangeable (`localhost` never matches `127.0.0.1`).
+/// Registered `http://127.0.0.1/cb`: valid `http://127.0.0.1:65535/cb`;
+/// invalid `http://127.0.0.1/cb`, `http://127.0.0.1:0/cb`, `http://127.0.0.1:080/cb`,
+/// `http://localhost:8080/cb`, `http://127.0.0.1:8080/cb?x=1`.
+pub(crate) fn redirect_uri_matches(registered: &str, requested: &str) -> bool {
+    let Some((host, _, path)) = split_loopback(registered) else {
+        return registered == requested;
+    };
+    let Some((requested_host, Some(port), requested_path)) = split_loopback(requested) else {
+        return false;
+    };
+    host == requested_host
+        && path == requested_path
+        && port
+            .parse::<u16>()
+            .is_ok_and(|parsed| parsed != 0 && parsed.to_string() == port)
 }
 
 /// Checks spelling only: `%20` and `%25` are valid; `%`, `%2` and `%GG` are invalid.
@@ -563,12 +602,16 @@ mod tests {
     }
 
     #[test]
-    fn native_http_requires_literal_loopback_and_fixed_nonzero_port() {
+    fn native_http_requires_literal_loopback_and_optional_nonzero_port() {
         for callback in [
             "http://127.0.0.1:49152/cb?fixed=1",
             "http://[::1]:49152/cb",
             "http://127.0.0.1:80/cb",
             "http://localhost:49152/cb",
+            "http://localhost/cb",
+            "http://127.0.0.1/cb",
+            "http://[::1]/cb",
+            "http://localhost",
         ] {
             let mut candidate = client(callback);
             assert!(candidate.validate().is_err());
@@ -577,7 +620,6 @@ mod tests {
             assert_eq!(candidate.redirect_uris[0], callback);
         }
         for callback in [
-            "http://localhost/cb",
             "http://localhost:0/cb",
             "http://LOCALHOST:49152/cb",
             "http://localhost.:49152/cb",
@@ -587,8 +629,6 @@ mod tests {
             "http://0177.0.0.1:49152/cb",
             "http://2130706433:49152/cb",
             "http://[::ffff:127.0.0.1]:49152/cb",
-            "http://127.0.0.1/cb",
-            "http://[::1]/cb",
             "http://127.0.0.1:0/cb",
             "http://127.0.0.1:/cb",
             "http://app.example.org:49152/cb",
@@ -603,5 +643,57 @@ mod tests {
         assert!(candidate.validate().is_ok());
         let case_distinct = client("https://app.example.org/cb?Code=fixed");
         assert!(case_distinct.validate().is_ok());
+    }
+
+    #[test]
+    fn loopback_redirects_match_any_port_with_identical_host_path_and_query() {
+        for (registered, requested) in [
+            ("http://127.0.0.1/cb?x=1", "http://127.0.0.1:1/cb?x=1"),
+            ("http://127.0.0.1/cb?x=1", "http://127.0.0.1:65535/cb?x=1"),
+            ("http://127.0.0.1:49152/cb", "http://127.0.0.1:51734/cb"),
+            ("http://[::1]/cb", "http://[::1]:8080/cb"),
+            ("http://localhost/cb", "http://localhost:33418/cb"),
+            ("http://localhost", "http://localhost:33418"),
+            ("http://localhost:49152/cb", "http://localhost:49152/cb"),
+            ("https://app.example.org/cb", "https://app.example.org/cb"),
+        ] {
+            assert!(redirect_uri_matches(registered, requested), "{requested}");
+        }
+        for (registered, requested) in [
+            ("http://127.0.0.1/cb", "http://127.0.0.1:8080/other"),
+            ("http://127.0.0.1/cb", "http://127.0.0.1:8080/cb/"),
+            ("http://127.0.0.1/cb?x=1", "http://127.0.0.1:8080/cb?x=2"),
+            ("http://127.0.0.1/cb", "http://127.0.0.1:8080/cb?x=1"),
+            ("http://127.0.0.1/cb", "http://127.0.0.1:8080/cb#f"),
+            ("http://127.0.0.1/cb", "http://localhost:8080/cb"),
+            ("http://localhost/cb", "http://127.0.0.1:8080/cb"),
+            ("http://localhost/cb", "http://LOCALHOST:8080/cb"),
+            ("http://[::1]/cb", "http://127.0.0.1:8080/cb"),
+            ("http://127.0.0.1/cb", "https://127.0.0.1:8080/cb"),
+            ("http://127.0.0.1/cb", "HTTP://127.0.0.1:8080/cb"),
+            ("http://127.0.0.1/cb", "http://u@127.0.0.1:8080/cb"),
+            ("http://127.0.0.1/cb", "http://127.0.0.1/cb?"),
+            ("http://127.0.0.1/cb", "http://127.0.0.1:0/cb"),
+            ("http://127.0.0.1/cb", "http://127.0.0.1:/cb"),
+            ("http://127.0.0.1/cb", "http://127.0.0.1:080/cb"),
+            ("http://127.0.0.1/cb", "http://127.0.0.1:+80/cb"),
+            ("http://127.0.0.1/cb", "http://127.0.0.1:65536/cb"),
+            ("http://127.0.0.1/cb", "http://127.0.0.1:http/cb"),
+            (
+                "https://app.example.org/cb",
+                "https://app.example.org:443/cb",
+            ),
+            (
+                "https://app.example.org/cb",
+                "https://app.example.org:8443/cb",
+            ),
+        ] {
+            assert!(!redirect_uri_matches(registered, requested), "{requested}");
+        }
+        // A portless registration is never requestable without an explicit port.
+        assert!(!redirect_uri_matches(
+            "http://127.0.0.1/cb",
+            "http://127.0.0.1/cb"
+        ));
     }
 }

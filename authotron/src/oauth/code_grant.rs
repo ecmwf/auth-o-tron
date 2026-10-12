@@ -505,6 +505,33 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
+    async fn loopback_any_port_registration_still_requires_exact_redemption_callback() {
+        let (mut cfg, id, approval, now) = approved(300, 300).await;
+        let grant = CodeGrant::from_consent(approval, &cfg, &id, &[7; 32], now).unwrap();
+        cfg.clients[0].redirect_uris = vec!["http://127.0.0.1/cb".into()];
+        let restored = CodeGrant::decode(&grant.encode().unwrap(), &cfg, now).unwrap();
+        assert_eq!(restored.redirect_uri(), CALLBACK);
+        assert!(
+            restored
+                .validate_redemption(CLIENT, CALLBACK, RESOURCE, VERIFIER, &cfg, now)
+                .is_ok()
+        );
+        for other in [
+            "http://127.0.0.1:49153/cb",
+            "http://127.0.0.1/cb",
+            "http://localhost:49152/cb",
+        ] {
+            assert_eq!(
+                restored
+                    .validate_redemption(CLIENT, other, RESOURCE, VERIFIER, &cfg, now)
+                    .err(),
+                Some(CodeGrantError::InvalidRedemption),
+                "{other}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn private_codec_rechecks_registry_policy_and_original_transaction_ceiling() {
         let (cfg, id, approval, now) = approved(30, 300).await;
         let grant = CodeGrant::from_consent(approval, &cfg, &id, &[7; 32], now).unwrap();

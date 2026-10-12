@@ -173,7 +173,11 @@ pub fn validate_authorization_request(
         .find(|c| c.client_id == client_id)
         .ok_or(UnauthorizedClient)?;
     let redirect_uri = required("redirect_uri")?;
-    if !client.redirect_uris.iter().any(|uri| uri == redirect_uri) {
+    if !client
+        .redirect_uris
+        .iter()
+        .any(|uri| crate::config::oauth::redirect_uri_matches(uri, redirect_uri))
+    {
         return Err(InvalidRequest);
     }
     if required("response_type")? != "code" {
@@ -446,5 +450,46 @@ mod tests {
         let mut params = parameters();
         set(&mut params, "state", "other".into());
         assert!(!base.same_request(&parse(&cfg, query(&params).as_bytes()).unwrap()));
+    }
+    #[test]
+    fn loopback_registration_accepts_any_port_and_retains_requested_callback() {
+        let mut cfg = config();
+        cfg.clients[0].application_type = crate::config::oauth::ApplicationType::Native;
+        cfg.clients[0].redirect_uris = vec![
+            "http://127.0.0.1/cb?x=1".into(),
+            "http://localhost/cb".into(),
+            CALLBACK.into(),
+        ];
+        for callback in [
+            "http://127.0.0.1:1/cb?x=1",
+            "http://127.0.0.1:65535/cb?x=1",
+            "http://127.0.0.1:51734/cb?x=1",
+            "http://localhost:33418/cb",
+            CALLBACK,
+        ] {
+            let mut params = parameters();
+            set(&mut params, "redirect_uri", callback.into());
+            let request = parse(&cfg, query(&params).as_bytes()).unwrap();
+            assert_eq!(request.redirect_uri(), callback);
+        }
+        for callback in [
+            "http://127.0.0.1/cb?x=1",
+            "http://127.0.0.1:0/cb?x=1",
+            "http://127.0.0.1:abc/cb?x=1",
+            "http://127.0.0.1:8080/cb?x=2",
+            "http://127.0.0.1:8080/other?x=1",
+            "http://localhost:8080/cb?x=1",
+            "http://127.0.0.1:8080/cb",
+            "https://127.0.0.1:8080/cb?x=1",
+            "https://app.test:8443/cb?fixed=a%20b",
+        ] {
+            let mut params = parameters();
+            set(&mut params, "redirect_uri", callback.into());
+            assert_eq!(
+                parse(&cfg, query(&params).as_bytes()).err(),
+                Some(InvalidRequest),
+                "{callback}"
+            );
+        }
     }
 }

@@ -223,11 +223,21 @@ CORS is disabled; cross-origin public SPAs are not supported in this baseline.
 ## Policy, time and storage
 
 Requests require exact client/callback/resource and all requested scopes. There is no
-URI aliasing, partial consent, first-party skip or variable native loopback-port matching.
+URI aliasing, partial consent or first-party skip.
 Web callbacks require HTTPS; native callbacks additionally permit HTTP loopback
-on `127.0.0.1`, `[::1]` or `localhost` with an explicit fixed port. Accepting `localhost`
+on `127.0.0.1`, `[::1]` or `localhost`, with or without a port. Accepting `localhost`
 deliberately deviates from RFC 8252 §8.3 for interoperability: Claude Code, MCP Inspector,
-Cursor and Gemini CLI use `localhost` callbacks. Callback userinfo/fragments/control characters, malformed
+Cursor and Gemini CLI use `localhost` callbacks.
+
+Loopback callbacks match port-agnostically (RFC 8252 §7.3): a registered
+`http://127.0.0.1/callback` (or one with any port) matches an authorization request for
+`http://127.0.0.1:<port>/callback` with any canonical port 1–65535. The request must carry
+an explicit port; scheme, host, path and query must be literally identical. Hosts are
+compared case-sensitively and are not interchangeable: a `localhost` registration does not
+match `127.0.0.1` or `[::1]`, so register each host a client uses. HTTPS callbacks always
+match exactly. The exact requested callback is stored with the authorization transaction,
+used for the consent CSP `form-action` origin and the final redirect, and must be repeated
+byte-for-byte at token exchange. Callback userinfo/fragments/control characters, malformed
 percent escapes, and reserved response query names are rejected. Resource URIs also
 reject malformed percent escapes; valid escapes retain their literal spelling rather
 than being decoded for matching. Resources are canonical HTTPS and explicitly

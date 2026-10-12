@@ -229,6 +229,28 @@ mod tests {
         )
     }
     #[test]
+    fn decode_revalidates_any_port_loopback_callback_and_keeps_exact_spelling() {
+        let (mut config, record) = fixture();
+        config.clients[0].application_type = crate::config::oauth::ApplicationType::Native;
+        config.clients[0].redirect_uris = vec!["http://localhost/cb".into()];
+        let mut dto: Value = serde_json::from_slice(&record.encode().unwrap()).unwrap();
+        for (callback, accepted) in [
+            ("http://localhost:1/cb", true),
+            ("http://localhost:65535/cb", true),
+            ("http://localhost/cb", false),
+            ("http://localhost:0/cb", false),
+            ("http://127.0.0.1:8080/cb", false),
+        ] {
+            dto["redirect_uri"] = json!(callback);
+            let bytes = serde_json::to_vec(&dto).unwrap();
+            let restored = AuthorizationTransaction::decode(&bytes, &config, 1);
+            assert_eq!(restored.is_ok(), accepted, "{callback}");
+            if let Ok(restored) = restored {
+                assert_eq!(restored.request().redirect_uri(), callback);
+            }
+        }
+    }
+    #[test]
     fn round_trip_known_fields_binding_and_exact_expiry_boundary() {
         let (config, record) = fixture();
         let bytes = record.encode().unwrap();
