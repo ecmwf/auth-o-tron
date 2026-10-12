@@ -23,10 +23,10 @@ containers; the workflow does not provision fixed-port services. Docker must be
 available and able to pull the fixture images. Loopback tests run with proxy
 variables unset and `NO_PROXY=127.0.0.1,localhost`.
 
-The separate MSRV job executes
-`cargo +1.88.0 check --locked --workspace --all-targets --all-features` (the
-workflow selects that toolchain as its default). The existing Rust 1.90 release
-container build is also retained, with locked dependency resolution.
+The separate MSRV job runs
+`cargo check --locked --workspace --all-targets --all-features` on toolchain
+1.88.0. A release job builds in `rust:1.90-slim-bookworm`, matching the
+Dockerfile, with `--locked`.
 
 ## Python and Helm
 
@@ -48,8 +48,7 @@ cargo build --locked -p authotron --bin authotron
 The renderer/private-path suites mock Helm and need no sibling chart checkout.
 The additional preview smoke check
 uses Helm **4.0.1** and an explicit `.ci-chart` checkout of
-`ecmwf/auth-o-tron-chart` at **c5531f45a9652a89c21e067bc0167f7660ecd4b6**
-(chart 0.4.0). Its dependencies are vendored at that revision; no Helm repository
+`ecmwf/auth-o-tron-chart` at the SHA pinned in `workflows/ci.yaml`. Its dependencies are vendored at that revision; no Helm repository
 update or dependency download is needed. The synthetic build-image digest is
 only rendered, never pulled or executed.
 
@@ -58,6 +57,18 @@ not track chart main or unpublished local fixes. Advancing the cross-repository
 contract requires explicitly updating the SHA after the desired chart commit
 is published. The pin checks the ordinary preview profile; chart-specific
 regressions and contracts belong to chart CI.
+
+## Cross-repository pins
+
+The chart pin above lives only in `workflows/ci.yaml`; the chart repository's
+reverse pin lives only in its `tests/application-contract.json`. The pins are
+independent: the pinned chart may predate the chart's current version. Bump
+them in this order:
+
+1. Publish the server commit.
+2. Regenerate the chart's application contract fixture against it.
+3. Publish the chart commit.
+4. Update the chart SHA in `workflows/ci.yaml`.
 
 For MCP, set `AUTHOTRON_DEMO_BIN` to the absolute path of the built
 `target/debug/authotron`, then run `python -m pytest -v` from

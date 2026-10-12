@@ -24,7 +24,7 @@ class PreviewTests(unittest.TestCase):
             path = self.project / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("public build input\n")
-        for name in render.SOURCE_DIRS:
+        for name in render.RESERVED_SOURCE_DIRS:
             path = self.project / name / "lib.rs"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("// public source\n")
@@ -239,7 +239,7 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(first, render.source_archive(self.project))
         with tarfile.open(fileobj=io.BytesIO(first), mode="r:gz") as archive:
             expected = set(render.SOURCE_FILES) | {
-                f"{directory}/lib.rs" for directory in render.SOURCE_DIRS
+                f"{directory}/lib.rs" for directory in render.RESERVED_SOURCE_DIRS
             }
             self.assertEqual(set(archive.getnames()), expected)
 
@@ -257,7 +257,7 @@ class PreviewTests(unittest.TestCase):
         reads = set()
         secrets = [
             self.project / directory / filename
-            for directory in render.SOURCE_DIRS
+            for directory in render.RESERVED_SOURCE_DIRS
             for filename in (
                 ".env",
                 "credentials.json",

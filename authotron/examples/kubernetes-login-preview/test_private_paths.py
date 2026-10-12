@@ -18,11 +18,11 @@ class PrivatePathTests(unittest.TestCase):
 
     def checked(self, path):
         return private_paths.checked_private_path(
-            path, self.project, render.SOURCE_FILES, render.SOURCE_DIRS
+            path, self.project, render.SOURCE_FILES, render.RESERVED_SOURCE_DIRS
         )
 
     def test_absent_archive_paths_are_rejected_without_git(self):
-        for name in (*render.SOURCE_FILES, *render.SOURCE_DIRS):
+        for name in (*render.SOURCE_FILES, *render.RESERVED_SOURCE_DIRS):
             for suffix in ("", "/private.json"):
                 path = self.project / (name + suffix)
                 with self.subTest(path=path), self.assertRaises(ValueError):

@@ -17,22 +17,21 @@ from urllib.parse import quote
 
 import yaml
 
-_spec = importlib.util.spec_from_file_location(
-    "login_preview", Path(__file__).parents[1] / "kubernetes-login-preview/render.py"
+_EXAMPLES = Path(__file__).parents[1]
+
+
+def _load_module(name, relative_path):
+    spec = importlib.util.spec_from_file_location(name, _EXAMPLES / relative_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+preview = _load_module("login_preview", "kubernetes-login-preview/render.py")
+private_paths = _load_module(
+    "preview_private_paths", "kubernetes-login-preview/private_paths.py"
 )
-preview = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(preview)
-_spec = importlib.util.spec_from_file_location(
-    "preview_private_paths",
-    Path(__file__).parents[1] / "kubernetes-login-preview/private_paths.py",
-)
-private_paths = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(private_paths)
-_spec = importlib.util.spec_from_file_location(
-    "shared_images", Path(__file__).parents[1] / "shared_images.py"
-)
-shared_images = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(shared_images)
+shared_images = _load_module("shared_images", "shared_images.py")
 NAMESPACE = preview.NAMESPACE
 SECRET_NAME = "authotron-browser-sso"
 INGRESS_PEER = {
@@ -51,8 +50,8 @@ PREFIX = "authotron-sso-"
 SESSION_SECONDS = 900
 REFRESH_SECONDS = 30
 IMAGES = {
-    # Multiarchitecture index pins: Keycloak 26.8.0, proxy 7.15.5,
-    # Valkey 9.1.2-alpine and unprivileged Nginx 1.28.2-alpine.
+    # Multiarchitecture index pins: Keycloak 26.8.0, proxy 7.15.5 and
+    # unprivileged Nginx 1.28.2-alpine; Valkey is pinned in shared_images.py.
     "keycloak": "quay.io/keycloak/keycloak@sha256:27b3230fbabb8c9ff3c66c864cf09dcd8a41aca82e5100679d109ef0eeb05741",
     "oauth2-proxy": "quay.io/oauth2-proxy/oauth2-proxy@sha256:8498b0d0ef0a7b29686414000a08aee467f02d0299c9ed1e006a8f33fc017916",
     "valkey": shared_images.VALKEY_IMAGE,
@@ -687,8 +686,10 @@ def secret_resource(bundle):
 
 
 def bind_credentials(resources, bundle):
-    """Roll only consumers of each credential; keep raw values out of Pod metadata."""
-    validate_secrets(bundle)
+    """Roll only consumers of each credential; keep raw values out of Pod metadata.
+
+    Callers validate ``bundle`` first (via ``secret_resource``).
+    """
     for doc in resources:
         if doc["kind"] != "Deployment":
             continue
@@ -781,7 +782,7 @@ def write_file(path, data, private=False, exclusive=False):
 def checked_private_path(path, project):
     return check_path(
         private_paths.checked_private_path(
-            path, project, preview.SOURCE_FILES, preview.SOURCE_DIRS
+            path, project, preview.SOURCE_FILES, preview.RESERVED_SOURCE_DIRS
         )
     )
 

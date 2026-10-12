@@ -5,7 +5,7 @@ edition = "2024"
 description = "Shared authentication DTOs for the auth-o-tron ecosystem."
 license = "Apache-2.0"
 repository = "https://github.com/ecmwf/auth-o-tron"
-rust-version = "1.85"
+rust-version = "1.88"
 
 [dependencies]
 serde = { version = "~1.0", features = ["derive"] }

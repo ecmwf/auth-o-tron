@@ -91,6 +91,7 @@ class RendererTests(unittest.TestCase):
             "cookie-secret": {"oauth2-proxy"},
             "valkey-password": {"valkey", "oauth2-proxy"},
         }
+        self.assertEqual(set(consumers), set(renderer.SECRET_KEYS))
         for key, roles in consumers.items():
             with self.subTest(key=key):
                 bundle = dict(self.bundle)
@@ -471,7 +472,7 @@ class RendererTests(unittest.TestCase):
             path = self.project / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("public build fixture\n")
-        for name in preview.SOURCE_DIRS:
+        for name in preview.RESERVED_SOURCE_DIRS:
             directory = self.project / name
             directory.mkdir(parents=True, exist_ok=True)
             (directory / "lib.rs").write_text("// public fixture\n")
@@ -703,9 +704,12 @@ class RendererTests(unittest.TestCase):
         self.assertFalse((self.root / "secret.json").exists())
 
     def test_secret_generation_rejects_archive_paths_without_git(self):
-        for name in (*renderer.preview.SOURCE_FILES, *renderer.preview.SOURCE_DIRS):
+        for name in (
+            *renderer.preview.SOURCE_FILES,
+            *renderer.preview.RESERVED_SOURCE_DIRS,
+        ):
             path = self.project / name
-            if name in renderer.preview.SOURCE_DIRS:
+            if name in renderer.preview.RESERVED_SOURCE_DIRS:
                 path /= "private.json"
             with self.subTest(path=path), self.assertRaises(ValueError):
                 renderer.load_or_create_secrets(path, project=self.project)
@@ -749,7 +753,8 @@ class RendererTests(unittest.TestCase):
         output = self.root / "output"
         paths = [self.project / name for name in renderer.preview.SOURCE_FILES]
         paths += [
-            self.project / name / "private" for name in renderer.preview.SOURCE_DIRS
+            self.project / name / "private"
+            for name in renderer.preview.RESERVED_SOURCE_DIRS
         ]
         for path in paths:
             with self.subTest(path=path):
@@ -789,7 +794,9 @@ class RendererTests(unittest.TestCase):
         (self.project / ".git/config").unlink()
         (self.project / ".git").rmdir()
         sentinel = "synthetic-sentinel-secret-must-not-be-packaged"
-        secret_path = self.project / renderer.preview.SOURCE_DIRS[0] / "private.json"
+        secret_path = (
+            self.project / renderer.preview.RESERVED_SOURCE_DIRS[0] / "private.json"
+        )
         with patch.object(renderer.secrets, "token_urlsafe", return_value=sentinel):
             with self.assertRaises(ValueError):
                 renderer.load_or_create_secrets(secret_path, project=self.project)

@@ -37,7 +37,7 @@ ANNOTATIONS = {
     "dns.operators.ecmwf.int/on-transport-server": "vs-transport-https",
 }
 # Reviewed public build-input manifest, not an extension filter or Git snapshot.
-# Add new modules/assets here explicitly; SOURCE_DIRS only reserves private paths.
+# Add new modules/assets here explicitly; RESERVED_SOURCE_DIRS only reserves private paths.
 SOURCE_FILES = (
     "Cargo.toml",
     "Cargo.lock",
@@ -129,7 +129,7 @@ SOURCE_FILES = (
     "authotron/src/utils/valkey.rs",
     "authotron/src/utils/value.rs",
 )
-SOURCE_DIRS = ("authotron/src", "authotron-types/src", "authotron-client/src")
+RESERVED_SOURCE_DIRS = ("authotron/src", "authotron-types/src", "authotron-client/src")
 ALLOWED_API_KIND_PAIRS = {
     ("v1", "ConfigMap"),
     ("v1", "Service"),

@@ -17,7 +17,7 @@ Packaging reads the current bytes of those exact paths, so local source edits an
 source exports without Git metadata work identically. Missing inputs or symlinked
 inputs/ancestors fail closed. Unlisted files are never enumerated or read: this
 excludes `.env`, credential JSON, and even a credential disguised as a new `.rs`
-file under a source directory. `SOURCE_DIRS` reserves private-output locations;
+file under a source directory. `RESERVED_SOURCE_DIRS` reserves private-output locations;
 it does not authorize recursive packaging. When adding or renaming build inputs,
 update the manifest after reviewing the paths as public source. Never put private
 data in a listed input: the manifest authorizes its entire current content, not

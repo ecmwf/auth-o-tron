@@ -37,7 +37,7 @@ class RendererTests(unittest.TestCase):
             path = self.project / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("public build input\n")
-        for name in renderer.preview.SOURCE_DIRS:
+        for name in renderer.preview.RESERVED_SOURCE_DIRS:
             path = self.project / name / "lib.rs"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("// public source\n")
@@ -603,7 +603,7 @@ class RendererTests(unittest.TestCase):
         for source in renderer.preview.SOURCE_FILES:
             with self.assertRaises(ValueError):
                 renderer.checked_credential_path(self.project / source, self.project)
-        for source in renderer.preview.SOURCE_DIRS:
+        for source in renderer.preview.RESERVED_SOURCE_DIRS:
             with self.assertRaises(ValueError):
                 renderer.checked_credential_path(self.project / source, self.project)
             with self.assertRaises(ValueError):
@@ -786,7 +786,11 @@ class RendererTests(unittest.TestCase):
             ["--valkey-secret-file", str(self.root / "jwt.json/child")],
             [
                 "--valkey-secret-file",
-                str(self.project / renderer.preview.SOURCE_DIRS[0] / "private.json"),
+                str(
+                    self.project
+                    / renderer.preview.RESERVED_SOURCE_DIRS[0]
+                    / "private.json"
+                ),
             ],
             ["--output-dir", str(self.project / renderer.preview.SOURCE_FILES[0])],
         ]

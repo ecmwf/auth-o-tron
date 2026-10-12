@@ -5,7 +5,7 @@ edition = "2024"
 description = "HTTP client for auth-o-tron: JWT decode, cache, and EmailKey conversion."
 license = "Apache-2.0"
 repository = "https://github.com/ecmwf/auth-o-tron"
-rust-version = "1.85"
+rust-version = "1.88"
 publish = false
 
 [dependencies]

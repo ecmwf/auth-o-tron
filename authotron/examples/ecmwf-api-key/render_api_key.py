@@ -16,23 +16,21 @@ from urllib.parse import urlsplit
 
 import yaml
 
-_spec = importlib.util.spec_from_file_location(
-    "ecmwf_login_preview",
-    Path(__file__).parents[1] / "kubernetes-login-preview/render.py",
+_EXAMPLES = Path(__file__).parents[1]
+
+
+def _load_module(name, relative_path):
+    spec = importlib.util.spec_from_file_location(name, _EXAMPLES / relative_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+preview = _load_module("ecmwf_login_preview", "kubernetes-login-preview/render.py")
+private_paths = _load_module(
+    "preview_private_paths", "kubernetes-login-preview/private_paths.py"
 )
-preview = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(preview)
-_spec = importlib.util.spec_from_file_location(
-    "preview_private_paths",
-    Path(__file__).parents[1] / "kubernetes-login-preview/private_paths.py",
-)
-private_paths = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(private_paths)
-_spec = importlib.util.spec_from_file_location(
-    "shared_images", Path(__file__).parents[1] / "shared_images.py"
-)
-shared_images = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(shared_images)
+shared_images = _load_module("shared_images", "shared_images.py")
 NAMESPACE = preview.NAMESPACE
 SECRET_NAME = "authotron-ecmwf-browser"
 PROVIDER = {
@@ -276,7 +274,7 @@ def outside_git(path):
 
 def checked_output_directory(path, project):
     return private_paths.checked_private_path(
-        path, project, preview.SOURCE_FILES, preview.SOURCE_DIRS
+        path, project, preview.SOURCE_FILES, preview.RESERVED_SOURCE_DIRS
     )
 
 
