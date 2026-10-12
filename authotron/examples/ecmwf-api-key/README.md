@@ -287,7 +287,14 @@ augmenters:
 Clients must use the issuer
 **`https://authotron-playground.lumi.apps.dte.destination-earth.eu/`** (with the
 trailing slash), which matches `ui.browser_session.public_origin`. Its metadata is
-at `/.well-known/oauth-authorization-server`. Access tokens live **3600 seconds**
+at `/.well-known/oauth-authorization-server`. The issuer is identical in that
+metadata, in the MCP server's protected resource metadata (`authorization_servers`),
+in the RFC 9207 `iss` callback parameter and in tokens. MCP SDK clients may log
+`SEP-2352: stored OAuth credential has no 'issuer' stamp … isolation is inactive`.
+This is a client-side notice about credentials saved before the SDK recorded which
+authorization server issued them. It does not come from the server. Signing in again,
+for example by clearing the server's stored authentication in the client, stores a
+stamped credential. Access tokens live **3600 seconds**
 (the server maximum; default 300). Every client registration enables rotating
 refresh tokens (`refresh_tokens: {enabled: true, idle_ttl_seconds: 2592000,
 absolute_ttl_seconds: 7776000}`). A client stays signed in for up to 90 days after
