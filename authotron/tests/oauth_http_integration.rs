@@ -42,8 +42,8 @@ fn fixture(uri: &str) -> (tempfile::NamedTempFile, ConfigV2) {
     file.write_all(pem.as_bytes()).unwrap();
     let config = serde_json::from_value(json!({
         "store": {"enabled": false}, "services": [],
-        "providers": [{"type": "plain", "name": "basic", "realm": "local", "users": [{"username": "alice", "password": "päss:秘密", "roles": ["reader", "unrelated"]}], "browser": {"label": "Password"}},
-            {"type": "ecmwf-api", "name": "api", "realm": "ecmwf", "uri": uri, "browser": {"label": "ECMWF API key"}}],
+        "providers": [{"type": "plain", "name": "basic", "realm": "local", "users": [{"username": "alice", "password": "päss:秘密", "roles": ["reader", "unrelated"]}], "browser": {"id": "password", "label": "Password"}},
+            {"type": "ecmwf-api", "name": "api", "realm": "ecmwf", "uri": uri, "browser": {"id": "ecmwf-api-key", "label": "ECMWF API key"}}],
         "augmenters": [{"type": "plain", "name": "reader", "realm": "ecmwf", "roles": {"reader": ["public-user"]}}],
         "server": {"host": "127.0.0.1", "port": 0}, "metrics": {"enabled": false},
         "jwt": {"iss": "legacy", "exp": 300, "secret": "public-legacy-only"}, "logging": {"level": "warn", "format": "console"},
@@ -203,7 +203,7 @@ async fn admission_isolation(a: &Router, b: &Router) {
         StatusCode::TOO_MANY_REQUESTS
     );
     assert_eq!(
-        get(b, "/login/method/0", &attacker).await.status(),
+        get(b, "/login/method/password", &attacker).await.status(),
         StatusCode::OK
     );
 }
@@ -246,7 +246,7 @@ async fn authorize_only_reuses_the_exact_validated_request_in_every_state() {
         .push("write".into());
     let (app, _) = startup::build_app(Arc::new(config)).await.unwrap();
     let mut jar = Jar::default();
-    let (csrf, tx) = login_form(&app, &mut jar, "/login/method/0").await;
+    let (csrf, tx) = login_form(&app, &mut jar, "/login/method/password").await;
     for phase in 0..3 {
         if phase == 1 {
             let fields = [
@@ -255,7 +255,11 @@ async fn authorize_only_reuses_the_exact_validated_request_in_every_state() {
                 ("username", "alice"),
                 ("password", "päss:秘密"),
             ];
-            let response = send(&app, post("/login/method/0", &jar, &fields, Some(ORIGIN))).await;
+            let response = send(
+                &app,
+                post("/login/method/password", &jar, &fields, Some(ORIGIN)),
+            )
+            .await;
             assert_eq!(response.status(), StatusCode::SEE_OTHER);
             jar.update(&response);
         } else if phase == 2 {
@@ -337,7 +341,7 @@ async fn malformed_partial_and_duplicate_oauth_cookies_recover_only_on_get() {
     let (_key, config) = fixture("http://127.0.0.1:9");
     let (app, _) = startup::build_app(Arc::new(config)).await.unwrap();
     let mut jar = Jar::default();
-    let (csrf, tx) = login_form(&app, &mut jar, "/login/method/0").await;
+    let (csrf, tx) = login_form(&app, &mut jar, "/login/method/password").await;
     let headers = [
         format!("__Host-authotron_oauth={tx}"),
         format!(
@@ -353,7 +357,11 @@ async fn malformed_partial_and_duplicate_oauth_cookies_recover_only_on_get() {
         ),
     ];
     for cookies in headers {
-        for path in ["/login", "/login/method/0", "/login/method/1"] {
+        for path in [
+            "/login",
+            "/login/method/password",
+            "/login/method/ecmwf-api-key",
+        ] {
             let response = send(
                 &app,
                 Request::get(path)
@@ -365,7 +373,7 @@ async fn malformed_partial_and_duplicate_oauth_cookies_recover_only_on_get() {
             assert_explicit_recovery(response, &jar).await;
         }
         let mut request = post(
-            "/login/method/0",
+            "/login/method/password",
             &jar,
             &[
                 ("csrf", &csrf),
@@ -386,11 +394,11 @@ async fn malformed_partial_and_duplicate_oauth_cookies_recover_only_on_get() {
 
 async fn consent_binding_recovery(app: &Router) {
     let mut jar = Jar::default();
-    let (csrf, tx) = login_form(app, &mut jar, "/login/method/0").await;
+    let (csrf, tx) = login_form(app, &mut jar, "/login/method/password").await;
     let response = send(
         app,
         post(
-            "/login/method/0",
+            "/login/method/password",
             &jar,
             &[
                 ("csrf", &csrf),
@@ -418,7 +426,11 @@ async fn consent_binding_recovery(app: &Router) {
     let response = send(app, post("/oauth/consent", &wrong, &fields, Some(ORIGIN))).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(!response.headers().contains_key(header::LOCATION));
-    for path in ["/login", "/login/method/0", "/login/method/1"] {
+    for path in [
+        "/login",
+        "/login/method/password",
+        "/login/method/ecmwf-api-key",
+    ] {
         assert_explicit_recovery(get(app, path, &wrong).await, &wrong).await;
     }
     // Neither the rejected POST nor GET recovery consumes the legitimate flow.
@@ -445,14 +457,18 @@ async fn login_get_recovers_lost_state_and_resumes_advanced_state_without_post_d
     let config = Arc::new(config);
     let (app, _) = startup::build_app(config.clone()).await.unwrap();
     let mut jar = Jar::default();
-    let (csrf, tx) = login_form(&app, &mut jar, "/login/method/0").await;
+    let (csrf, tx) = login_form(&app, &mut jar, "/login/method/password").await;
     let fields = [
         ("csrf", csrf.as_str()),
         ("oauth_transaction", tx.as_str()),
         ("username", "alice"),
         ("password", "päss:秘密"),
     ];
-    let response = send(&app, post("/login/method/0", &jar, &fields, Some(ORIGIN))).await;
+    let response = send(
+        &app,
+        post("/login/method/password", &jar, &fields, Some(ORIGIN)),
+    )
+    .await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     jar.update(&response);
     for consent_ready in [false, true] {
@@ -476,7 +492,7 @@ async fn login_get_recovers_lost_state_and_resumes_advanced_state_without_post_d
     assert!(text(response).await.contains("Restart authorization"));
     let response = send(
         &restarted,
-        post("/login/method/0", &cleared, &fields, Some(ORIGIN)),
+        post("/login/method/password", &cleared, &fields, Some(ORIGIN)),
     )
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
@@ -491,16 +507,18 @@ async fn login_get_recovers_lost_state_and_resumes_advanced_state_without_post_d
                 .starts_with("__Host-authotron_session="))
     );
     assert_eq!(
-        get(&restarted, "/login/method/0", &cleared).await.status(),
+        get(&restarted, "/login/method/password", &cleared)
+            .await
+            .status(),
         StatusCode::OK
     );
 }
 async fn complete(a: &Router, b: &Router, api: bool) {
     let mut jar = Jar::default();
     let path = if api {
-        "/login/method/1"
+        "/login/method/ecmwf-api-key"
     } else {
-        "/login/method/0"
+        "/login/method/password"
     };
     let (csrf, tx) = login_form(a, &mut jar, path).await;
     let mut fields = vec![("csrf", csrf.as_str()), ("oauth_transaction", tx.as_str())];
@@ -665,7 +683,7 @@ async fn invalid_authorization_and_stale_login_forms_never_verify_or_redirect() 
         assert!(response.headers().get(header::LOCATION).is_none());
     }
     let mut jar = Jar::default();
-    let (csrf, old_tx) = login_form(&app, &mut jar, "/login/method/1").await;
+    let (csrf, old_tx) = login_form(&app, &mut jar, "/login/method/ecmwf-api-key").await;
     // A distinct browser starts a different flow; posting the old form with the
     // new flow's cookie pair must still fail before credential verification.
     let response = get(
@@ -681,13 +699,16 @@ async fn invalid_authorization_and_stale_login_forms_never_verify_or_redirect() 
             fields.push(("oauth_transaction", tx));
         }
         assert_eq!(
-            send(&app, post("/login/method/1", &jar, &fields, Some(ORIGIN)))
-                .await
-                .status(),
+            send(
+                &app,
+                post("/login/method/ecmwf-api-key", &jar, &fields, Some(ORIGIN))
+            )
+            .await
+            .status(),
             StatusCode::FORBIDDEN
         );
     }
-    let form = get(&app, "/login/method/1", &jar).await;
+    let form = get(&app, "/login/method/ecmwf-api-key", &jar).await;
     jar.update(&form);
     let html = text(form).await;
     let csrf = hidden(&html, "csrf");
@@ -698,12 +719,15 @@ async fn invalid_authorization_and_stale_login_forms_never_verify_or_redirect() 
         ("api_key", "public-key"),
     ];
     assert_eq!(
-        send(&app, post("/login/method/1", &jar, &fields, None))
-            .await
-            .status(),
+        send(
+            &app,
+            post("/login/method/ecmwf-api-key", &jar, &fields, None)
+        )
+        .await
+        .status(),
         StatusCode::FORBIDDEN
     );
-    let mut duplicate = post("/login/method/1", &jar, &fields, Some(ORIGIN));
+    let mut duplicate = post("/login/method/ecmwf-api-key", &jar, &fields, Some(ORIGIN));
     duplicate.headers_mut().append(
         header::COOKIE,
         format!("__Host-authotron_oauth={tx}").parse().unwrap(),
@@ -716,11 +740,11 @@ async fn consent_requires_origin_nonce_and_exact_decision_and_denial_has_no_code
     let (_key, config) = fixture("http://127.0.0.1:9");
     let (app, _) = startup::build_app(Arc::new(config)).await.unwrap();
     let mut jar = Jar::default();
-    let (csrf, tx) = login_form(&app, &mut jar, "/login/method/0").await;
+    let (csrf, tx) = login_form(&app, &mut jar, "/login/method/password").await;
     let failed = send(
         &app,
         post(
-            "/login/method/0",
+            "/login/method/password",
             &jar,
             &[
                 ("csrf", &csrf),
@@ -741,7 +765,7 @@ async fn consent_requires_origin_nonce_and_exact_decision_and_denial_has_no_code
     let response = send(
         &app,
         post(
-            "/login/method/0",
+            "/login/method/password",
             &jar,
             &[
                 ("csrf", &csrf),
@@ -838,6 +862,98 @@ async fn consent_requires_origin_nonce_and_exact_decision_and_denial_has_no_code
     assert_eq!(query["error"], "access_denied");
     assert!(!query.contains_key("code"));
     assert_eq!(query["state"], "opaque+client");
+}
+/// Valid credentials for an identity that fails scope policy end the authorization with
+/// an RFC 6749 `access_denied` redirect; wrong credentials still re-render the form.
+#[tokio::test]
+async fn policy_denied_identity_redirects_access_denied_and_consumes_transaction() {
+    for case in ["role", "realm"] {
+        let (_key, mut config) = fixture("http://127.0.0.1:9");
+        match case {
+            "role" => config.oauth.resources[0].scopes[0]
+                .required_roles
+                .push("public-admin".into()),
+            _ => config.oauth.resources[0].allowed_realms = vec!["ecmwf".into()],
+        }
+        let (app, state) = startup::build_app(Arc::new(config)).await.unwrap();
+        let mut jar = Jar::default();
+        let (csrf, tx) = login_form(&app, &mut jar, "/login/method/password").await;
+        let wrong = send(
+            &app,
+            post(
+                "/login/method/password",
+                &jar,
+                &[
+                    ("csrf", &csrf),
+                    ("oauth_transaction", &tx),
+                    ("username", "alice"),
+                    ("password", "public-wrong-password"),
+                ],
+                Some(ORIGIN),
+            ),
+        )
+        .await;
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED, "{case}");
+        assert!(wrong.headers().get(header::LOCATION).is_none());
+        jar.update(&wrong);
+        let csrf = hidden(&text(wrong).await, "csrf");
+        let stale = jar.clone();
+        let fields = [
+            ("csrf", csrf.as_str()),
+            ("oauth_transaction", tx.as_str()),
+            ("username", "alice"),
+            ("password", "päss:秘密"),
+        ];
+        let response = send(
+            &app,
+            post("/login/method/password", &jar, &fields, Some(ORIGIN)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER, "{case}");
+        let location = response.headers()[header::LOCATION].to_str().unwrap();
+        let url = url::Url::parse(location).unwrap();
+        assert_eq!(
+            format!("{}://{}{}", url.scheme(), url.authority(), url.path()),
+            "http://127.0.0.1:49152/callback"
+        );
+        let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(query["installation"], "test");
+        assert_eq!(query["error"], "access_denied");
+        assert_eq!(query["state"], "opaque+client");
+        assert_eq!(query["iss"], ISSUER);
+        assert!(!query.contains_key("code"));
+        let cleared: Vec<_> = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| Cookie::parse(value.to_str().unwrap()).unwrap())
+            .filter(|cookie| cookie.name().starts_with("__Host-authotron_oauth"))
+            .collect();
+        assert_eq!(cleared.len(), 2);
+        let metrics = state.metrics.render().unwrap();
+        for (outcome, count) in [("denied", 1), ("rejected", 1)] {
+            assert!(
+                metrics.contains(&format!(
+                    "authotron_browser_login_attempts_total{{flow=\"basic\",method=\"password\",outcome=\"{outcome}\"}} {count}"
+                )),
+                "{case} {outcome}"
+            );
+        }
+        assert!(cleared.iter().all(|cookie| cookie.value().is_empty()));
+        jar.update(&response);
+        assert!(!jar.header().contains("authotron_oauth"));
+        // Replaying with the old cookies stays local: the transaction is gone.
+        let replay = send(
+            &app,
+            post("/login/method/password", &stale, &fields, Some(ORIGIN)),
+        )
+        .await;
+        assert!(replay.headers().get(header::LOCATION).is_none());
+        assert!(replay.status().is_client_error(), "{case}");
+        let resumed = get(&app, "/oauth/continue", &stale).await;
+        assert!(resumed.headers().get(header::LOCATION).is_none());
+        assert!(resumed.status().is_client_error(), "{case}");
+    }
 }
 #[tokio::test]
 async fn token_protocol_errors_are_bounded_fixed_json_without_origin_or_cors() {
@@ -1038,11 +1154,11 @@ async fn disposable_valkey_http_oauth_cross_replica_flow() {
     // Use an authenticated administrative fixture connection to restore access
     // before assertions; application requests must retain both binding cookies.
     let mut jar = Jar::default();
-    let (csrf, tx) = login_form(&a, &mut jar, "/login/method/0").await;
+    let (csrf, tx) = login_form(&a, &mut jar, "/login/method/password").await;
     let response = send(
         &a,
         post(
-            "/login/method/0",
+            "/login/method/password",
             &jar,
             &[
                 ("csrf", &csrf),
@@ -1072,7 +1188,11 @@ async fn disposable_valkey_http_oauth_cross_replica_flow() {
         .await
         .unwrap();
     let mut responses = Vec::new();
-    for path in ["/login", "/login/method/0", "/login/method/1"] {
+    for path in [
+        "/login",
+        "/login/method/password",
+        "/login/method/ecmwf-api-key",
+    ] {
         responses.push(get(&b, path, &jar).await);
     }
     let _: () = redis::cmd("ACL")

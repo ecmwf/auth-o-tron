@@ -46,7 +46,7 @@ pub fn routes(config: &UiConfig) -> Router<AppState> {
         .route("/login", get(login))
         .route("/login/", get(login_slash))
         // Matchit prefers static and parameter routes, so this only catches
-        // otherwise-unmatched paths such as `/login/nope` (not `/login/method/0`).
+        // otherwise-unmatched paths such as `/login/nope` (not `/login/method/password`).
         .route(
             "/login/{*rest}",
             get(super::browser_login::login_fallback).fallback(|| async { StatusCode::NOT_FOUND }),
@@ -105,11 +105,11 @@ async fn login(State(state): State<AppState>, headers: axum::http::HeaderMap) ->
     if oauth_pending {
         config.sso.clear();
     }
-    let methods: Vec<(usize, &str)> = state
+    let methods: Vec<(&str, &str)> = state
         .browser
         .methods()
         .iter()
-        .map(|method| (method.flow.method, method.label.as_str()))
+        .map(|method| (&*method.flow.method, method.label.as_str()))
         .collect();
     let mut response =
         secure_response(Html(render_login(&config, &methods)).into_response(), false);
@@ -184,8 +184,8 @@ async fn aviso_logo() -> Response {
     response
 }
 
-/// `methods` holds `(index, label)` pairs in chooser order; labels are escaped.
-fn render_login(config: &UiConfig, methods: &[(usize, &str)]) -> String {
+/// `methods` holds `(id, label)` pairs in chooser order; labels are escaped.
+fn render_login(config: &UiConfig, methods: &[(&str, &str)]) -> String {
     let direct_login = !methods.is_empty();
     let available = !config.sso.is_empty() || direct_login;
     render_page_with_dialog(
@@ -218,8 +218,8 @@ fn render_login(config: &UiConfig, methods: &[(usize, &str)]) -> String {
                 "Use direct identity verification or a configured browser sign-in flow."
                 }
                 div class="login-actions" {
-                    @for (index, label) in methods {
-                        a class="login-action" href=(super::browser_login::method_path(*index)) data-login-dialog="method" { (label) }
+                    @for (id, label) in methods {
+                        a class="login-action" href=(super::browser_login::method_path(id)) data-login-dialog="method" { (label) }
                     }
                     @for action in &config.sso {
                         a class="login-action" href=(action.start_url.as_str()) { (&action.label) }

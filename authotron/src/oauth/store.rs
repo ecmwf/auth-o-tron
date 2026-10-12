@@ -13,7 +13,7 @@ use super::{
     code_grant::{CodeGrant, CodeGrantError},
     codes::{AuthorizationCode, CodeIssueOutcome, CodeStoreError, IssuedCode, StoredCode},
     consent::{ConsentError, ConsentOutcome, ConsentSession, ConsentToken},
-    context::AuthenticatedAuthorization,
+    context::{AuthenticatedAuthorization, ContextError},
     records::{AuthorizationTransaction, BoundAuthorizationTransaction, valid_time},
 };
 use crate::config::OAuthConfig;
@@ -32,6 +32,9 @@ pub enum StoreError {
     Missing,
     Limited,
     Unavailable,
+    /// A well-formed, browser-bound post-login record whose verified identity no longer
+    /// satisfies the current scope policy. Distinct from corruption (`Unavailable`).
+    AccessDenied,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +140,100 @@ pub(super) fn client_budget(config: &OAuthConfig, client: &str) -> Result<usize,
         + usize::from(position < config.max_authorization_transactions % count))
 }
 
+/// Maps a post-login context decode failure. Policy ineligibility is reported as
+/// `AccessDenied`, a foreign binding as `Missing`, and anything else as `Unavailable`.
+pub(super) fn context_error(error: ContextError) -> StoreError {
+    match error {
+        ContextError::Binding => StoreError::Missing,
+        ContextError::AccessDenied => StoreError::AccessDenied,
+        _ => StoreError::Unavailable,
+    }
+}
+
+/// Maps a consent-session decode failure. Only `ConsentError::AccessDenied`, raised after
+/// the envelope (version, expiry, encoding) was accepted, re-classifies the embedded
+/// context to confirm source and binding; every other failure, including a damaged
+/// envelope around a policy-denied context, stays `Unavailable`.
+/// Valid input: `{"version":1,"context":"<base64url context>",...}`; invalid input:
+/// non-JSON bytes, `"version":9`, or a missing/padded `context` string.
+pub(super) fn consent_error(
+    bytes: &[u8],
+    id: &TransactionId,
+    config: &OAuthConfig,
+    binding: &[u8; 32],
+    now: u64,
+    error: ConsentError,
+) -> StoreError {
+    match error {
+        ConsentError::Binding => StoreError::Missing,
+        ConsentError::AccessDenied => {
+            match policy_denied(PostLogin::Consent, bytes, id, config, binding, now) {
+                Ok(Some(_)) => StoreError::AccessDenied,
+                Err(StoreError::Missing) => StoreError::Missing,
+                Ok(None) | Err(_) => StoreError::Unavailable,
+            }
+        }
+        _ => StoreError::Unavailable,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PostLogin {
+    Authenticated,
+    Consent,
+}
+
+/// Returns the stored transaction when a post-login record is well formed, bound to
+/// `binding`, sourced from `id`, and denied only by current scope policy, together with
+/// the expiry the eligible record would have had (for the stored-TTL consistency check).
+pub(super) fn policy_denied(
+    kind: PostLogin,
+    bytes: &[u8],
+    id: &TransactionId,
+    config: &OAuthConfig,
+    binding: &[u8; 32],
+    now: u64,
+) -> Result<Option<(AuthorizationTransaction, u64)>, StoreError> {
+    let (context, envelope_expiry) = match kind {
+        PostLogin::Authenticated => (bytes.to_vec(), u64::MAX),
+        PostLogin::Consent => {
+            // The whole envelope must be intact; only the embedded context may be denied.
+            match ConsentSession::decode(bytes, id, config, binding, now) {
+                Ok(_) => return Ok(None),
+                Err(ConsentError::Binding) => return Err(StoreError::Missing),
+                Err(ConsentError::AccessDenied) => {}
+                Err(_) => return Err(StoreError::Unavailable),
+            }
+            let value: serde_json::Value =
+                serde_json::from_slice(bytes).map_err(|_| StoreError::Unavailable)?;
+            let encoded = value
+                .get("context")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(StoreError::Unavailable)?;
+            let expiry = value
+                .get("expires_at_ms")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or(StoreError::Unavailable)?;
+            let context = URL_SAFE_NO_PAD
+                .decode(encoded)
+                .map_err(|_| StoreError::Unavailable)?;
+            (context, expiry)
+        }
+    };
+    let denied = AuthenticatedAuthorization::policy_denied_transaction(
+        &context,
+        config,
+        binding,
+        &id.hash(),
+        now,
+    )
+    .map_err(|error| match error {
+        ContextError::Binding => StoreError::Missing,
+        _ => StoreError::Unavailable,
+    })?;
+    Ok(denied.map(|(transaction, bound)| (transaction, bound.min(envelope_expiry))))
+}
+
 impl MemoryTransactionStore {
     /// Explicit development backend, initialized by the enabled OAuth runtime.
     pub fn new(config: Arc<OAuthConfig>) -> Result<Self, StoreError> {
@@ -216,6 +313,44 @@ impl MemoryTransactionStore {
     ) -> Result<ConsentToken, StoreError> {
         self.prepare_consent_at(id, browser_hash, now_ms)
     }
+    /// Atomically removes a post-login record only after confirming it is policy-denied,
+    /// returning the validated transaction for the RFC 6749 `access_denied` redirect.
+    pub async fn reject_ineligible(
+        &self,
+        id: &TransactionId,
+        browser_hash: &[u8; 32],
+    ) -> Result<AuthorizationTransaction, StoreError> {
+        self.reject_ineligible_at(id, browser_hash, now_ms)
+    }
+    fn reject_ineligible_at(
+        &self,
+        id: &TransactionId,
+        binding: &[u8; 32],
+        clock: impl FnOnce() -> Result<u64, StoreError>,
+    ) -> Result<AuthorizationTransaction, StoreError> {
+        let mut entries = self.entries.lock().map_err(|_| StoreError::Unavailable)?;
+        let now = clock()?;
+        if !valid_time(now) {
+            return Err(StoreError::Unavailable);
+        }
+        entries.retain(|_, entry| entry.expires_at_ms > now);
+        let key = id.hash();
+        let stored = entries.get(&key).ok_or(StoreError::Missing)?;
+        let kind = match stored.kind {
+            StoredKind::Pending => return Err(StoreError::Missing),
+            StoredKind::Authenticated => PostLogin::Authenticated,
+            StoredKind::ConsentReady => PostLogin::Consent,
+        };
+        let (transaction, bound) =
+            policy_denied(kind, &stored.bytes, id, &self.config, binding, now)?
+                .ok_or(StoreError::Missing)?;
+        if bound > stored.expires_at_ms {
+            return Err(StoreError::Unavailable);
+        }
+        // Classification and removal share one critical section; no await while locked.
+        entries.remove(&key);
+        Ok(transaction)
+    }
     pub(super) async fn consent_context(
         &self,
         id: &TransactionId,
@@ -231,10 +366,7 @@ impl MemoryTransactionStore {
             return Err(StoreError::Missing);
         }
         let session = ConsentSession::decode(&stored.bytes, id, &self.config, binding, now)
-            .map_err(|error| match error {
-                ConsentError::Binding => StoreError::Missing,
-                _ => StoreError::Unavailable,
-            })?;
+            .map_err(|error| consent_error(&stored.bytes, id, &self.config, binding, now, error))?;
         if session.expires_at_ms() > stored.expires_at_ms {
             return Err(StoreError::Unavailable);
         }
@@ -541,10 +673,7 @@ impl MemoryTransactionStore {
             return Err(StoreError::Missing);
         }
         let context = AuthenticatedAuthorization::decode(&stored.bytes, config, binding, now)
-            .map_err(|error| match error {
-                super::context::ContextError::Binding => StoreError::Missing,
-                _ => StoreError::Unavailable,
-            })?;
+            .map_err(context_error)?;
         if !context.matches_source(&key) || context.expires_at_ms() > stored.expires_at_ms {
             return Err(StoreError::Unavailable);
         }
@@ -569,10 +698,7 @@ impl MemoryTransactionStore {
             StoredKind::Authenticated => {
                 let context =
                     AuthenticatedAuthorization::decode(&stored.bytes, &self.config, binding, now)
-                        .map_err(|error| match error {
-                        super::context::ContextError::Binding => StoreError::Missing,
-                        _ => StoreError::Unavailable,
-                    })?;
+                        .map_err(context_error)?;
                 if !context.matches_source(&key) {
                     return Err(StoreError::Unavailable);
                 }
@@ -587,7 +713,9 @@ impl MemoryTransactionStore {
             }
             StoredKind::ConsentReady => {
                 let session = ConsentSession::decode(&stored.bytes, id, &self.config, binding, now)
-                    .map_err(|_| StoreError::Unavailable)?;
+                    .map_err(|error| {
+                        consent_error(&stored.bytes, id, &self.config, binding, now, error)
+                    })?;
                 if session.expires_at_ms() > stored.expires_at_ms {
                     return Err(StoreError::Unavailable);
                 }
@@ -738,6 +866,144 @@ pub(super) mod tests {
             panic!("issued code required")
         };
         code
+    }
+    /// Simulates a policy reload over the same records: the stricter store takes over
+    /// every entry from `store`.
+    fn tightened(store: &MemoryTransactionStore) -> MemoryTransactionStore {
+        let mut cfg = (*store.config).clone();
+        cfg.resources[0].scopes[0]
+            .required_roles
+            .push("absent".into());
+        MemoryTransactionStore {
+            config: Arc::new(cfg),
+            entries: Mutex::new(std::mem::take(&mut *store.entries.lock().unwrap())),
+            codes: Mutex::new(HashMap::new()),
+        }
+    }
+    #[tokio::test]
+    async fn policy_tightened_after_login_is_access_denied_not_corruption() {
+        // Authenticated (pre-consent) record.
+        let store = code_store(1);
+        let (_, _, identity) = super::super::context::tests::fixture().await;
+        let created = store.create(request(&store.config), [7; 32]).await.unwrap();
+        let witness = store.lookup_bound(&created.id, &[7; 32]).await.unwrap();
+        let now = identity.verified_at_ms();
+        let context =
+            AuthenticatedAuthorization::new_bound(witness, identity, &[7; 32], &store.config, now)
+                .unwrap();
+        store
+            .promote_authenticated(&created.id, &[7; 32], context)
+            .await
+            .unwrap();
+        let strict = tightened(&store);
+        let id = &created.id;
+        assert_eq!(
+            strict.lookup_authenticated(id, &[7; 32]).await.err(),
+            Some(StoreError::AccessDenied)
+        );
+        assert_eq!(
+            strict.prepare_consent(id, &[7; 32]).await.err(),
+            Some(StoreError::AccessDenied)
+        );
+        // A foreign browser never learns the classification and cannot remove the record.
+        assert_eq!(
+            strict.reject_ineligible(id, &[8; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        // The original policy store still sees the record as eligible: no removal.
+        let relaxed = MemoryTransactionStore {
+            config: store.config.clone(),
+            entries: Mutex::new(std::mem::take(&mut *strict.entries.lock().unwrap())),
+            codes: Mutex::new(HashMap::new()),
+        };
+        assert_eq!(
+            relaxed.reject_ineligible(id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        let strict = tightened(&relaxed);
+        let transaction = strict.reject_ineligible(id, &[7; 32]).await.unwrap();
+        assert_eq!(
+            transaction.request().redirect_uri(),
+            "https://app.example.org/cb"
+        );
+        assert!(strict.entries.lock().unwrap().is_empty());
+        assert_eq!(
+            strict.reject_ineligible(id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+
+        // ConsentReady record.
+        let store = code_store(1);
+        let (id, _, _) = ready(&store).await;
+        let strict = tightened(&store);
+        assert_eq!(
+            strict.consent_context(&id, &[7; 32]).await.err(),
+            Some(StoreError::AccessDenied)
+        );
+        assert_eq!(
+            strict.prepare_consent(&id, &[7; 32]).await.err(),
+            Some(StoreError::AccessDenied)
+        );
+        assert_eq!(
+            strict.consent_context(&id, &[8; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        let transaction = strict.reject_ineligible(&id, &[7; 32]).await.unwrap();
+        assert_eq!(transaction.request().state(), Some("opaque+client"));
+        assert_eq!(
+            strict.consent_context(&id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+
+        // Corruption stays Unavailable and is never removed as a policy denial.
+        let store = code_store(1);
+        let (id, _, _) = ready(&store).await;
+        let strict = tightened(&store);
+        strict
+            .entries
+            .lock()
+            .unwrap()
+            .get_mut(&id.hash())
+            .unwrap()
+            .bytes = b"{\"context\":\"%%%\"}".to_vec();
+        assert_eq!(
+            strict.consent_context(&id, &[7; 32]).await.err(),
+            Some(StoreError::Unavailable)
+        );
+        assert_eq!(
+            strict.prepare_consent(&id, &[7; 32]).await.err(),
+            Some(StoreError::Unavailable)
+        );
+        assert_eq!(
+            strict.reject_ineligible(&id, &[7; 32]).await.err(),
+            Some(StoreError::Unavailable)
+        );
+        assert_eq!(strict.entries.lock().unwrap().len(), 1);
+
+        // A damaged envelope around a policy-denied context is corruption, not denial.
+        let store = code_store(1);
+        let (id, _, _) = ready(&store).await;
+        let strict = tightened(&store);
+        {
+            let mut entries = strict.entries.lock().unwrap();
+            let stored = entries.get_mut(&id.hash()).unwrap();
+            let mut envelope: serde_json::Value = serde_json::from_slice(&stored.bytes).unwrap();
+            envelope["version"] = 9.into();
+            stored.bytes = serde_json::to_vec(&envelope).unwrap();
+        }
+        assert_eq!(
+            strict.consent_context(&id, &[7; 32]).await.err(),
+            Some(StoreError::Unavailable)
+        );
+        assert_eq!(
+            strict.prepare_consent(&id, &[7; 32]).await.err(),
+            Some(StoreError::Unavailable)
+        );
+        assert_eq!(
+            strict.reject_ineligible(&id, &[7; 32]).await.err(),
+            Some(StoreError::Unavailable)
+        );
+        assert_eq!(strict.entries.lock().unwrap().len(), 1);
     }
     #[tokio::test]
     async fn consent_lookup_binding_mismatch_is_missing_but_corruption_is_unavailable() {

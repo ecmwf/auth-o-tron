@@ -35,6 +35,7 @@ providers:
     realm: ecmwf
     uri: https://api.ecmwf.int/v1
     browser:
+      id: ecmwf-api-key
       label: ECMWF API key
 augmenters:
   - type: plain
@@ -75,7 +76,7 @@ oauth:
 ```
 
 OAuth login uses the same browser methods as `/login`: every `plain` or
-`ecmwf-api` provider with a `browser: {label: ...}` block, and at least one is
+`ecmwf-api` provider with a `browser: {id: ..., label: ...}` block, and at least one is
 required when OAuth is enabled. Providers without `browser` stay API-only. See
 [Choosing browser methods](ui.md#choosing-browser-methods). Several methods may
 coexist; submitted fields cannot select another provider or realm. OAuth uses fresh verification
@@ -104,7 +105,7 @@ automatic fallback are not implemented. Backend durability depends on its config
 | `GET /.well-known/oauth-authorization-server` | RFC 8414 metadata with literal issuer, authorization/token endpoints, JWKS URI, code grant, public-client `none` authentication and S256 |
 | `GET /oauth/jwks` | Public RSA JWKs only: `kty`, `alg`, `use`, `kid`, `n`, `e` |
 | `GET /oauth/authorize` | Strict bounded authorization query; reserves a client-partition slot, resumes an exact matching active request, or shows a 409 conflict for a different request |
-| `GET /login/method/{n}` | Browser method modal/native forms capture the current OAuth transaction ID in a server-rendered hidden field |
+| `GET /login/method/{id}` | Browser method modal/native forms capture the current OAuth transaction ID in a server-rendered hidden field |
 | `POST` to the selected login form | Single trusted Origin, one-use flow CSRF, exact hidden-ID/cookie match and pending lookup before fresh strict verification; promotes authenticated state and redirects to fixed `/oauth/continue` |
 | `GET /oauth/continue` | Always a local consent page, not an automatic callback redirect; refresh rotates the challenge |
 | `POST /oauth/consent` | Explicit approve/deny with Origin, transaction binding and consent CSRF; atomic code issuance or denial, then 303 to the registered callback |
@@ -157,6 +158,37 @@ Authorization-gate failures stay local, never redirecting to submitted callbacks
 Valid denial redirects with `error=access_denied`, original state and issuer, without
 a code. Approvals redirect with code/state/issuer only, never an access token. Static
 registered callback queries are retained. OAuth cookies are cleared after a valid decision.
+
+### Policy denial
+
+Once `/oauth/authorize` has validated the request, its registered callback is exact and
+known, so a policy denial is reported to the client per RFC 6749 §4.1.2.1 instead of
+leaving it waiting for a callback:
+
+- **At login.** Valid credentials (`POST /login/method/{id}` with the OAuth transaction)
+  whose verified identity lacks a required role or comes from a realm not in
+  `allowed_realms` atomically consume the pending transaction and 303 to the registered
+  callback with `error=access_denied`, the original `state` and `iss`, without a code.
+  OAuth cookies are cleared. The browser attempt is recorded with the `denied`
+  outcome (distinct from `rejected` credentials). Wrong credentials still re-render the
+  `401` form.
+- **Policy changed before consent.** If the identity was eligible at login but policy
+  is tightened before `/oauth/continue` or `/oauth/consent`, the stored record is
+  classified as policy-ineligible (distinct from corruption), atomically removed, and
+  the client receives the same `access_denied` redirect. A corrupted record (including
+  a damaged consent envelope around an otherwise policy-denied identity) or a backend
+  outage remains a local `503` and is not removed.
+- **GET resume paths.** `GET /oauth/continue` performs the removal and redirect.
+  `GET /oauth/authorize` and `GET /login` (or a method form) recovery for a
+  policy-denied flow do not redirect to the client themselves; they 303 to
+  `/oauth/continue`. These GET paths authorize the redirect only by the browser binding
+  cookies (transaction ID plus browser nonce, which must match the stored record); they
+  perform no Origin or CSRF check. The target is always the registered callback stored
+  in the transaction, re-validated against the current configuration before the
+  redirect; a callback no longer registered fails locally instead.
+
+Origin, CSRF, transaction-binding and missing/expired-transaction failures never
+redirect; replaying the consumed transaction fails locally. Identities are not logged.
 
 ## Binding and browser protections
 

@@ -14,7 +14,10 @@ use super::{
         AuthorizationTransaction, BoundAuthorizationTransaction, MAX_TRANSACTION_BYTES, valid_time,
     },
 };
-use crate::{config::OAuthConfig, models::user::User};
+use crate::{
+    config::{OAuthConfig, OAuthPolicyError},
+    models::user::User,
+};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
@@ -84,18 +87,48 @@ impl AuthenticatedAuthorization {
         config: &OAuthConfig,
         server_now_ms: u64,
     ) -> Result<Self, ContextError> {
-        use ContextError::*;
-        config.validate().map_err(|_| Configuration)?;
-        let verified_at = identity.verified_at_ms();
-        if !valid_time(server_now_ms) || !valid_time(verified_at) {
-            return Err(InvalidTime);
-        }
+        Self::preflight(&identity, config, server_now_ms)?;
         let transaction = AuthorizationTransaction::decode(
-            &transaction.encode().map_err(|_| InvalidTransaction)?,
+            &transaction
+                .encode()
+                .map_err(|_| ContextError::InvalidTransaction)?,
             config,
             server_now_ms,
         )
-        .map_err(|_| InvalidTransaction)?;
+        .map_err(|_| ContextError::InvalidTransaction)?;
+        let (scopes, expires_at_ms) =
+            Self::evaluate(&transaction, &identity, browser_hash, config, server_now_ms)?;
+        Ok(Self {
+            transaction,
+            identity,
+            scopes,
+            expires_at_ms,
+            source_transaction_id_hash: None,
+        })
+    }
+    fn preflight(
+        identity: &VerifiedOAuthIdentity,
+        config: &OAuthConfig,
+        server_now_ms: u64,
+    ) -> Result<(), ContextError> {
+        config.validate().map_err(|_| ContextError::Configuration)?;
+        if !valid_time(server_now_ms) || !valid_time(identity.verified_at_ms()) {
+            return Err(ContextError::InvalidTime);
+        }
+        Ok(())
+    }
+    /// Checks binding, freshness and current scope policy for a transaction already
+    /// validated against `config` at `server_now_ms`; returns eligible scopes and expiry.
+    fn evaluate(
+        transaction: &AuthorizationTransaction,
+        identity: &VerifiedOAuthIdentity,
+        browser_hash: &[u8; 32],
+        config: &OAuthConfig,
+        server_now_ms: u64,
+    ) -> Result<(Vec<String>, u64), ContextError> {
+        use ContextError::*;
+        Self::preflight(identity, config, server_now_ms)?;
+        let verified_at = identity.verified_at_ms();
         if !transaction.matches_browser_binding(browser_hash) {
             return Err(Binding);
         }
@@ -106,12 +139,7 @@ impl AuthenticatedAuthorization {
         if verified_at.saturating_sub(server_now_ms) > skew {
             return Err(StaleIdentity);
         }
-        let fresh_until = config
-            .max_authentication_age_seconds
-            .checked_mul(1000)
-            .and_then(|age| verified_at.checked_add(age))
-            .filter(|time| valid_time(*time))
-            .ok_or(InvalidTime)?;
+        let fresh_until = fresh_until(verified_at, config)?;
         if server_now_ms >= fresh_until {
             return Err(StaleIdentity);
         }
@@ -123,16 +151,9 @@ impl AuthenticatedAuthorization {
                 request.scopes(),
                 identity.as_user(),
             )
-            .map_err(|_| AccessDenied)?
+            .map_err(policy_error)?
             .0;
-        let expires_at_ms = transaction.expires_at_ms().min(fresh_until);
-        Ok(Self {
-            transaction,
-            identity,
-            scopes,
-            expires_at_ms,
-            source_transaction_id_hash: None,
-        })
+        Ok((scopes, transaction.expires_at_ms().min(fresh_until)))
     }
     pub fn transaction(&self) -> &AuthorizationTransaction {
         &self.transaction
@@ -179,39 +200,103 @@ impl AuthenticatedAuthorization {
         browser_hash: &[u8; 32],
         server_now_ms: u64,
     ) -> Result<Self, ContextError> {
-        use ContextError::*;
-        if bytes.len() > MAX_AUTHENTICATED_CONTEXT_BYTES {
-            return Err(TooLarge);
-        }
-        let dto: ContextDto = serde_json::from_slice(bytes).map_err(|_| InvalidRecord)?;
-        if dto.version != 2 {
-            return Err(UnsupportedVersion);
-        }
-        if dto.transaction.len() > (MAX_TRANSACTION_BYTES * 4).div_ceil(3) {
-            return Err(TooLarge);
-        }
-        let transaction = URL_SAFE_NO_PAD
-            .decode(&dto.transaction)
-            .map_err(|_| InvalidRecord)?;
-        if transaction.len() > MAX_TRANSACTION_BYTES {
-            return Err(TooLarge);
-        }
-        if URL_SAFE_NO_PAD.encode(&transaction) != dto.transaction {
-            return Err(InvalidRecord);
-        }
-        let transaction = AuthorizationTransaction::decode(&transaction, config, server_now_ms)
-            .map_err(|_| InvalidTransaction)?;
-        let identity =
-            restore_from_trusted_storage(dto.username, dto.realm, dto.roles, dto.verified_at_ms)
-                .map_err(|error| match error {
-                    AuthenticationError::Unavailable => InvalidTime,
-                    _ => InvalidRecord,
-                })?;
+        let (transaction, identity, source) = decode_parts(bytes, config, server_now_ms)?;
         let mut context = Self::new(transaction, identity, browser_hash, config, server_now_ms)?;
         // This field is authoritative only across the explicitly trusted-storage boundary.
-        context.source_transaction_id_hash = dto.source_transaction_id_hash;
+        context.source_transaction_id_hash = source;
         Ok(context)
     }
+    /// Distinguishes a well-formed, browser-bound record whose verified identity no longer
+    /// satisfies the current scope policy from storage corruption. Returns the stored
+    /// transaction and the expiry an eligible context would have had, only for
+    /// `AccessDenied`; any other failure is reported unchanged, and an eligible record
+    /// yields `Ok(None)`. The source hash must match `transaction_id_hash`.
+    pub(super) fn policy_denied_transaction(
+        bytes: &[u8],
+        config: &OAuthConfig,
+        browser_hash: &[u8; 32],
+        transaction_id_hash: &[u8; 32],
+        server_now_ms: u64,
+    ) -> Result<Option<(AuthorizationTransaction, u64)>, ContextError> {
+        let (transaction, identity, source) = decode_parts(bytes, config, server_now_ms)?;
+        if !source.is_some_and(|hash| bool::from(hash.ct_eq(transaction_id_hash))) {
+            return Err(ContextError::InvalidRecord);
+        }
+        // `decode_parts` already validated the transaction against `config` and `now`.
+        match Self::evaluate(&transaction, &identity, browser_hash, config, server_now_ms) {
+            Ok(_) => Ok(None),
+            Err(ContextError::AccessDenied) => {
+                let bound = fresh_until(identity.verified_at_ms(), config)?
+                    .min(transaction.expires_at_ms());
+                Ok(Some((transaction, bound)))
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+fn fresh_until(verified_at_ms: u64, config: &OAuthConfig) -> Result<u64, ContextError> {
+    config
+        .max_authentication_age_seconds
+        .checked_mul(1000)
+        .and_then(|age| verified_at_ms.checked_add(age))
+        .filter(|time| valid_time(*time))
+        .ok_or(ContextError::InvalidTime)
+}
+
+/// Only a scope-policy denial becomes `AccessDenied` (an `access_denied` redirect);
+/// configuration or request drift stays a local 503/400-class error.
+fn policy_error(error: OAuthPolicyError) -> ContextError {
+    match error {
+        OAuthPolicyError::AccessDenied => ContextError::AccessDenied,
+        OAuthPolicyError::InvalidConfiguration => ContextError::Configuration,
+        OAuthPolicyError::InvalidClient
+        | OAuthPolicyError::InvalidResource
+        | OAuthPolicyError::InvalidScope => ContextError::InvalidTransaction,
+    }
+}
+
+type ContextParts = (
+    AuthorizationTransaction,
+    VerifiedOAuthIdentity,
+    Option<[u8; 32]>,
+);
+
+/// Structural decode shared by full restoration and policy classification.
+fn decode_parts(
+    bytes: &[u8],
+    config: &OAuthConfig,
+    server_now_ms: u64,
+) -> Result<ContextParts, ContextError> {
+    use ContextError::*;
+    if bytes.len() > MAX_AUTHENTICATED_CONTEXT_BYTES {
+        return Err(TooLarge);
+    }
+    let dto: ContextDto = serde_json::from_slice(bytes).map_err(|_| InvalidRecord)?;
+    if dto.version != 2 {
+        return Err(UnsupportedVersion);
+    }
+    if dto.transaction.len() > (MAX_TRANSACTION_BYTES * 4).div_ceil(3) {
+        return Err(TooLarge);
+    }
+    let transaction = URL_SAFE_NO_PAD
+        .decode(&dto.transaction)
+        .map_err(|_| InvalidRecord)?;
+    if transaction.len() > MAX_TRANSACTION_BYTES {
+        return Err(TooLarge);
+    }
+    if URL_SAFE_NO_PAD.encode(&transaction) != dto.transaction {
+        return Err(InvalidRecord);
+    }
+    let transaction = AuthorizationTransaction::decode(&transaction, config, server_now_ms)
+        .map_err(|_| InvalidTransaction)?;
+    let identity =
+        restore_from_trusted_storage(dto.username, dto.realm, dto.roles, dto.verified_at_ms)
+            .map_err(|error| match error {
+                AuthenticationError::Unavailable => InvalidTime,
+                _ => InvalidRecord,
+            })?;
+    Ok((transaction, identity, dto.source_transaction_id_hash))
 }
 
 #[cfg(test)]
@@ -231,7 +316,7 @@ pub(super) mod tests {
     pub(in crate::oauth) async fn fixture()
     -> (OAuthConfig, AuthorizationTransaction, VerifiedOAuthIdentity) {
         let config: ConfigV2 = serde_json::from_value(json!({"store": {"enabled": false}, "services": [], "augmenters": [],
-            "providers": [{"type": "plain", "name": "basic", "realm": "local", "users": [{"username": "alice", "password": "päss:秘密", "roles": ["reader", "member"]}], "browser": {"label": "Password"}}],
+            "providers": [{"type": "plain", "name": "basic", "realm": "local", "users": [{"username": "alice", "password": "päss:秘密", "roles": ["reader", "member"]}], "browser": {"id": "password", "label": "Password"}}],
             "server": {"port": 0}, "jwt": {"iss": "fixture", "exp": 300, "secret": "fixture-only"}, "logging": {"level": "warn", "format": "console"},
             "ui": {"browser_session": {"public_origin": "https://login.example.org", "backend": {"type": "memory"}}},
             "oauth": {"issuer": "https://login.example.org", "clients": [{"client_id": "desktop", "display_name": "Desktop", "redirect_uris": ["https://app.example.org/cb"], "resources": [{"resource": "https://mcp.example.org/mcp", "scopes": ["read"]}]}],
@@ -240,7 +325,7 @@ pub(super) mod tests {
         let browser = BrowserLoginState::new(&config).unwrap();
         let auth = Auth::new(&config.providers, &[], Arc::new(NoStore), config.auth);
         let identity = verify_identity(
-            0,
+            "password",
             BrowserCredentials::Basic {
                 username: "alice",
                 password: "päss:秘密",
@@ -486,5 +571,60 @@ pub(super) mod tests {
                 "{case}"
             );
         }
+    }
+    #[test]
+    fn only_policy_access_denied_maps_to_access_denied() {
+        use OAuthPolicyError as P;
+        assert_eq!(policy_error(P::AccessDenied), ContextError::AccessDenied);
+        assert_eq!(
+            policy_error(P::InvalidConfiguration),
+            ContextError::Configuration
+        );
+        for error in [P::InvalidClient, P::InvalidResource, P::InvalidScope] {
+            assert_eq!(policy_error(error), ContextError::InvalidTransaction);
+        }
+    }
+    #[tokio::test]
+    async fn policy_denied_transaction_returns_stored_transaction_without_round_trip() {
+        let (mut config, transaction, identity) = fixture().await;
+        let now = identity.verified_at_ms();
+        let mut context =
+            AuthenticatedAuthorization::new(transaction, identity, &[7; 32], &config, now).unwrap();
+        context.source_transaction_id_hash = Some([3; 32]);
+        let bytes = context.encode().unwrap();
+        assert!(
+            AuthenticatedAuthorization::policy_denied_transaction(
+                &bytes, &config, &[7; 32], &[3; 32], now
+            )
+            .unwrap()
+            .is_none()
+        );
+        config.resources[0].scopes[0]
+            .required_roles
+            .push("absent".into());
+        let denied = AuthenticatedAuthorization::policy_denied_transaction(
+            &bytes, &config, &[7; 32], &[3; 32], now,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            denied.0.encode().unwrap(),
+            context.transaction().encode().unwrap()
+        );
+        assert_eq!(denied.1, context.expires_at_ms());
+        assert_eq!(
+            AuthenticatedAuthorization::policy_denied_transaction(
+                &bytes, &config, &[7; 32], &[4; 32], now
+            )
+            .err(),
+            Some(ContextError::InvalidRecord)
+        );
+        assert_eq!(
+            AuthenticatedAuthorization::policy_denied_transaction(
+                &bytes, &config, &[8; 32], &[3; 32], now
+            )
+            .err(),
+            Some(ContextError::Binding)
+        );
     }
 }

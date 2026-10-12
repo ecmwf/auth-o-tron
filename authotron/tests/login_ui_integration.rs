@@ -363,16 +363,16 @@ fn direct_config() -> ConfigV2 {
         "browser_session": {"public_origin": "https://login.example.test", "backend": {"type": "memory"}},
         "sso": [
             {"label": "Continue with SSO", "start_url": "https://app.example.test/sso/start"},
-            {"label": "Configured method link", "start_url": "/login/method/0"}
+            {"label": "Configured method link", "start_url": "/login/method/password"}
         ]
     }));
     config.providers = [
         json!({"type": "plain", "name": "local", "realm": "aviso",
             "users": [{"username": "alice", "password": "example-password"}],
-            "browser": {"label": "Username & <password>"}}),
+            "browser": {"id": "password", "label": "Username & <password>"}}),
         json!({"type": "ecmwf-api", "name": "api-only", "realm": "ecmwf", "uri": "http://127.0.0.1:9"}),
         json!({"type": "ecmwf-api", "name": "key-provider", "realm": "ecmwf",
-            "uri": "http://127.0.0.1:9", "browser": {"label": "ECMWF API key"}}),
+            "uri": "http://127.0.0.1:9", "browser": {"id": "ecmwf-api-key", "label": "ECMWF API key"}}),
     ]
     .into_iter()
     .map(|provider| serde_json::from_value(provider).unwrap())
@@ -394,18 +394,18 @@ async fn direct_chooser_marks_only_direct_links_and_does_not_create_form_transac
     );
     let html = body(response).await;
     assert!(html.contains("<script src=\"/static/login.js\" defer></script>"));
-    let first = "<a class=\"login-action\" href=\"/login/method/0\" data-login-dialog=\"method\">Username &amp; &lt;password&gt;</a>";
-    let second = "<a class=\"login-action\" href=\"/login/method/1\" data-login-dialog=\"method\">ECMWF API key</a>";
+    let first = "<a class=\"login-action\" href=\"/login/method/password\" data-login-dialog=\"method\">Username &amp; &lt;password&gt;</a>";
+    let second = "<a class=\"login-action\" href=\"/login/method/ecmwf-api-key\" data-login-dialog=\"method\">ECMWF API key</a>";
     let sso = "<a class=\"login-action\" href=\"https://app.example.test/sso/start\">Continue with SSO</a>";
     let configured =
-        "<a class=\"login-action\" href=\"/login/method/0\">Configured method link</a>";
+        "<a class=\"login-action\" href=\"/login/method/password\">Configured method link</a>";
     let positions: Vec<usize> = [first, second, sso, configured]
         .iter()
         .map(|link| html.find(link).unwrap_or_else(|| panic!("missing {link}")))
         .collect();
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     assert_eq!(html.matches("data-login-dialog=").count(), 2);
-    assert!(!html.contains("/login/method/2"));
+    assert!(!html.contains("/login/method/api-only"));
     assert!(html.contains("<dialog id=\"login-dialog\""));
     assert!(html.contains("aria-labelledby=\"login-dialog-title\""));
     assert!(html.contains("aria-live=\"polite\""));
@@ -431,8 +431,8 @@ async fn direct_chooser_marks_only_direct_links_and_does_not_create_form_transac
 async fn standalone_forms_keep_native_post_fallback_and_no_dialog_script() {
     let (app, _) = startup::build_app(Arc::new(direct_config())).await.unwrap();
     for (path, fields) in [
-        ("/login/method/0", vec!["username", "password"]),
-        ("/login/method/1", vec!["api_key"]),
+        ("/login/method/password", vec!["username", "password"]),
+        ("/login/method/ecmwf-api-key", vec!["api_key"]),
     ] {
         let response = get(app.clone(), path).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -459,6 +459,13 @@ async fn standalone_forms_keep_native_post_fallback_and_no_dialog_script() {
         }
         assert!(!html.contains("<script"));
         assert!(!html.contains("<dialog"));
+    }
+    // Method URLs are canonical: an escape decoding to a configured id is a branded 404.
+    for path in ["/login/method/pass%77ord", "/login/method/pass%77ord/"] {
+        let response = get(app.clone(), path).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        assert!(!response.headers().contains_key("set-cookie"), "{path}");
+        assert!(body(response).await.contains("Page not found"), "{path}");
     }
 }
 

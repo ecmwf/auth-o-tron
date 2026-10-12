@@ -20,7 +20,7 @@ use crate::{
 };
 use axum::{
     Form, Router,
-    extract::{DefaultBodyLimit, Path, State, rejection::FormRejection},
+    extract::{DefaultBodyLimit, OriginalUri, Path, State, rejection::FormRejection},
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
     routing::get,
@@ -69,30 +69,32 @@ pub fn routes(state: &AppState) -> Router<AppState> {
         return Router::new();
     }
     Router::new()
-        .route("/login/method/{index}", get(method_form).post(submit))
-        .route("/login/method/{index}/", get(method_slash))
+        .route("/login/method/{id}", get(method_form).post(submit))
+        .route("/login/method/{id}/", get(method_slash))
         .route("/login/account", get(account))
         .route("/login/account/", get(account_slash))
         .layer(DefaultBodyLimit::max(8 * 1024))
 }
 
-pub(super) fn method_path(index: usize) -> String {
-    format!("/login/method/{index}")
+pub(super) fn method_path(id: &str) -> String {
+    format!("/login/method/{id}")
 }
 
-/// Resolves a `/login/method/{index}` segment to a configured method.
-/// Valid: `0`, `7`, `15`. Invalid: `01`, `+1`, `-0`, `1a`, `016`, or an index
-/// with no configured method.
-fn resolve_method<'a>(state: &'a AppState, raw: &str) -> Option<&'a BrowserMethod> {
-    let canonical = raw == "0"
-        || (!raw.is_empty()
-            && raw.len() <= 2
-            && !raw.starts_with('0')
-            && raw.bytes().all(|c| c.is_ascii_digit()));
-    if !canonical {
+/// Resolves a `/login/method/{id}` segment by exact match against configured
+/// `browser.id` values, which are validated at startup. Ids are canonical `[a-z0-9-]`
+/// text, so a request whose raw path contains any `%` escape (even one decoding to a
+/// configured id) is rejected rather than decoded: each method has one URL.
+/// Valid: `password`, `ecmwf-api-key` when configured. Invalid: `Password`,
+/// `pass%77ord`, `password%20`, `0`, or any id with no configured method.
+fn resolve_method<'a>(
+    state: &'a AppState,
+    uri: &OriginalUri,
+    id: &str,
+) -> Option<&'a BrowserMethod> {
+    if uri.path().contains('%') {
         return None;
     }
-    state.browser.method(raw.parse().ok()?)
+    state.browser.method(id)
 }
 
 /// Bare private 404 for non-navigational requests (e.g. form POSTs).
@@ -181,7 +183,7 @@ async fn form_response(
     status: StatusCode,
     error: bool,
 ) -> Response {
-    let flow = method.flow;
+    let flow = &method.flow;
     let oauth_transaction = match super::oauth::form_transaction(state, headers).await {
         Ok(transaction) => transaction,
         Err(status) => return super::oauth::local(status),
@@ -204,7 +206,7 @@ async fn form_response(
                 @if oauth_transaction.is_some() { "Verify your identity to review this authorization request." }
                 @else { "Verify your identity for a short-lived Auth-O-Tron browser session." }
             }
-            form class="key-form" method="post" action=(method_path(flow.method)) {
+            form class="key-form" method="post" action=(method_path(&flow.method)) {
                 input type="hidden" name="csrf" value=(csrf);
                 @if let Some(id) = &oauth_transaction { input type="hidden" name="oauth_transaction" value=(id); }
                 @if api_key {
@@ -234,7 +236,7 @@ async fn form_response(
     response
 }
 
-fn flow_error(flow: LoginFlow) -> &'static str {
+fn flow_error(flow: &LoginFlow) -> &'static str {
     if flow.kind == BrowserMethodKind::ApiKey {
         ERROR
     } else {
@@ -242,12 +244,16 @@ fn flow_error(flow: LoginFlow) -> &'static str {
     }
 }
 
-/// Redirects `/login/method/{index}/` only for a configured method; the
-/// Location is rebuilt from the resolved index, never echoed from the request.
-async fn method_slash(State(state): State<AppState>, Path(index): Path<String>) -> Response {
-    match resolve_method(&state, &index) {
+/// Redirects `/login/method/{id}/` only for a configured method; the
+/// Location is rebuilt from the configured id, never echoed from the request.
+async fn method_slash(
+    State(state): State<AppState>,
+    uri: OriginalUri,
+    Path(id): Path<String>,
+) -> Response {
+    match resolve_method(&state, &uri, &id) {
         Some(method) => private_response(super::login::canonical_redirect(
-            &method_path(method.flow.method),
+            &method_path(&method.flow.method),
             true,
         )),
         None => not_found_page(&state),
@@ -260,10 +266,11 @@ async fn account_slash() -> Response {
 
 async fn method_form(
     State(state): State<AppState>,
-    Path(index): Path<String>,
+    uri: OriginalUri,
+    Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(method) = resolve_method(&state, &index) else {
+    let Some(method) = resolve_method(&state, &uri, &id) else {
         return not_found_page(&state);
     };
     if let Some(response) = super::oauth::login_entry_recovery(&state, &headers).await {
@@ -325,14 +332,15 @@ enum PayloadError {
 
 async fn submit(
     State(state): State<AppState>,
-    Path(index): Path<String>,
+    uri: OriginalUri,
+    Path(id): Path<String>,
     headers: HeaderMap,
     payload: Result<Form<MethodForm>, FormRejection>,
 ) -> Response {
-    let Some(method) = resolve_method(&state, &index) else {
+    let Some(method) = resolve_method(&state, &uri, &id) else {
         return not_found();
     };
-    let flow = method.flow;
+    let flow = &method.flow;
     let payload = match payload {
         Ok(Form(form)) => form.submission(flow.kind).ok_or(PayloadError::Malformed),
         Err(error) if error.status() == StatusCode::PAYLOAD_TOO_LARGE => {
@@ -366,7 +374,7 @@ async fn submit_inner(
     method: &BrowserMethod,
     attempt: &mut BrowserAttemptGuard,
 ) -> Response {
-    let flow = method.flow;
+    let flow = &method.flow;
     let mut origins = headers.get_all(header::ORIGIN).iter();
     let origin_valid = origins.next().and_then(|o| o.to_str().ok())
         == state.browser.origin.as_deref()
@@ -442,7 +450,7 @@ async fn submit_inner(
             }
         };
         let identity = match crate::oauth::authentication::verify_identity(
-            flow.method,
+            &flow.method,
             credentials,
             &state.browser,
             &state.auth,
@@ -483,9 +491,33 @@ async fn submit_inner(
             now,
         ) {
             Ok(context) => context,
-            Err(_) => {
-                attempt.outcome = BrowserOutcome::Rejected;
-                return super::oauth::local(StatusCode::FORBIDDEN);
+            Err(crate::oauth::context::ContextError::AccessDenied) => {
+                // Valid credentials, but the identity fails scope policy. The request was
+                // validated at /oauth/authorize, so per RFC 6749 §4.1.2.1 the transaction
+                // is consumed atomically and the registered callback gets access_denied.
+                let consumed = runtime.consume_pending(&id, &binding).await;
+                attempt.outcome = policy_denial_outcome(&consumed);
+                return match consumed {
+                    Ok(transaction) => super::oauth::access_denied(runtime, transaction.request()),
+                    Err(crate::oauth::store::StoreError::Missing) => {
+                        super::oauth::local(StatusCode::BAD_REQUEST)
+                    }
+                    Err(_) => super::oauth::local(StatusCode::SERVICE_UNAVAILABLE),
+                };
+            }
+            Err(error) => {
+                use crate::oauth::context::ContextError::*;
+                let status = match error {
+                    Configuration | InvalidTime => StatusCode::SERVICE_UNAVAILABLE,
+                    InvalidTransaction | Binding => StatusCode::BAD_REQUEST,
+                    _ => StatusCode::FORBIDDEN,
+                };
+                attempt.outcome = if status == StatusCode::SERVICE_UNAVAILABLE {
+                    BrowserOutcome::BackendUnavailable
+                } else {
+                    BrowserOutcome::Rejected
+                };
+                return super::oauth::local(status);
             }
         };
         if runtime.promote(&id, &binding, context).await.is_err() {
@@ -498,7 +530,7 @@ async fn submit_inner(
     }
     let user = match state
         .browser
-        .verify_identity(flow.method, credentials, &state.auth, &state.metrics)
+        .verify_identity(&flow.method, credentials, &state.auth, &state.metrics)
         .await
     {
         Ok(user) => user,
@@ -565,4 +597,39 @@ async fn account(State(state): State<AppState>, headers: HeaderMap) -> Response 
         },
     );
     private_response(Html(page).into_response())
+}
+
+/// Classifies the policy-denial consume: `denied` only when the `access_denied`
+/// redirect is issued. A concurrent consumer winning the race (`Missing`) yields a
+/// plain 400 and is counted as `rejected`.
+fn policy_denial_outcome<T>(
+    consumed: &Result<T, crate::oauth::store::StoreError>,
+) -> BrowserOutcome {
+    match consumed {
+        Ok(_) => BrowserOutcome::Denied,
+        Err(crate::oauth::store::StoreError::Missing) => BrowserOutcome::Rejected,
+        Err(_) => BrowserOutcome::BackendUnavailable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::oauth::store::StoreError;
+
+    #[test]
+    fn policy_denial_counts_denied_only_when_redirect_happens() {
+        assert!(matches!(
+            policy_denial_outcome(&Ok::<(), StoreError>(())),
+            BrowserOutcome::Denied
+        ));
+        assert!(matches!(
+            policy_denial_outcome::<()>(&Err(StoreError::Missing)),
+            BrowserOutcome::Rejected
+        ));
+        assert!(matches!(
+            policy_denial_outcome::<()>(&Err(StoreError::Unavailable)),
+            BrowserOutcome::BackendUnavailable
+        ));
+    }
 }

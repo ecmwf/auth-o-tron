@@ -84,8 +84,12 @@ end
 if op == 'form' then
   local ttl, cap, limit, window = tonumber(ARGV[5]), tonumber(ARGV[6]), tonumber(ARGV[7]), tonumber(ARGV[8])
   if not ttl or ttl <= 0 or not cap or cap <= 0 or not limit or limit <= 0 or not window or window <= 0 then return redis.error_reply('invalid arguments') end
-  -- Flow tag is `<kind>:<index>`: valid `basic:0`, `key:15`; invalid `Basic:0`, `basic:100`.
-  if string.len(ARGV[4]) > 8 or not string.match(ARGV[4], '^%l+:%d%d?$') then return redis.error_reply('invalid arguments') end
+  -- Flow tag is `<kind>:<id>` with kind `basic` or `key` and a 1-32 byte method id
+  -- matching ^[a-z0-9][a-z0-9-]*$ (at most 38 bytes in total).
+  -- Valid: `basic:password`, `key:ecmwf-api-key`. Invalid: `Basic:password`,
+  -- `basic:-x`, `basic:Password`, `oidc:sso`, a 33-byte id.
+  local kind, id = string.match(ARGV[4], '^(%l+):([%l%d][%l%d%-]*)$')
+  if string.len(ARGV[4]) > 38 or (kind ~= 'basic' and kind ~= 'key') or string.len(id) > 32 then return redis.error_reply('invalid arguments') end
   prune(forms)
   if redis.call('ZCARD', forms) >= cap then return {'capacity'} end
   if not quota(prefix .. ':form-quota', limit, window) then return {'limited'} end
@@ -96,7 +100,7 @@ if op == 'form' then
   return {'ok'}
 elseif op == 'consume' then
   local key = prefix .. ':form:' .. ARGV[2]
-  if redis.call('HSTRLEN', key, 'csrf') ~= 64 or redis.call('HSTRLEN', key, 'flow') > 8 or redis.call('HSTRLEN', key, 'expires') > 16 then return {'missing'} end
+  if redis.call('HSTRLEN', key, 'csrf') ~= 64 or redis.call('HSTRLEN', key, 'flow') > 38 or redis.call('HSTRLEN', key, 'expires') > 16 then return {'missing'} end
   local values = redis.call('HMGET', key, 'csrf', 'flow', 'expires')
   if values[1] ~= ARGV[3] or values[2] ~= ARGV[4] or not tonumber(values[3]) or tonumber(values[3]) <= now then return {'missing'} end
   redis.call('DEL', key)

@@ -27,18 +27,59 @@ pub struct UiConfig {
 }
 
 /// Upper bound on direct browser methods so the chooser stays short and
-/// `/login/method/{n}` indices and form flow tags stay small.
+/// metric label cardinality stays bounded.
 pub const MAX_BROWSER_METHODS: usize = 16;
 const BROWSER_LABEL_CHARS: usize = 64;
+/// Upper bound on a browser method id; keeps routes, flow tags and metric labels short.
+pub const BROWSER_ID_MAX_LEN: usize = 32;
+/// Regex form of the browser id rule; `valid_browser_id` implements it byte-wise and
+/// `src/static/login.js` embeds the same literal. Valid: `staff`; invalid: `-staff`.
+pub const BROWSER_ID_PATTERN: &str = r"^[a-z0-9][a-z0-9-]{0,31}$";
+/// Ids that would collide with fixed `/login/...` routes or reserved future paths.
+pub const RESERVED_BROWSER_IDS: [&str; 3] = ["callback", "new", "account"];
 
 /// Offers a `plain` or `ecmwf-api` provider as a direct browser sign-in method.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderBrowserConfig {
+    /// Stable method id used in `/login/method/{id}`, form flow tags and the
+    /// `method` metric label; unique across providers.
+    #[serde(deserialize_with = "browser_id")]
+    #[schemars(
+        length(min = 1, max = BROWSER_ID_MAX_LEN),
+        regex(pattern = BROWSER_ID_PATTERN),
+        extend("not" = {"enum": RESERVED_BROWSER_IDS})
+    )]
+    pub id: String,
     /// Chooser button text, trimmed, 1-64 characters, no control characters.
     #[serde(deserialize_with = "browser_label")]
     #[schemars(length(min = 1, max = 64))]
     pub label: String,
+}
+
+/// Matches [`BROWSER_ID_PATTERN`] and is not a reserved id.
+/// Valid: `staff`, `ecmwf-api-key`, `2fa`. Invalid: `Staff`, `-staff`, `""`,
+/// `a_b`, a 33-character id, or `callback`.
+pub fn valid_browser_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= BROWSER_ID_MAX_LEN
+        && bytes[0] != b'-'
+        && bytes
+            .iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+        && !RESERVED_BROWSER_IDS.contains(&id)
+}
+
+fn browser_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let id = String::deserialize(deserializer)?;
+    if !valid_browser_id(&id) {
+        return Err(serde::de::Error::custom(format!(
+            "provider browser id must match {BROWSER_ID_PATTERN} and not be {}",
+            RESERVED_BROWSER_IDS.join(", ")
+        )));
+    }
+    Ok(id)
 }
 
 /// Valid: `"  Staff login "` (stored as `Staff login`). Invalid: `"   "`,
@@ -73,7 +114,7 @@ impl BrowserMethodKind {
         }
     }
 
-    /// Lowercase prefix of the stored form flow tag `<prefix>:<index>`.
+    /// Lowercase prefix of the stored form flow tag `<prefix>:<id>`.
     pub fn tag_prefix(self) -> &'static str {
         match self {
             Self::Basic => "basic",
@@ -81,7 +122,7 @@ impl BrowserMethodKind {
         }
     }
 
-    /// Fixed metric label per credential type; method indices are not exported.
+    /// Fixed `flow` metric label per credential type.
     pub fn metric_label(self) -> &'static str {
         match self {
             Self::Basic => "basic",
@@ -90,8 +131,7 @@ impl BrowserMethodKind {
     }
 }
 
-/// A provider offered for direct browser login, indexed by its position among
-/// browser-enabled providers in `providers` order.
+/// A provider offered for direct browser login, listed in `providers` order.
 #[derive(Debug, Clone, Copy)]
 pub enum BrowserMethodProvider<'a> {
     Plain(&'a crate::providers::plain_provider::PlainAuthConfig),
@@ -100,6 +140,7 @@ pub enum BrowserMethodProvider<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub struct BrowserMethodConfig<'a> {
+    pub id: &'a str,
     pub label: &'a str,
     pub provider: BrowserMethodProvider<'a>,
 }
@@ -122,11 +163,13 @@ pub fn browser_methods(
         .iter()
         .filter_map(|provider| match provider {
             ProviderConfig::Plain(config) => config.browser.as_ref().map(|b| BrowserMethodConfig {
+                id: &b.id,
                 label: &b.label,
                 provider: BrowserMethodProvider::Plain(config),
             }),
             ProviderConfig::EcmwfApi(config) => {
                 config.browser.as_ref().map(|b| BrowserMethodConfig {
+                    id: &b.id,
                     label: &b.label,
                     provider: BrowserMethodProvider::EcmwfApi(config),
                 })
@@ -329,7 +372,7 @@ impl BrowserBackendConfig {
                     "browser Valkey URL must be a redis/rediss endpoint without userinfo, query or fragment",
                 );
             }
-            // Valid: authotron:browser:v1:release. Invalid: a prefix with spaces or braces.
+            // Valid: authotron:browser:release. Invalid: a prefix with spaces or braces.
             if key_prefix.is_empty()
                 || key_prefix.len() > 128
                 || !key_prefix
@@ -377,7 +420,8 @@ impl BrowserSessionConfig {
 
 impl UiConfig {
     /// Validates browser methods against the session settings and returns them in
-    /// chooser order. Labels must be unique ignoring case so buttons are unambiguous.
+    /// chooser order. Ids must be unique so routes are unambiguous; labels must be
+    /// unique ignoring case so buttons are unambiguous.
     pub fn validate_browser_login<'a>(
         &self,
         providers: &'a [crate::providers::ProviderConfig],
@@ -385,6 +429,10 @@ impl UiConfig {
         let methods = browser_methods(providers);
         if methods.len() > MAX_BROWSER_METHODS {
             return Err("at most 16 providers may declare a browser block");
+        }
+        let mut ids = std::collections::HashSet::new();
+        if methods.iter().any(|method| !ids.insert(method.id)) {
+            return Err("provider browser ids must be unique");
         }
         let mut labels = std::collections::HashSet::new();
         if methods
@@ -570,7 +618,7 @@ mod tests {
 
     #[test]
     fn valkey_settings_reject_unsafe_endpoints_and_redact_secrets() {
-        let base = serde_json::json!({"type": "valkey", "url": "rediss://service:6379/0", "key_prefix": "authotron:browser:v1:release", "password": "secret-fixture-no-logging"});
+        let base = serde_json::json!({"type": "valkey", "url": "rediss://service:6379/0", "key_prefix": "authotron:browser:release", "password": "secret-fixture-no-logging"});
         let mut json = session_json();
         json["backend"] = base.clone();
         let config: BrowserSessionConfig = serde_json::from_value(json.clone()).unwrap();
@@ -691,7 +739,7 @@ mod tests {
         let mut json =
             serde_json::json!({"type": "plain", "name": name, "realm": "r", "users": []});
         if let Some(label) = label {
-            json["browser"] = serde_json::json!({"label": label});
+            json["browser"] = serde_json::json!({"id": name, "label": label});
         }
         provider(json)
     }
@@ -701,7 +749,7 @@ mod tests {
         let ui = direct_config("https://login.example.test", 300);
         let api = provider(serde_json::json!({
             "type": "ecmwf-api", "name": "api", "realm": "ecmwf",
-            "uri": "https://api.example.test/v1", "browser": {"label": "  API key  "}
+            "uri": "https://api.example.test/v1", "browser": {"id": "api", "label": "  API key  "}
         }));
         let api_only = provider(serde_json::json!({
             "type": "ecmwf-api", "name": "api-only", "realm": "ecmwf", "uri": "https://api.example.test/v1"
@@ -713,20 +761,35 @@ mod tests {
             plain("b", Some("Guests")),
         ];
         let methods = ui.validate_browser_login(&providers).unwrap();
-        let summary: Vec<_> = methods.iter().map(|m| (m.label, m.kind())).collect();
+        let summary: Vec<_> = methods.iter().map(|m| (m.id, m.label, m.kind())).collect();
         assert_eq!(
             summary,
             [
-                ("Staff", BrowserMethodKind::Basic),
-                ("API key", BrowserMethodKind::ApiKey),
-                ("Guests", BrowserMethodKind::Basic),
+                ("a", "Staff", BrowserMethodKind::Basic),
+                ("api", "API key", BrowserMethodKind::ApiKey),
+                ("b", "Guests", BrowserMethodKind::Basic),
             ]
+        );
+        assert!(
+            ui.validate_browser_login(&[plain("a", Some("Staff")), plain("a", Some("Guests"))])
+                .unwrap_err()
+                .contains("ids must be unique")
         );
         assert!(
             ui.validate_browser_login(&[plain("a", Some("Staff")), plain("b", Some("sTAFF"))])
                 .unwrap_err()
                 .contains("unique")
         );
+        // Case folding is Unicode-aware, not ASCII-only.
+        for (left, right) in [("Zugang Ärzte", "zugang ärzte"), ("ΣΥΝΔΕΣΗ", "Συνδεση")]
+        {
+            assert!(
+                ui.validate_browser_login(&[plain("a", Some(left)), plain("b", Some(right))])
+                    .unwrap_err()
+                    .contains("unique"),
+                "{left} / {right}"
+            );
+        }
         let many: Vec<_> = (0..=MAX_BROWSER_METHODS)
             .map(|n| plain(&n.to_string(), Some(&format!("Method {n}"))))
             .collect();
@@ -763,18 +826,42 @@ mod tests {
             ("   ".to_owned(), false),
             ("Line\nbreak".to_owned(), false),
         ] {
-            let json = serde_json::json!({"type": "plain", "name": "p", "realm": "r", "users": [], "browser": {"label": label}});
+            let json = serde_json::json!({"type": "plain", "name": "p", "realm": "r", "users": [], "browser": {"id": "p", "label": label}});
             assert_eq!(
                 serde_json::from_value::<crate::providers::ProviderConfig>(json).is_ok(),
                 valid,
                 "{label:?}"
             );
         }
-        let extra = serde_json::json!({"type": "plain", "name": "p", "realm": "r", "users": [], "browser": {"label": "Staff", "url": "/x"}});
+        let extra = serde_json::json!({"type": "plain", "name": "p", "realm": "r", "users": [], "browser": {"id": "p", "label": "Staff", "url": "/x"}});
         assert!(serde_json::from_value::<crate::providers::ProviderConfig>(extra).is_err());
+        let missing_id = serde_json::json!({"type": "plain", "name": "p", "realm": "r", "users": [], "browser": {"label": "Staff"}});
+        assert!(serde_json::from_value::<crate::providers::ProviderConfig>(missing_id).is_err());
+        for (id, valid) in [
+            ("staff".to_owned(), true),
+            ("ecmwf-api-key".to_owned(), true),
+            ("0".to_owned(), true),
+            ("a".repeat(32), true),
+            ("a".repeat(33), false),
+            (String::new(), false),
+            ("Staff".to_owned(), false),
+            ("-staff".to_owned(), false),
+            ("a_b".to_owned(), false),
+            ("a b".to_owned(), false),
+            ("callback".to_owned(), false),
+            ("new".to_owned(), false),
+            ("account".to_owned(), false),
+        ] {
+            let json = serde_json::json!({"type": "plain", "name": "p", "realm": "r", "users": [], "browser": {"id": id, "label": "Staff"}});
+            assert_eq!(
+                serde_json::from_value::<crate::providers::ProviderConfig>(json).is_ok(),
+                valid,
+                "{id:?}"
+            );
+        }
         let jwt = serde_json::json!({
             "type": "jwt", "name": "jwt", "cert_uri": "https://idp.example.test/certs",
-            "realm": "r", "iam_realm": "r", "browser": {"label": "SSO"}
+            "realm": "r", "iam_realm": "r", "browser": {"id": "sso", "label": "SSO"}
         });
         let error = serde_json::from_value::<crate::providers::ProviderConfig>(jwt.clone())
             .unwrap_err()
@@ -885,6 +972,52 @@ mod tests {
             "branding": {"logo_url": "javascript:alert(1)"}
         }));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn schema_browser_id_rules_match_server_validation() {
+        let generated = serde_json::to_value(schemars::schema_for!(crate::config::Config)).unwrap();
+        let id = &generated["$defs"]["ProviderBrowserConfig"]["properties"]["id"];
+        assert_eq!(id["pattern"], BROWSER_ID_PATTERN);
+        assert_eq!(id["minLength"], 1);
+        assert_eq!(id["maxLength"], BROWSER_ID_MAX_LEN);
+        assert_eq!(id["not"]["enum"], serde_json::json!(RESERVED_BROWSER_IDS));
+        // The pattern's `{0,31}` repetition must agree with the length constant.
+        assert!(BROWSER_ID_PATTERN.ends_with(&format!("{{0,{}}}$", BROWSER_ID_MAX_LEN - 1)));
+        for (id, valid) in [
+            ("staff", true),
+            ("2fa", true),
+            ("a".repeat(BROWSER_ID_MAX_LEN).as_str(), true),
+            ("a".repeat(BROWSER_ID_MAX_LEN + 1).as_str(), false),
+            ("-staff", false),
+            ("Staff", false),
+            ("a_b", false),
+            ("", false),
+        ] {
+            assert_eq!(valid_browser_id(id), valid, "{id}");
+        }
+    }
+
+    #[test]
+    fn login_script_embeds_the_browser_id_pattern() {
+        let script = include_str!("../static/login.js");
+        // The script anchors the id after the route prefix: drop the leading `^`.
+        let expected = format!("/^\\/login\\/method\\/{}/", &BROWSER_ID_PATTERN[1..]);
+        assert!(script.contains(&expected), "login.js lacks {expected}");
+    }
+
+    #[test]
+    fn valkey_script_bounds_browser_ids_like_the_server() {
+        // Lua patterns have no `{m,n}` repetition, so the script matches the character
+        // classes as `[%l%d][%l%d%-]*` (regex `[a-z0-9][a-z0-9-]*`) and enforces the
+        // length separately; the longest flow tag is `basic:` plus a maximum-length id.
+        let script = include_str!("../../src/browser/valkey.lua");
+        assert!(script.contains("'^(%l+):([%l%d][%l%d%-]*)$'"));
+        assert!(script.contains(&format!("string.len(id) > {BROWSER_ID_MAX_LEN}")));
+        let flow_max = "basic:".len() + BROWSER_ID_MAX_LEN;
+        assert!(script.contains(&format!("string.len(ARGV[4]) > {flow_max}")));
+        assert!(script.contains(&format!("HSTRLEN', key, 'flow') > {flow_max}")));
+        assert!(BROWSER_ID_PATTERN.starts_with("^[a-z0-9][a-z0-9-]{"));
     }
 
     #[test]

@@ -72,6 +72,8 @@ pub struct HttpInFlightGuard(Option<IntGauge>);
 pub enum BrowserOutcome {
     Success,
     Rejected,
+    /// Valid credentials whose identity fails the current OAuth scope policy.
+    Denied,
     Malformed,
     Origin,
     Csrf,
@@ -86,6 +88,7 @@ impl BrowserOutcome {
         match self {
             Self::Success => "success",
             Self::Rejected => "rejected",
+            Self::Denied => "denied",
             Self::Malformed => "malformed",
             Self::Origin => "origin",
             Self::Csrf => "csrf",
@@ -102,6 +105,7 @@ impl BrowserOutcome {
 pub struct BrowserAttemptGuard {
     metrics: Metrics,
     flow: &'static str,
+    method: std::sync::Arc<str>,
     started: std::time::Instant,
     pub outcome: BrowserOutcome,
     completed: bool,
@@ -115,6 +119,7 @@ impl Drop for BrowserAttemptGuard {
     fn drop(&mut self) {
         let labels = [
             self.flow,
+            &self.method,
             if self.completed {
                 self.outcome.label()
             } else {
@@ -308,14 +313,14 @@ impl Metrics {
         let browser_attempts = register_int_counter_vec_with_registry!(
             "authotron_browser_login_attempts_total",
             "Browser form POST outcomes including session persistence",
-            &["flow", "outcome"],
+            &["flow", "method", "outcome"],
             registry.clone()
         )
         .expect("register browser attempts");
         let browser_duration = register_histogram_vec_with_registry!(
             "authotron_browser_login_duration_seconds",
             "Browser form POST handler duration until response creation or cancellation",
-            &["flow", "outcome"],
+            &["flow", "method", "outcome"],
             vec![0.005, 0.025, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0],
             registry.clone()
         )
@@ -342,10 +347,12 @@ impl Metrics {
         HttpInFlightGuard(Some(self.browser_inflight.clone()))
     }
 
-    pub fn browser_attempt_guard(&self, flow: crate::browser::LoginFlow) -> BrowserAttemptGuard {
+    /// `method` is the configured `browser.id`; at most 16 methods bound its cardinality.
+    pub fn browser_attempt_guard(&self, flow: &crate::browser::LoginFlow) -> BrowserAttemptGuard {
         BrowserAttemptGuard {
             metrics: self.clone(),
             flow: flow.metric_label(),
+            method: flow.method.clone(),
             started: std::time::Instant::now(),
             outcome: BrowserOutcome::Cancelled,
             completed: false,

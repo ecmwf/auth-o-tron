@@ -28,14 +28,14 @@ impl std::io::Write for CapturedLogs {
 
 const ORIGIN: &str = "https://login.example.test";
 const KEY: &str = "public&+#=?fixture";
-const PATH: &str = "/login/method/0";
+const PATH: &str = "/login/method/ecmwf-api-key";
 
 // Public synthetic credentials and explicit loopback upstream; no local config reads.
 fn config(uri: &str, enabled: bool) -> ConfigV2 {
     serde_json::from_value(json!({
         "store": {"enabled": false}, "services": [], "augmenters": [],
         "providers": [{"type": "ecmwf-api", "name": "ECMWF API Provider", "realm": "ecmwf", "uri": uri,
-            "browser": {"label": "ECMWF API key"}}],
+            "browser": {"id": "ecmwf-api-key", "label": "ECMWF API key"}}],
         "server": {"host": "127.0.0.1", "port": 0}, "metrics": {"enabled": false},
         "jwt": {"iss": "public-test", "exp": 300, "secret": "public-test-only-secret"},
         "logging": {"level": "warn", "format": "console"},
@@ -45,13 +45,17 @@ fn config(uri: &str, enabled: bool) -> ConfigV2 {
     })).unwrap()
 }
 
-/// Sets or removes the `browser` block of the provider named `name`.
+/// Sets or removes the `browser` block of the provider named `name`; the method
+/// id is the lowercased name with spaces replaced by hyphens.
 fn set_browser(cfg: ConfigV2, name: &str, label: Option<&str>) -> ConfigV2 {
     let mut value = serde_json::to_value(cfg).unwrap();
     for provider in value["providers"].as_array_mut().unwrap() {
         if provider["name"] == name {
             match label {
-                Some(label) => provider["browser"] = json!({"label": label}),
+                Some(label) => {
+                    provider["browser"] =
+                        json!({"id": name.to_lowercase().replace(' ', "-"), "label": label})
+                }
                 None => {
                     provider.as_object_mut().unwrap().remove("browser");
                 }
@@ -301,7 +305,7 @@ async fn verified_login_uses_uncached_query_rotated_secure_cookie_and_safe_ident
         .await
         .unwrap();
     let login = text(get(app.clone(), "/login").await).await;
-    assert!(login.contains("href=\"/login/method/0\""));
+    assert!(login.contains("href=\"/login/method/ecmwf-api-key\""));
     assert!(login.contains("href=\"/sso/start\""));
     let mut previous = None;
     for _ in 0..2 {
@@ -374,7 +378,7 @@ async fn verified_login_uses_uncached_query_rotated_secure_cookie_and_safe_ident
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let chooser = text(response).await;
-        assert!(chooser.contains("href=\"/login/method/0\""));
+        assert!(chooser.contains("href=\"/login/method/ecmwf-api-key\""));
         assert!(chooser.contains("href=\"/sso/start\""));
         let mut api_request = Request::get("/authenticate")
             .header(
@@ -739,8 +743,8 @@ async fn transport_failure_is_generic_and_key_never_enters_url_response() {
     assert!(!logs.contains("public%26%2B%23%3D%3Ffixture"));
 }
 
-const BASIC: &str = "/login/method/1";
-const OTHER: &str = "/login/method/2";
+const BASIC: &str = "/login/method/local";
+const OTHER: &str = "/login/method/other";
 const PASSWORD: &str = " 密码: public&+fixture ";
 
 fn combined_config(uri: &str) -> ConfigV2 {
@@ -749,7 +753,7 @@ fn combined_config(uri: &str) -> ConfigV2 {
         json!({"type": "plain", "name": "Local", "realm": "local", "users": [
             {"username": "alice", "password": PASSWORD, "roles": ["configured"]},
             {"username": "bob", "password": "public-bob", "roles": []}
-        ], "browser": {"label": "Local account"}}),
+        ], "browser": {"id": "local", "label": "Local account"}}),
         // Same realm, not browser-enabled: direct Basic must never fall through to it.
         json!({"type": "plain", "name": "Other", "realm": "local", "users": [
             {"username": "alice", "password": "other-password", "roles": ["wrong-provider"]}
@@ -919,7 +923,14 @@ async fn invalid_basic_is_generic_bounded_and_never_uses_another_provider_or_log
         );
     }
     // Query credentials are not consumed by the GET form.
-    let html = text(get(app, "/login/method/1?username=alice&password=query-secret").await).await;
+    let html = text(
+        get(
+            app,
+            "/login/method/local?username=alice&password=query-secret",
+        )
+        .await,
+    )
+    .await;
     assert!(!html.contains("query-secret"));
 }
 
@@ -1038,17 +1049,17 @@ async fn same_username_in_different_realms_is_verified_only_by_its_own_method() 
     value["providers"] = json!([
         {"type": "plain", "name": "Staff", "realm": "staff-realm", "users": [
             {"username": "shared", "password": "staff-password", "roles": []}
-        ], "browser": {"label": "Staff"}},
+        ], "browser": {"id": "staff", "label": "Staff"}},
         {"type": "plain", "name": "Guests", "realm": "guest-realm", "users": [
             {"username": "shared", "password": "guest-password", "roles": []}
-        ], "browser": {"label": "Guests"}},
+        ], "browser": {"id": "guests", "label": "Guests"}},
     ]);
     let (app, state) = startup::build_app(Arc::new(serde_json::from_value(value).unwrap()))
         .await
         .unwrap();
     let methods = [
-        ("/login/method/0", "staff-password", "staff-realm"),
-        ("/login/method/1", "guest-password", "guest-realm"),
+        ("/login/method/staff", "staff-password", "staff-realm"),
+        ("/login/method/guests", "guest-password", "guest-realm"),
     ];
     for (path, password, realm) in methods {
         for (_, other_password, _) in methods.iter().filter(|m| m.0 != path) {
@@ -1088,12 +1099,12 @@ async fn same_username_in_different_realms_is_verified_only_by_its_own_method() 
         assert!(html.contains(&format!("<dd>{realm}</dd>")), "{html}");
     }
 
-    // A form issued for method 0 is bound to that method and survives a cross-method post.
-    let (cookie, csrf) = transaction_for(app.clone(), "/login/method/0").await;
+    // A form issued for `staff` is bound to that id and survives a cross-method post.
+    let (cookie, csrf) = transaction_for(app.clone(), "/login/method/staff").await;
     let response = request(
         app.clone(),
         basic_post_to(
-            "/login/method/1",
+            "/login/method/guests",
             &cookie,
             &csrf,
             "shared",
@@ -1106,7 +1117,7 @@ async fn same_username_in_different_realms_is_verified_only_by_its_own_method() 
     let response = request(
         app.clone(),
         basic_post_to(
-            "/login/method/0",
+            "/login/method/staff",
             &cookie,
             &csrf,
             "shared",
@@ -1199,16 +1210,34 @@ async fn basic_one_use_rotation_and_independent_users_preserve_session_isolation
 
 #[tokio::test]
 async fn browser_configuration_requires_session_unique_labels_and_is_opt_in() {
-    for change in ["missing-session", "duplicate-label", "too-many", "bad-ttl"] {
+    for change in [
+        "missing-session",
+        "duplicate-label",
+        "duplicate-id",
+        "reserved-id",
+        "too-many",
+        "bad-ttl",
+    ] {
         let mut cfg = combined_config("http://127.0.0.1:1");
         match change {
             "missing-session" => cfg.ui.browser_session = None,
             "duplicate-label" => cfg = set_browser(cfg, "Other", Some("ecmwf API KEY")),
+            "duplicate-id" => {
+                let mut value = serde_json::to_value(cfg).unwrap();
+                value["providers"][2]["browser"] = json!({"id": "local", "label": "Other"});
+                cfg = serde_json::from_value(value).unwrap();
+            }
+            "reserved-id" => {
+                let mut value = serde_json::to_value(cfg).unwrap();
+                value["providers"][2]["browser"] = json!({"id": "account", "label": "Other"});
+                assert!(serde_json::from_value::<ConfigV2>(value).is_err());
+                continue;
+            }
             "too-many" => {
                 for n in 0..15 {
                     cfg.providers.push(
                         serde_json::from_value(json!({"type": "plain", "name": format!("extra-{n}"),
-                            "realm": "local", "users": [], "browser": {"label": format!("Extra {n}")}}))
+                            "realm": "local", "users": [], "browser": {"id": format!("extra-{n}"), "label": format!("Extra {n}")}}))
                         .unwrap(),
                     );
                 }
@@ -1222,7 +1251,7 @@ async fn browser_configuration_requires_session_unique_labels_and_is_opt_in() {
     for n in 0..14 {
         cfg.providers.push(
             serde_json::from_value(json!({"type": "plain", "name": format!("extra-{n}"),
-                "realm": "local", "users": [], "browser": {"label": format!("Extra {n}")}}))
+                "realm": "local", "users": [], "browser": {"id": format!("extra-{n}"), "label": format!("Extra {n}")}}))
             .unwrap(),
         );
     }
@@ -1245,16 +1274,15 @@ async fn browser_configuration_requires_session_unique_labels_and_is_opt_in() {
     let (app, _) = startup::build_app(Arc::new(cfg)).await.unwrap();
     let chooser = text(get(app.clone(), "/login").await).await;
     assert!(
-        chooser.contains("href=\"/login/method/0\" data-login-dialog=\"method\">Local account</a>")
+        chooser.contains(
+            "href=\"/login/method/local\" data-login-dialog=\"method\">Local account</a>"
+        )
     );
     assert!(!chooser.contains("ECMWF API key"));
     assert_eq!(chooser.matches("data-login-dialog=").count(), 1);
-    assert_eq!(
-        get(app.clone(), "/login/method/1").await.status(),
-        StatusCode::NOT_FOUND
-    );
-    let (cookie, csrf) = transaction_for(app.clone(), "/login/method/0").await;
-    let login = submit_to("/login/method/0", &cookie, &csrf, PASSWORD);
+    assert_eq!(get(app.clone(), PATH).await.status(), StatusCode::NOT_FOUND);
+    let (cookie, csrf) = transaction_for(app.clone(), BASIC).await;
+    let login = submit_to(BASIC, &cookie, &csrf, PASSWORD);
     assert_eq!(request(app, login).await.status(), StatusCode::SEE_OTHER);
     for enabled in [true, false] {
         let mut cfg = combined_config("http://127.0.0.1:1");
@@ -1279,7 +1307,7 @@ async fn browser_configuration_requires_session_unique_labels_and_is_opt_in() {
     let mut jwt = serde_json::to_value(combined_config("http://127.0.0.1:1")).unwrap();
     jwt["providers"].as_array_mut().unwrap().push(json!({
         "type": "jwt", "name": "sso", "cert_uri": "https://idp.example.test/certs",
-        "realm": "local", "iam_realm": "local", "browser": {"label": "SSO"}
+        "realm": "local", "iam_realm": "local", "browser": {"id": "sso", "label": "SSO"}
     }));
     let error = serde_json::from_value::<ConfigV2>(jwt)
         .err()
@@ -1362,14 +1390,14 @@ async fn multiple_plain_methods_verify_only_their_own_users_and_bind_forms() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(!text(response).await.contains(KEY));
     for path in [
-        "/login/method/3",
-        "/login/method/16",
-        "/login/method/01",
-        "/login/method/00",
-        "/login/method/+1",
-        "/login/method/-0",
-        "/login/method/1a",
-        "/login/method/999999999999999999999999",
+        "/login/method/0",
+        "/login/method/1",
+        "/login/method/Local",
+        "/login/method/LOCAL",
+        "/login/method/local%20",
+        "/login/method/-local",
+        "/login/method/new",
+        "/login/method/callback",
         "/login/method/",
         "/login/method",
         "/login/basic",
@@ -1383,6 +1411,35 @@ async fn multiple_plain_methods_verify_only_their_own_users_and_bind_forms() {
         let (cookie, csrf) = transaction_for(app.clone(), BASIC).await;
         let response = request(app.clone(), submit_to(path, &cookie, &csrf, PASSWORD)).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn method_urls_follow_ids_across_relabel_and_reorder() {
+    let relabelled = set_browser(
+        combined_config("http://127.0.0.1:1"),
+        "Local",
+        Some("Staff sign-in"),
+    );
+    let mut reordered = serde_json::to_value(combined_config("http://127.0.0.1:1")).unwrap();
+    reordered["providers"].as_array_mut().unwrap().reverse();
+    for (cfg, label) in [
+        (combined_config("http://127.0.0.1:1"), "Local account"),
+        (relabelled, "Staff sign-in"),
+        (serde_json::from_value(reordered).unwrap(), "Local account"),
+    ] {
+        let (app, _) = startup::build_app(Arc::new(cfg)).await.unwrap();
+        let chooser = text(get(app.clone(), "/login").await).await;
+        assert!(
+            chooser.contains(&format!(
+                "href=\"{BASIC}\" data-login-dialog=\"method\">{label}</a>"
+            )),
+            "{chooser}"
+        );
+        assert!(chooser.contains(&format!("href=\"{PATH}\"")));
+        let (cookie, csrf) = transaction_for(app.clone(), BASIC).await;
+        let response = request(app, submit_to(BASIC, &cookie, &csrf, PASSWORD)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER, "{label}");
     }
 }
 
@@ -1523,7 +1580,7 @@ async fn augmentation_timeout_creates_no_session_and_releases_admission() {
     let metrics = state.metrics.render().unwrap();
     assert!(
         metrics.contains(
-            "authotron_browser_login_attempts_total{flow=\"basic\",outcome=\"timeout\"} 1"
+            "authotron_browser_login_attempts_total{flow=\"basic\",method=\"local\",outcome=\"timeout\"} 1"
         )
     );
     assert!(metrics.contains("authotron_browser_logins_inflight 0"));
@@ -1539,7 +1596,11 @@ async fn browser_metrics_record_final_post_outcomes_for_both_flows_without_secre
         .expect(2)
         .create_async()
         .await;
-    for (path, flow) in [(BASIC, "basic"), (PATH, "ecmwf-api-key")] {
+    // `flow` is the credential type; `method` is the configured `browser.id`.
+    for (path, flow, method) in [
+        (BASIC, "basic", "local"),
+        (PATH, "ecmwf-api-key", "ecmwf-api-key"),
+    ] {
         let mut cfg = combined_config(&server.url());
         let settings = cfg.ui.browser_session.as_mut().unwrap();
         settings.max_sessions = 1;
@@ -1629,8 +1690,8 @@ async fn browser_metrics_record_final_post_outcomes_for_both_flows_without_secre
             "origin",
             "malformed",
         ] {
-            assert!(metrics.contains(&format!("authotron_browser_login_attempts_total{{flow=\"{flow}\",outcome=\"{outcome}\"}} 1")), "{flow} {outcome}");
-            assert!(metrics.contains(&format!("authotron_browser_login_duration_seconds_count{{flow=\"{flow}\",outcome=\"{outcome}\"}} 1")));
+            assert!(metrics.contains(&format!("authotron_browser_login_attempts_total{{flow=\"{flow}\",method=\"{method}\",outcome=\"{outcome}\"}} 1")), "{flow} {outcome}");
+            assert!(metrics.contains(&format!("authotron_browser_login_duration_seconds_count{{flow=\"{flow}\",method=\"{method}\",outcome=\"{outcome}\"}} 1")));
         }
         assert!(metrics.contains("authotron_browser_logins_inflight 0"));
         for secret in [
@@ -1840,7 +1901,7 @@ async fn cancelled_augmentation_releases_all_admission_permits_without_sessions(
     let metrics = state.metrics.render().unwrap();
     assert!(metrics.contains("authotron_browser_logins_inflight 0"));
     assert!(metrics.contains(
-        "authotron_browser_login_attempts_total{flow=\"basic\",outcome=\"cancelled\"} 8"
+        "authotron_browser_login_attempts_total{flow=\"basic\",method=\"local\",outcome=\"cancelled\"} 8"
     ));
     let mut replacements = Vec::new();
     for _ in 0..8 {
@@ -1921,8 +1982,8 @@ async fn trailing_slash_subpages_redirect_to_canonical_paths() {
         .await
         .unwrap();
     for (path, location) in [
-        ("/login/method/0/", "/login/method/0"),
-        ("/login/method/0/?a=b", "/login/method/0"),
+        ("/login/method/ecmwf-api-key/", PATH),
+        ("/login/method/ecmwf-api-key/?a=b", PATH),
         ("/login/account/", "/login/account"),
     ] {
         for method in ["GET", "HEAD"] {
@@ -1945,14 +2006,18 @@ async fn trailing_slash_subpages_redirect_to_canonical_paths() {
             assert!(!response.headers().contains_key(header::SET_COOKIE));
         }
     }
-    for path in ["/login/method/1/", "/login/method/01/", "/login/method/x/"] {
+    for path in [
+        "/login/method/0/",
+        "/login/method/ECMWF-API-KEY/",
+        "/login/method/x/",
+    ] {
         assert_eq!(
             get(app.clone(), path).await.status(),
             StatusCode::NOT_FOUND,
             "{path}"
         );
     }
-    for path in ["/login/method/0/", "/login/account/"] {
+    for path in ["/login/method/ecmwf-api-key/", "/login/account/"] {
         let response = request(
             app.clone(),
             Request::post(path).body(Body::empty()).unwrap(),
@@ -1961,7 +2026,11 @@ async fn trailing_slash_subpages_redirect_to_canonical_paths() {
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{path}");
         assert!(!response.headers().contains_key(header::LOCATION));
     }
-    for path in ["/login/method/", "/login/method/0//", "/login/accounts/"] {
+    for path in [
+        "/login/method/",
+        "/login/method/ecmwf-api-key//",
+        "/login/accounts/",
+    ] {
         assert!(
             !get(app.clone(), path).await.status().is_redirection(),
             "{path}"
@@ -1972,7 +2041,7 @@ async fn trailing_slash_subpages_redirect_to_canonical_paths() {
     cfg = set_browser(cfg, "ECMWF API Provider", None);
     for cfg in [config("http://127.0.0.1:1", false), cfg] {
         let (app, _) = startup::build_app(Arc::new(cfg)).await.unwrap();
-        for path in ["/login/method/0/", "/login/account/"] {
+        for path in ["/login/method/ecmwf-api-key/", "/login/account/"] {
             assert_eq!(get(app.clone(), path).await.status(), StatusCode::NOT_FOUND);
         }
     }
@@ -1984,9 +2053,14 @@ async fn unknown_login_paths_render_branded_not_found_page() {
         .await
         .unwrap();
     for path in [
-        "/login/method/9",
-        "/login/method/01",
-        "/login/method/9/",
+        "/login/method/0",
+        "/login/method/unknown",
+        "/login/method/unknown/",
+        "/login/method/Ecmwf-Api-Key",
+        // Percent escapes are rejected even when they decode to a configured id.
+        "/login/method/ecmwf-api-ke%79",
+        "/login/method/ecmwf%2Dapi-key",
+        "/login/method/ecmwf-api-ke%79/",
         "/login/basic",
         "/login/nope",
         "/login/nope/deeper",
@@ -2023,7 +2097,11 @@ async fn unknown_login_paths_render_branded_not_found_page() {
     }
 
     // POST to unknown paths stays a plain 404; existing routes keep 405.
-    for path in ["/login/nope", "/login/method/9"] {
+    for path in [
+        "/login/nope",
+        "/login/method/unknown",
+        "/login/method/ecmwf-api-ke%79",
+    ] {
         let response = request(
             app.clone(),
             Request::post(path).body(Body::empty()).unwrap(),
@@ -2042,16 +2120,13 @@ async fn unknown_login_paths_render_branded_not_found_page() {
     for (path, location) in [
         ("/login/", "/login"),
         ("/login/account/", "/login/account"),
-        ("/login/method/0/", "/login/method/0"),
+        ("/login/method/ecmwf-api-key/", PATH),
     ] {
         let response = get(app.clone(), path).await;
         assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT, "{path}");
         assert_eq!(response.headers()[header::LOCATION], location);
     }
-    assert_eq!(
-        get(app.clone(), "/login/method/0").await.status(),
-        StatusCode::OK
-    );
+    assert_eq!(get(app.clone(), PATH).await.status(), StatusCode::OK);
 
     // Outside /login the generic empty 404 is unchanged.
     let response = get(app, "/nope").await;
@@ -2062,7 +2137,7 @@ async fn unknown_login_paths_render_branded_not_found_page() {
     let (app, _) = startup::build_app(Arc::new(config("http://127.0.0.1:1", false)))
         .await
         .unwrap();
-    for path in ["/login/nope", "/login/method/9"] {
+    for path in ["/login/nope", "/login/method/unknown"] {
         let response = get(app.clone(), path).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
         assert!(

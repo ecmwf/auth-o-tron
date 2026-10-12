@@ -155,6 +155,22 @@ impl OAuthRuntime {
     ) -> Result<BoundAuthorizationTransaction, StoreError> {
         dispatch!(self, lookup_bound(id, hash))
     }
+    /// Atomically consumes a pending transaction, e.g. after a policy denial at login.
+    pub(crate) async fn consume_pending(
+        &self,
+        id: &TransactionId,
+        hash: &[u8; 32],
+    ) -> Result<super::records::AuthorizationTransaction, StoreError> {
+        dispatch!(self, consume(id, hash))
+    }
+    /// Atomically removes a post-login record that current policy no longer permits.
+    pub(crate) async fn reject_ineligible(
+        &self,
+        id: &TransactionId,
+        hash: &[u8; 32],
+    ) -> Result<super::records::AuthorizationTransaction, StoreError> {
+        dispatch!(self, reject_ineligible(id, hash))
+    }
     pub(crate) async fn promote(
         &self,
         id: &TransactionId,

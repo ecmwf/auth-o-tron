@@ -9,10 +9,11 @@
   const content = document.getElementById("login-dialog-content");
   const status = document.getElementById("login-dialog-status");
   const close = dialog.querySelector(".login-dialog-close");
-  // Indices 0-15 mirror MAX_BROWSER_METHODS (16) in src/config/ui.rs; the server
-  // still answers 404 for indices without a configured method.
-  // Valid: /login/method/0, /login/method/15. Invalid: /login/method/01, /login/method/16, /login/method/x.
-  const methodPath = /^\/login\/method\/(?:[0-9]|1[0-5])$/;
+  // Ids mirror valid_browser_id in src/config/ui.rs (^[a-z0-9][a-z0-9-]{0,31}$); the
+  // server still answers 404 for reserved or unconfigured ids.
+  // Valid: /login/method/password, /login/method/ecmwf-api-key.
+  // Invalid: /login/method/Password, /login/method/-x, /login/method/a/b.
+  const methodPath = /^\/login\/method\/[a-z0-9][a-z0-9-]{0,31}$/;
   // Credential fields must form exactly one known set; hidden fields are optional extras.
   const credentialSets = [["username", "password"], ["api_key"]];
   const failure = "Sign-in could not be completed. Please try again.";
@@ -59,7 +60,7 @@
     button.focus();
   }
 
-  // Accept /login/method/0, never /login/method/0?return_to=... or another origin.
+  // Accept /login/method/password, never /login/method/password?return_to=... or another origin.
   function fixedUrl(value, path) {
     const url = new URL(value, window.location.origin);
     return url.origin === window.location.origin && url.pathname === path &&

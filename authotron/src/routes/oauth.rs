@@ -64,6 +64,7 @@ fn store_status(error: StoreError) -> StatusCode {
     match error {
         StoreError::Missing => StatusCode::BAD_REQUEST,
         StoreError::Limited => StatusCode::TOO_MANY_REQUESTS,
+        StoreError::AccessDenied => StatusCode::FORBIDDEN,
         _ => StatusCode::SERVICE_UNAVAILABLE,
     }
 }
@@ -158,6 +159,10 @@ fn recovery_for_flow(state: &AppState, flow: Result<ActiveFlow, StoreError>) -> 
             Redirect::to("/oauth/continue").into_response(),
         )),
         Ok(ActiveFlow::Missing) => Some(session_ended(state)),
+        // `/oauth/continue` performs the atomic removal and `access_denied` redirect.
+        Err(StoreError::AccessDenied) => Some(secure_oauth_response(
+            Redirect::to("/oauth/continue").into_response(),
+        )),
         Err(error) => Some(local(store_status(error))),
     }
 }
@@ -273,11 +278,11 @@ async fn continue_consent(State(state): State<AppState>, headers: HeaderMap) -> 
     };
     let csrf = match runtime.prepare(&id, &hash).await {
         Ok(csrf) => csrf,
-        Err(error) => return local(store_status(error)),
+        Err(error) => return store_failure(runtime, &id, &hash, error).await,
     };
     let context = match runtime.consent_context(&id, &hash).await {
         Ok(context) => context,
-        Err(error) => return local(store_status(error)),
+        Err(error) => return store_failure(runtime, &id, &hash, error).await,
     };
     let request = context.transaction().request();
     let client = runtime
@@ -377,7 +382,7 @@ async fn consent(
     };
     let context = match runtime.consent_context(&id, &hash).await {
         Ok(context) => context,
-        Err(error) => return local(store_status(error)),
+        Err(error) => return store_failure(runtime, &id, &hash, error).await,
     };
     let outcome = match runtime
         .issue(&id, &hash, &fields["csrf"], &fields["decision"])
@@ -392,21 +397,25 @@ async fn consent(
             });
         }
     };
-    let request = context.transaction().request();
-    let (callback, state_value, parameter, value) = match &outcome {
-        CodeIssueOutcome::Issued(code) => (
+    match &outcome {
+        CodeIssueOutcome::Issued(code) => callback_response(
+            runtime,
             code.redirect_uri(),
             code.state(),
-            "code",
-            code.code().as_secret_str(),
+            ("code", code.code().as_secret_str()),
         ),
-        CodeIssueOutcome::Denied => (
-            request.redirect_uri(),
-            request.state(),
-            "error",
-            "access_denied",
-        ),
-    };
+        CodeIssueOutcome::Denied => access_denied(runtime, context.transaction().request()),
+    }
+}
+/// Builds the 303 to a callback already validated against the registered client,
+/// appending one result parameter, the original `state`, and `iss` (RFC 9207), and
+/// clearing the OAuth cookies. Example: `https://app.example.org/cb?error=access_denied&state=s&iss=...`.
+fn callback_response(
+    runtime: &OAuthRuntime,
+    callback: &str,
+    state_value: Option<&str>,
+    (parameter, value): (&str, &str),
+) -> Response {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
     query.append_pair(parameter, value);
     if let Some(state_value) = state_value {
@@ -422,6 +431,35 @@ async fn consent(
     cookie(&mut response, TX, "", 0);
     cookie(&mut response, BROWSER, "", 0);
     response
+}
+/// RFC 6749 §4.1.2.1 `access_denied` for a validated request whose stored transaction
+/// has already been atomically consumed by the caller.
+pub(super) fn access_denied(
+    runtime: &OAuthRuntime,
+    request: &crate::oauth::authorization::ValidatedAuthorizationRequest,
+) -> Response {
+    callback_response(
+        runtime,
+        request.redirect_uri(),
+        request.state(),
+        ("error", "access_denied"),
+    )
+}
+/// Store failures stay local, except a confirmed policy denial: that record is removed
+/// atomically and the client receives `access_denied`. Removal failures stay local.
+async fn store_failure(
+    runtime: &OAuthRuntime,
+    id: &TransactionId,
+    hash: &[u8; 32],
+    error: StoreError,
+) -> Response {
+    if error != StoreError::AccessDenied {
+        return local(store_status(error));
+    }
+    match runtime.reject_ineligible(id, hash).await {
+        Ok(transaction) => access_denied(runtime, transaction.request()),
+        Err(error) => local(store_status(error)),
+    }
 }
 fn token_error(status: StatusCode, error: &'static str) -> Response {
     secure_oauth_response((status, Json(json!({"error": error}))).into_response())

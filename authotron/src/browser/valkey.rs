@@ -4,6 +4,11 @@ use crate::utils::valkey::ValkeyConnection;
 #[cfg(test)]
 use std::time::Duration;
 
+/// Record format namespace appended to the operator `key_prefix`; bumping it
+/// orphans older records (forms, sessions, quotas, leases) until their TTL ends.
+/// Valid key: `authotron:browser:release:v2:form:<sid>`.
+const RECORD_NAMESPACE: &str = "v2";
+
 #[derive(Clone)]
 pub(super) struct Valkey {
     connection: ValkeyConnection,
@@ -20,7 +25,7 @@ impl Valkey {
             .map_err(|_| BrowserVerifyError::Unavailable)?;
         Ok(Self {
             connection,
-            prefix: key_prefix.clone(),
+            prefix: format!("{key_prefix}:{RECORD_NAMESPACE}"),
         })
     }
 
@@ -152,7 +157,7 @@ mod tests {
     fn config(url: &str, prefix: &str) -> ConfigV2 {
         serde_json::from_value(serde_json::json!({
             "store": {"enabled": false}, "services": [], "augmenters": [],
-            "providers": [{"type": "plain", "name": "fixture", "realm": "fixture", "users": [{"username": "alice", "password": "public-fixture", "roles": ["reader"]}], "browser": {"label": "Password"}}],
+            "providers": [{"type": "plain", "name": "fixture", "realm": "fixture", "users": [{"username": "alice", "password": "public-fixture", "roles": ["reader"]}], "browser": {"id": "password", "label": "Password"}}],
             "server": {"port": 0}, "jwt": {"iss": "fixture", "exp": 300, "secret": "public-test-only"},
             "logging": {"level": "warn", "format": "console"},
             "ui": {"enabled": true, "browser_session": {
@@ -234,7 +239,7 @@ mod tests {
         ]));
         let address = docker(&["port", &fixture.0, "6379/tcp"]);
         let url = format!("redis://{address}/0");
-        let prefix = "authotron:browser:v1:test";
+        let prefix = "authotron:browser:test";
         let settings = config(&url, prefix).ui.browser_session.unwrap().backend;
         let mut ready = false;
         for _ in 0..100 {
@@ -249,27 +254,34 @@ mod tests {
         let b = state(&url, prefix).await;
         let backend = a.valkey.as_ref().unwrap();
 
-        let (sid, csrf) = a.form(LoginFlow::basic(0)).await.unwrap();
+        let (sid, csrf) = a.form(&LoginFlow::basic("password")).await.unwrap();
         assert!(
-            !b.consume(&sid, &"a".repeat(64), LoginFlow::basic(0))
+            !b.consume(&sid, &"a".repeat(64), &LoginFlow::basic("password"))
                 .await
                 .unwrap()
         );
-        assert!(!b.consume(&sid, &csrf, LoginFlow::api_key(0)).await.unwrap());
-        assert!(!b.consume(&sid, &csrf, LoginFlow::basic(1)).await.unwrap());
-        let (left, right) = tokio::join!(
-            a.consume(&sid, &csrf, LoginFlow::basic(0)),
-            b.consume(&sid, &csrf, LoginFlow::basic(0))
+        assert!(
+            !b.consume(&sid, &csrf, &LoginFlow::api_key("password"))
+                .await
+                .unwrap()
         );
+        assert!(
+            !b.consume(&sid, &csrf, &LoginFlow::basic("guests"))
+                .await
+                .unwrap()
+        );
+        let flow = LoginFlow::basic("password");
+        let (left, right) =
+            tokio::join!(a.consume(&sid, &csrf, &flow), b.consume(&sid, &csrf, &flow));
         assert_ne!(
             left.unwrap(),
             right.unwrap(),
             "exactly one atomic consumer wins"
         );
-        let (f1, _) = a.form(LoginFlow::basic(0)).await.unwrap();
-        let (f2, _) = b.form(LoginFlow::api_key(0)).await.unwrap();
+        let (f1, _) = a.form(&LoginFlow::basic("password")).await.unwrap();
+        let (f2, _) = b.form(&LoginFlow::api_key("password")).await.unwrap();
         assert!(matches!(
-            a.form(LoginFlow::basic(0)).await,
+            a.form(&LoginFlow::basic("password")).await,
             Err(BrowserVerifyError::Capacity)
         ));
         b.discard(&f1).await.unwrap();
@@ -277,11 +289,11 @@ mod tests {
 
         let form_nonce = opaque_id();
         let first = a
-            .form_with_nonce(LoginFlow::basic(0), &form_nonce)
+            .form_with_nonce(&LoginFlow::basic("password"), &form_nonce)
             .await
             .unwrap();
         let second = b
-            .form_with_nonce(LoginFlow::basic(0), &form_nonce)
+            .form_with_nonce(&LoginFlow::basic("password"), &form_nonce)
             .await
             .unwrap();
         let (first_id, _) = first.split_once('.').unwrap();
@@ -293,33 +305,34 @@ mod tests {
             format!("{first}.extra"),
         ] {
             assert!(
-                !b.consume_with_nonce(&invalid, &form_nonce, LoginFlow::basic(0))
+                !b.consume_with_nonce(&invalid, &form_nonce, &LoginFlow::basic("password"))
                     .await
                     .unwrap()
             );
         }
         assert!(
-            !b.consume_with_nonce(&first, &opaque_id(), LoginFlow::basic(0))
+            !b.consume_with_nonce(&first, &opaque_id(), &LoginFlow::basic("password"))
                 .await
                 .unwrap()
         );
         assert!(
-            !b.consume_with_nonce(&first, &form_nonce, LoginFlow::api_key(0))
+            !b.consume_with_nonce(&first, &form_nonce, &LoginFlow::api_key("password"))
                 .await
                 .unwrap()
         );
+        let flow = LoginFlow::basic("password");
         let (left, right) = tokio::join!(
-            a.consume_with_nonce(&first, &form_nonce, LoginFlow::basic(0)),
-            b.consume_with_nonce(&first, &form_nonce, LoginFlow::basic(0))
+            a.consume_with_nonce(&first, &form_nonce, &flow),
+            b.consume_with_nonce(&first, &form_nonce, &flow)
         );
         assert_ne!(left.unwrap(), right.unwrap());
         assert!(
-            a.consume_with_nonce(&second, &form_nonce, LoginFlow::basic(0))
+            a.consume_with_nonce(&second, &form_nonce, &LoginFlow::basic("password"))
                 .await
                 .unwrap()
         );
         assert!(
-            !b.consume_with_nonce(&second, &form_nonce, LoginFlow::basic(0))
+            !b.consume_with_nonce(&second, &form_nonce, &LoginFlow::basic("password"))
                 .await
                 .unwrap()
         );
@@ -332,18 +345,18 @@ mod tests {
             backend,
             "DEL",
             &[
-                &format!("{prefix}:session:{winner}"),
-                &format!("{prefix}:sessions"),
+                &format!("{prefix}:v2:session:{winner}"),
+                &format!("{prefix}:v2:sessions"),
             ],
         )
         .await;
 
         let sid = a.save_session(user(), None).await.unwrap();
         let expiry = b.lookup(&sid).await.unwrap().unwrap().expires_at;
-        let ttl1: i64 = command(backend, "PTTL", &[&format!("{prefix}:session:{sid}")]).await;
+        let ttl1: i64 = command(backend, "PTTL", &[&format!("{prefix}:v2:session:{sid}")]).await;
         tokio::time::sleep(Duration::from_millis(25)).await;
         assert_eq!(a.lookup(&sid).await.unwrap().unwrap().expires_at, expiry);
-        let ttl2: i64 = command(backend, "PTTL", &[&format!("{prefix}:session:{sid}")]).await;
+        let ttl2: i64 = command(backend, "PTTL", &[&format!("{prefix}:v2:session:{sid}")]).await;
         assert!(ttl2 < ttl1, "reads never extend expiry");
         assert!(matches!(
             b.save_session(user(), None).await,
@@ -358,7 +371,7 @@ mod tests {
         assert!(a.lookup(&sid).await.unwrap().is_none());
 
         // Corrupt/hostile values are rejected, including STRLEN guarding the large value.
-        let key = format!("{prefix}:session:{rotated}");
+        let key = format!("{prefix}:v2:session:{rotated}");
         for payload in [
             "2\n9999999999999\n{}".to_owned(),
             "1\n9999999999999\ninvalid-json".to_owned(),
@@ -383,7 +396,7 @@ mod tests {
                 "form".into(),
                 short.clone(),
                 csrf.clone(),
-                LoginFlow::basic(0).tag(),
+                LoginFlow::basic("password").tag(),
                 "40".into(),
                 "2".into(),
                 "100".into(),
@@ -392,16 +405,63 @@ mod tests {
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(70)).await;
-        assert!(!b.consume(&short, &csrf, LoginFlow::basic(0)).await.unwrap());
-        // The script stores only method-bound flow tags: valid `basic:0`, invalid `basic`.
-        for invalid in ["basic", "basic:", "basic:100", "Basic:0", "basic:0:x"] {
+        assert!(
+            !b.consume(&short, &csrf, &LoginFlow::basic("password"))
+                .await
+                .unwrap()
+        );
+        // The script stores only method-bound flow tags: valid `basic:password`,
+        // `key:ecmwf-api-key` or a 32-byte id; invalid `basic` or `basic:-x`.
+        let longest = "a".repeat(32);
+        for valid in [
+            "basic:password".to_owned(),
+            "key:ecmwf-api-key".to_owned(),
+            "basic:0".to_owned(),
+            format!("key:{longest}"),
+            format!("basic:{longest}"),
+        ] {
+            let sid = opaque_id();
+            assert_eq!(
+                backend
+                    .call(&[
+                        "form".into(),
+                        sid.clone(),
+                        opaque_id(),
+                        valid.clone(),
+                        "40".into(),
+                        "2".into(),
+                        "100".into(),
+                        "60000".into(),
+                    ])
+                    .await
+                    .unwrap()
+                    .first()
+                    .map(String::as_str),
+                Some("ok"),
+                "well-formed flow {valid:?} must be stored"
+            );
+            // Discard removes both the form hash and its capacity-index member.
+            backend.call(&["discard".into(), sid]).await.unwrap();
+        }
+        for invalid in [
+            "basic".to_owned(),
+            "basic:".to_owned(),
+            "Basic:password".to_owned(),
+            "basic:Password".to_owned(),
+            "basic:-x".to_owned(),
+            "basic:a_b".to_owned(),
+            "basic:password:x".to_owned(),
+            "oidc:sso".to_owned(),
+            format!("basic:{longest}a"),
+            format!("key:{longest}a"),
+        ] {
             assert!(
                 backend
                     .call(&[
                         "form".into(),
                         opaque_id(),
                         opaque_id(),
-                        invalid.into(),
+                        invalid.clone(),
                         "40".into(),
                         "2".into(),
                         "100".into(),
@@ -412,7 +472,7 @@ mod tests {
                 "untagged or malformed flow {invalid:?} must be rejected"
             );
         }
-        let _: usize = command(backend, "DEL", &[&key, &format!("{prefix}:sessions")]).await;
+        let _: usize = command(backend, "DEL", &[&key, &format!("{prefix}:v2:sessions")]).await;
         let short_session = opaque_id();
         backend
             .call(&[
@@ -433,7 +493,7 @@ mod tests {
             "pruning reclaims capacity"
         );
 
-        let quotas = "authotron:browser:v1:quotas";
+        let quotas = "authotron:browser:quotas";
         let mut cfg = config(&url, quotas);
         let settings = cfg.ui.browser_session.as_mut().unwrap();
         settings.max_forms_per_window = 1;
@@ -446,9 +506,9 @@ mod tests {
         let time: Vec<String> = command(backend, "TIME", &[]).await;
         let micros: u64 = time[1].parse().unwrap();
         tokio::time::sleep(Duration::from_micros(1_050_000 - micros)).await;
-        q1.form(LoginFlow::basic(0)).await.unwrap();
+        q1.form(&LoginFlow::basic("password")).await.unwrap();
         assert!(matches!(
-            q2.form(LoginFlow::basic(0)).await,
+            q2.form(&LoginFlow::basic("password")).await,
             Err(BrowserVerifyError::Limited)
         ));
         assert!(matches!(
@@ -497,7 +557,7 @@ mod tests {
             }
             loop {
                 let count: Option<usize> =
-                    command(backend, "HGET", &["local-budgets:verify-quota", "used"]).await;
+                    command(backend, "HGET", &["local-budgets:v2:verify-quota", "used"]).await;
                 if count == Some(2) {
                     break;
                 }
@@ -526,9 +586,10 @@ mod tests {
             l2.admitted(async { Ok(user()) }).await,
             Err(BrowserVerifyError::Limited)
         ));
-        let count: usize = command(backend, "EXISTS", &["local-budgets:leases"]).await;
+        let count: usize = command(backend, "EXISTS", &["local-budgets:v2:leases"]).await;
         assert_eq!(count, 0);
-        let count: usize = command(backend, "HGET", &["local-budgets:verify-quota", "used"]).await;
+        let count: usize =
+            command(backend, "HGET", &["local-budgets:v2:verify-quota", "used"]).await;
         assert_eq!(count, 2);
         for task in tasks {
             task.abort();
@@ -615,7 +676,7 @@ mod tests {
         .await;
         let mut reconnected = false;
         for _ in 0..100 {
-            if b.form(LoginFlow::basic(0)).await.is_ok() {
+            if b.form(&LoginFlow::basic("password")).await.is_ok() {
                 reconnected = true;
                 break;
             }
@@ -646,7 +707,7 @@ mod tests {
             let a = a.clone();
             tokio::spawn(async move { a.admitted(std::future::pending()).await })
         };
-        let leases_key = format!("{prefix}:leases");
+        let leases_key = format!("{prefix}:v2:leases");
         for _ in 0..100 {
             let count: usize = command(backend, "ZCARD", &[&leases_key]).await;
             if count == 1 {
@@ -693,7 +754,7 @@ mod tests {
         };
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                let count: usize = command(backend, "ZCARD", &["scale-down:leases"]).await;
+                let count: usize = command(backend, "ZCARD", &["scale-down:v2:leases"]).await;
                 if count == 1 {
                     break;
                 }
@@ -711,7 +772,7 @@ mod tests {
         );
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                let count: usize = command(backend, "ZCARD", &["scale-down:leases"]).await;
+                let count: usize = command(backend, "ZCARD", &["scale-down:v2:leases"]).await;
                 if count == 0 {
                     break;
                 }
@@ -758,7 +819,7 @@ mod tests {
                         let leases: Vec<(String, String)> = command(
                             timed_backend,
                             "ZRANGE",
-                            &["deadline:leases", "0", "-1", "WITHSCORES"],
+                            &["deadline:v2:leases", "0", "-1", "WITHSCORES"],
                         )
                         .await;
                         assert_eq!(leases.len(), 1);
@@ -767,7 +828,7 @@ mod tests {
                         let _: usize = command(
                             timed_backend,
                             "ZADD",
-                            &["deadline:leases", &expiry, "unrelated"],
+                            &["deadline:v2:leases", &expiry, "unrelated"],
                         )
                         .await;
                         captured = Some((id, expiry));
@@ -790,7 +851,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let score: Option<String> =
-                    command(timed_backend, "ZSCORE", &["deadline:leases", &id]).await;
+                    command(timed_backend, "ZSCORE", &["deadline:v2:leases", &id]).await;
                 if score.is_none() {
                     break;
                 }
@@ -802,11 +863,11 @@ mod tests {
         let remaining: Vec<(String, String)> = command(
             timed_backend,
             "ZRANGE",
-            &["deadline:leases", "0", "-1", "WITHSCORES"],
+            &["deadline:v2:leases", "0", "-1", "WITHSCORES"],
         )
         .await;
         assert_eq!(remaining, vec![("unrelated".into(), expiry)]);
-        let _: usize = command(timed_backend, "ZREM", &["deadline:leases", "unrelated"]).await;
+        let _: usize = command(timed_backend, "ZREM", &["deadline:v2:leases", "unrelated"]).await;
 
         let mut disabled =
             BrowserLoginState::new(&config("redis://127.0.0.1:1/0", "disabled")).unwrap();
@@ -861,7 +922,7 @@ mod tests {
         let acl_form_nonce = opaque_id();
         let acl_token = app_state
             .browser
-            .form_with_nonce(LoginFlow::basic(0), &acl_form_nonce)
+            .form_with_nonce(&LoginFlow::basic("password"), &acl_form_nonce)
             .await
             .unwrap();
         let _: String = command(backend, "ACL", &["SETUSER", "default", "-zadd"]).await;
@@ -883,14 +944,14 @@ mod tests {
         let count: usize = command(
             backend,
             "EXISTS",
-            &[&format!("{prefix}:session:{orphan_sid}")],
+            &[&format!("{prefix}:v2:session:{orphan_sid}")],
         )
         .await;
         assert_eq!(count, 0);
         let response = app
             .clone()
             .oneshot(
-                Request::post("/login/method/0")
+                Request::post("/login/method/password")
                     .header("origin", "https://login.example.test")
                     .header("cookie", format!("__Host-authotron_form={acl_form_nonce}"))
                     .header("content-type", "application/x-www-form-urlencoded")
@@ -905,12 +966,16 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(response.headers().get("set-cookie").is_none());
         let metrics = app_state.metrics.render().unwrap();
-        assert!(metrics.contains("authotron_browser_login_attempts_total{flow=\"basic\",outcome=\"backend_unavailable\"} 1"));
+        assert!(metrics.contains("authotron_browser_login_attempts_total{flow=\"basic\",method=\"password\",outcome=\"backend_unavailable\"} 1"));
         assert!(!metrics.contains("outcome=\"success\""));
         assert!(metrics.contains("authotron_browser_logins_inflight 0"));
         let form = app
             .clone()
-            .oneshot(Request::get("/login/method/0").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::get("/login/method/password")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(form.status(), StatusCode::OK);
@@ -939,7 +1004,7 @@ mod tests {
         let wrong_browser = other_app
             .clone()
             .oneshot(
-                Request::post("/login/method/0")
+                Request::post("/login/method/password")
                     .header("origin", "https://login.example.test")
                     .header("cookie", format!("__Host-authotron_form={}", opaque_id()))
                     .header("content-type", "application/x-www-form-urlencoded")
@@ -953,7 +1018,7 @@ mod tests {
         assert_eq!(wrong_browser.status(), StatusCode::FORBIDDEN);
         let response = other_app
             .oneshot(
-                Request::post("/login/method/0")
+                Request::post("/login/method/password")
                     .header("origin", "https://login.example.test")
                     .header("cookie", cookie)
                     .header("content-type", "application/x-www-form-urlencoded")
@@ -971,7 +1036,7 @@ mod tests {
         );
         let metrics = other_state.metrics.render().unwrap();
         assert!(metrics.contains(
-            "authotron_browser_login_attempts_total{flow=\"basic\",outcome=\"success\"} 1"
+            "authotron_browser_login_attempts_total{flow=\"basic\",method=\"password\",outcome=\"success\"} 1"
         ));
         assert!(metrics.contains("authotron_browser_logins_inflight 0"));
         let cookie = response
@@ -1003,7 +1068,7 @@ mod tests {
         let _: String = command(
             backend,
             "SET",
-            &[&format!("routes:session:{session}"), corrupt],
+            &[&format!("routes:v2:session:{session}"), corrupt],
         )
         .await;
         let response = app
@@ -1032,7 +1097,7 @@ mod tests {
             let _: String = command(
                 backend,
                 "SET",
-                &[&format!("routes:session:{session}"), &value],
+                &[&format!("routes:v2:session:{session}"), &value],
             )
             .await;
             assert!(matches!(
@@ -1131,7 +1196,7 @@ mod tests {
         let outcome = tokio::time::timeout(
             Duration::from_millis(1800),
             crate::oauth::authentication::verify_identity(
-                0,
+                "password",
                 crate::browser::BrowserCredentials::Basic {
                     username: "alice",
                     password: "public-fixture",
@@ -1161,7 +1226,7 @@ mod tests {
         let direct = tokio::time::timeout(
             Duration::from_millis(1800),
             browser.verify_identity(
-                0,
+                "password",
                 crate::browser::BrowserCredentials::Basic {
                     username: "alice",
                     password: "public-fixture",
@@ -1185,7 +1250,7 @@ mod tests {
         auth.augmenters.clear();
         assert!(
             crate::oauth::authentication::verify_identity(
-                0,
+                "password",
                 crate::browser::BrowserCredentials::Basic {
                     username: "alice",
                     password: "public-fixture"
@@ -1203,7 +1268,7 @@ mod tests {
             b.lookup(&rotated).await,
             Err(BrowserVerifyError::Unavailable)
         ));
-        for path in ["/login/method/0", "/login/account", "/login"] {
+        for path in ["/login/method/password", "/login/account", "/login"] {
             let response = app
                 .clone()
                 .oneshot(

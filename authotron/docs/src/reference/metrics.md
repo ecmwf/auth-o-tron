@@ -23,8 +23,8 @@ By default, this endpoint is available on port `9090`. The format follows the Pr
 | `augmenter_attempts_total` | Counter | augmenter_name, augmenter_type, realm, result | Token augmentation attempts |
 | `augmenter_duration_seconds` | Histogram | augmenter_type, realm | Augmentation latency |
 | `authotron_browser_logins_inflight` | Gauge | none | Locally admitted browser verification operations, including backend admission and augmentation |
-| `authotron_browser_login_attempts_total` | Counter | flow, outcome | Completed/cancelled direct form POST attempts, including session persistence outcome |
-| `authotron_browser_login_duration_seconds` | Histogram | flow, outcome | Form POST handler duration in seconds, through response creation or cancellation |
+| `authotron_browser_login_attempts_total` | Counter | flow, method, outcome | Completed/cancelled direct form POST attempts, including session persistence outcome |
+| `authotron_browser_login_duration_seconds` | Histogram | flow, method, outcome | Form POST handler duration in seconds, through response creation or cancellation |
 
 ## Browser Login and HPA
 
@@ -35,15 +35,20 @@ at zero on idle processes, including pods with configured browser methods; no lo
 is needed before an HPA scrape sees it.
 
 `flow` has exactly two values, determined by the method's provider type rather
-than its index or label: `basic` for `plain` methods and `ecmwf-api-key` for
-`ecmwf-api` methods. `outcome` has the fixed
-values `success`, `rejected`, `malformed`, `origin`, `csrf`, `limited`,
+than its id or label: `basic` for `plain` methods and `ecmwf-api-key` for
+`ecmwf-api` methods. `method` is the configured `browser.id` (for example
+`password` or `ecmwf-api-key`); at most 16 browser methods bound its values, and
+it stays stable when providers are reordered or relabelled. Series appear on the
+first POST to each method; they are not pre-initialised. `outcome` has the fixed
+values `success`, `rejected`, `denied`, `malformed`, `origin`, `csrf`, `limited`,
 `backend_unavailable`, `capacity`, `timeout`, `cancelled`. They describe the actual
 POST result: successful verification followed by a failed session write is a
 failure, not `success`. If a replacement form cannot be issued, its capacity,
 quota or backend failure becomes the final outcome. `timeout` means the total
 verification/augmentation deadline expired; upstream failures reported as generic
-credential rejection remain `rejected`. Cancellation is recorded when the handler
+credential rejection remain `rejected`. `denied` means the credentials were valid
+but the identity fails the current OAuth scope policy at login, so the flow ends
+with an `access_denied` redirect. Cancellation is recorded when the handler
 future is dropped before creating a response.
 
 The counter counts attempts, the duration histogram measures seconds, and the
@@ -58,8 +63,15 @@ and optional lease release. It excludes session creation and locally rejected
 requests. RAII guards reset it on success, error, timeout and cancellation.
 
 No browser metric labels include credentials, usernames, session IDs, prefixes,
-URLs, provider names or raw diagnostic strings. There are at most 20 flow/outcome
-combinations per counter/histogram family. Histogram `le` labels are the fixed
+URLs, provider names, chooser labels or raw diagnostic strings. Each method id has
+one fixed `flow`, and `outcome` is one of 11 fixed values (`success`, `rejected`,
+`denied`, `malformed`, `origin`, `csrf`, `limited`, `backend_unavailable`,
+`capacity`, `timeout`, `cancelled`), so there are at most 16 methods × 11 outcomes
+per counter/histogram family. `denied` is recorded only when the `access_denied`
+redirect is issued; if a concurrent request already consumed the transaction the
+400 response is counted as `rejected`. Server-side clock or configuration faults
+while building the authenticated context (`InvalidTime`, `Configuration`) return
+503 and are counted as `backend_unavailable`. Histogram `le` labels are the fixed
 Prometheus bucket boundaries, not caller input. Prometheus attaches deployment
 identity such as `namespace` and `pod` as **target labels**, not application labels.
 

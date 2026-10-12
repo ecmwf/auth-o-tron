@@ -30,6 +30,7 @@ use tracing::debug;
 /// Configuration options for each authentication provider.
 #[derive(Deserialize, Serialize, JsonSchema, Debug)]
 #[serde(tag = "type", remote = "Self")]
+#[schemars(transform = restrict_browser_to_supported_providers)]
 pub enum ProviderConfig {
     #[serde(rename = "ecmwf-api")]
     EcmwfApi(EcmwfApiProviderConfig),
@@ -47,12 +48,45 @@ pub enum ProviderConfig {
 
 const BROWSER_PROVIDER_TYPES: [&str; 2] = ["plain", "ecmwf-api"];
 
+/// Mirrors the runtime `browser` check in the generated schema.
+///
+/// Provider variants other than `plain` and `ecmwf-api` keep accepting unknown
+/// fields, but their `browser` property is constrained to `null`.
+/// Valid: `{type: jwt, ..., browser: null}`.
+/// Invalid: `{type: jwt, ..., browser: {id: sso, label: SSO}}`.
+fn restrict_browser_to_supported_providers(schema: &mut schemars::Schema) {
+    let Some(variants) = schema.get_mut("oneOf").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for variant in variants {
+        let provider_type = variant
+            .pointer("/properties/type/const")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let Some(provider_type) = provider_type else {
+            continue;
+        };
+        if BROWSER_PROVIDER_TYPES.contains(&provider_type.as_str()) {
+            continue;
+        }
+        if let Some(properties) = variant.get_mut("properties").and_then(Value::as_object_mut) {
+            properties.insert(
+                "browser".to_owned(),
+                json!({
+                    "description": "Direct browser sign-in is not supported for this provider type; only `null` is accepted.",
+                    "type": "null"
+                }),
+            );
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for ProviderConfig {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         // Provider structs ignore unknown fields, so an unsupported `browser` block
         // is rejected here instead of being silently dropped.
-        // Valid: `{type: plain, name: staff, realm: r, users: [], browser: {label: Staff}}`.
-        // Invalid: `{type: jwt, name: sso, ..., browser: {label: Staff}}`.
+        // Valid: `{type: plain, name: staff, realm: r, users: [], browser: {id: staff, label: Staff}}`.
+        // Invalid: `{type: jwt, name: sso, ..., browser: {id: staff, label: Staff}}`.
         // `browser: null` is treated as absent for every provider type.
         let value = Value::deserialize(deserializer)?;
         if let Some(object) = value.as_object()
@@ -158,4 +192,109 @@ pub async fn list_providers(
         "provider listing completed"
     );
     Json(json!({ "providers": providers }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PROVIDER_TYPES: [&str; 6] = [
+        "ecmwf-api",
+        "ecmwf-token-generator",
+        "efas-api",
+        "jwt",
+        "openid-offline",
+        "plain",
+    ];
+
+    fn minimal_provider(provider_type: &str) -> Value {
+        match provider_type {
+            "ecmwf-api" | "efas-api" => {
+                json!({"type": provider_type, "name": "p", "realm": "r", "uri": "https://example.test"})
+            }
+            "ecmwf-token-generator" => json!({
+                "type": provider_type, "name": "p", "realm": "r",
+                "cert_uri": "https://example.test/certs", "client_id": "c",
+                "client_secret": "s", "token_generator_url": "https://example.test/token"
+            }),
+            "jwt" => json!({
+                "type": provider_type, "name": "p", "realm": "r",
+                "cert_uri": "https://example.test/certs", "iam_realm": "i"
+            }),
+            "openid-offline" => json!({
+                "type": provider_type, "name": "p", "realm": "r",
+                "cert_uri": "https://example.test/certs", "public_client_id": "pub",
+                "private_client_id": "priv", "private_client_secret": "s",
+                "iam_url": "https://example.test/iam"
+            }),
+            "plain" => json!({"type": provider_type, "name": "p", "realm": "r", "users": []}),
+            other => panic!("unknown provider type {other}"),
+        }
+    }
+
+    /// Evaluates the generated schema's `browser` property for one provider type.
+    /// Supports only the shapes the generator emits: `{type: null}` on the variant,
+    /// or `anyOf: [$ref ProviderBrowserConfig, {type: null}]` on the referenced struct.
+    fn schema_accepts_browser(schema: &Value, provider_type: &str, browser: &Value) -> bool {
+        let defs = &schema["$defs"];
+        let variant = defs["ProviderConfig"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v.pointer("/properties/type/const") == Some(&json!(provider_type)))
+            .unwrap_or_else(|| panic!("no schema variant for {provider_type}"));
+        let def_name = variant["$ref"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("#/$defs/");
+        let mut constraints = Vec::new();
+        if let Some(c) = variant.pointer("/properties/browser") {
+            constraints.push(c.clone());
+        }
+        if let Some(c) = defs[def_name].pointer("/properties/browser") {
+            constraints.push(c.clone());
+        }
+        let matches = |c: &Value| -> bool {
+            if c.get("type") == Some(&json!("null")) {
+                return browser.is_null();
+            }
+            if c.get("$ref") == Some(&json!("#/$defs/ProviderBrowserConfig")) {
+                let required = defs["ProviderBrowserConfig"]["required"]
+                    .as_array()
+                    .unwrap();
+                return browser.is_object()
+                    && required
+                        .iter()
+                        .all(|k| browser.get(k.as_str().unwrap()).is_some());
+            }
+            panic!("unexpected browser schema shape: {c}");
+        };
+        constraints.iter().all(|c| match c.get("anyOf") {
+            Some(options) => options.as_array().unwrap().iter().any(matches),
+            None => matches(c),
+        })
+    }
+
+    #[test]
+    fn browser_schema_matches_runtime_acceptance() {
+        let schema = serde_json::to_value(schemars::schema_for!(crate::config::Config)).unwrap();
+        let browser_object = json!({"id": "staff", "label": "Staff"});
+        for provider_type in PROVIDER_TYPES {
+            for browser in [Value::Null, browser_object.clone()] {
+                let mut config = minimal_provider(provider_type);
+                config["browser"] = browser.clone();
+                let runtime = serde_json::from_value::<ProviderConfig>(config).is_ok();
+                let schema_ok = schema_accepts_browser(&schema, provider_type, &browser);
+                let expected = browser.is_null() || BROWSER_PROVIDER_TYPES.contains(&provider_type);
+                assert_eq!(
+                    runtime, expected,
+                    "runtime: {provider_type} browser={browser}"
+                );
+                assert_eq!(
+                    schema_ok, expected,
+                    "schema: {provider_type} browser={browser}"
+                );
+            }
+        }
+    }
 }

@@ -26,6 +26,8 @@ pub enum ConsentError {
     InvalidToken,
     InvalidDecision,
     InvalidContext,
+    /// The envelope is intact but the embedded context fails current scope policy.
+    AccessDenied,
     Unavailable,
     TooLarge,
     InvalidRecord,
@@ -197,6 +199,7 @@ impl ConsentSession {
             AuthenticatedAuthorization::decode(&bytes, config, browser_hash, server_now_ms)
                 .map_err(|error| match error {
                     super::context::ContextError::Binding => Binding,
+                    super::context::ContextError::AccessDenied => AccessDenied,
                     _ => InvalidContext,
                 })?;
         if !context.matches_source(&source_id.hash()) {
@@ -476,7 +479,7 @@ mod tests {
             .push("absent".into());
         assert_eq!(
             ConsentSession::decode(&bytes, &id, &denied, &[7; 32], now).err(),
-            Some(InvalidContext)
+            Some(AccessDenied)
         );
     }
     #[tokio::test]

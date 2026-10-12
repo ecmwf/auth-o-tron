@@ -119,6 +119,10 @@
             "type": {
               "type": "string",
               "const": "ecmwf-token-generator"
+            },
+            "browser": {
+              "description": "Direct browser sign-in is not supported for this provider type; only `null` is accepted.",
+              "type": "null"
             }
           },
           "$ref": "#/$defs/EcmwfTokenGeneratorProviderConfig",
@@ -132,6 +136,10 @@
             "type": {
               "type": "string",
               "const": "efas-api"
+            },
+            "browser": {
+              "description": "Direct browser sign-in is not supported for this provider type; only `null` is accepted.",
+              "type": "null"
             }
           },
           "$ref": "#/$defs/EFASApiProviderConfig",
@@ -145,6 +153,10 @@
             "type": {
               "type": "string",
               "const": "jwt"
+            },
+            "browser": {
+              "description": "Direct browser sign-in is not supported for this provider type; only `null` is accepted.",
+              "type": "null"
             }
           },
           "$ref": "#/$defs/JWTAuthConfig",
@@ -158,6 +170,10 @@
             "type": {
               "type": "string",
               "const": "openid-offline"
+            },
+            "browser": {
+              "description": "Direct browser sign-in is not supported for this provider type; only `null` is accepted.",
+              "type": "null"
             }
           },
           "$ref": "#/$defs/OpenIDOfflineProviderConfig",
@@ -184,6 +200,20 @@
       "description": "Offers a `plain` or `ecmwf-api` provider as a direct browser sign-in method.",
       "type": "object",
       "properties": {
+        "id": {
+          "description": "Stable method id used in `/login/method/{id}`, form flow tags and the\n`method` metric label; unique across providers.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-z0-9][a-z0-9-]{0,31}$",
+          "not": {
+            "enum": [
+              "callback",
+              "new",
+              "account"
+            ]
+          }
+        },
         "label": {
           "description": "Chooser button text, trimmed, 1-64 characters, no control characters.",
           "type": "string",
@@ -193,6 +223,7 @@
       },
       "additionalProperties": false,
       "required": [
+        "id",
         "label"
       ]
     },

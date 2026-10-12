@@ -15,12 +15,13 @@ use super::{
     consent::{
         ConsentError, ConsentOutcome, ConsentSession, ConsentToken, MAX_CONSENT_SESSION_BYTES,
     },
-    context::{AuthenticatedAuthorization, ContextError, MAX_AUTHENTICATED_CONTEXT_BYTES},
+    context::{AuthenticatedAuthorization, MAX_AUTHENTICATED_CONTEXT_BYTES},
     records::{
         AuthorizationTransaction, BoundAuthorizationTransaction, MAX_TRANSACTION_BYTES, valid_time,
     },
     store::{
-        ConsentStoreError, CreatedTransaction, RedeemedAuthorization, StoreError, TransactionId,
+        ConsentStoreError, CreatedTransaction, PostLogin, RedeemedAuthorization, StoreError,
+        TransactionId, consent_error, context_error, policy_denied,
     },
 };
 use crate::{
@@ -31,6 +32,15 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
+/// A classified policy-denied snapshot awaiting its compare-and-delete.
+struct RejectCandidate {
+    op: Operation,
+    transaction: AuthorizationTransaction,
+    expiry: u64,
+    bound: u64,
+    bytes: Vec<u8>,
+}
+
 pub struct ValkeyTransactionStore {
     config: Arc<OAuthConfig>,
     connection: ValkeyConnection,
@@ -39,15 +49,11 @@ pub struct ValkeyTransactionStore {
 }
 #[derive(Clone, Copy)]
 enum Operation {
-    Create {
-        client: [u8; 32],
-        budget: usize,
-    },
+    Create { client: [u8; 32], budget: usize },
     Read,
     Consume,
     Promote,
     ReadAuthenticated,
-    #[cfg(test)]
     ConsumeAuthenticated,
     ReadForConsent,
     PrepareConsent,
@@ -332,7 +338,6 @@ impl ValkeyTransactionStore {
             Operation::ReadAuthenticated => {
                 ("read", "authenticated", MAX_AUTHENTICATED_CONTEXT_BYTES)
             }
-            #[cfg(test)]
             Operation::ConsumeAuthenticated => {
                 ("consume", "authenticated", MAX_AUTHENTICATED_CONTEXT_BYTES)
             }
@@ -543,10 +548,7 @@ impl ValkeyTransactionStore {
     ) -> Result<(AuthenticatedAuthorization, u64, Vec<u8>), StoreError> {
         let (now, expiry, bytes, _) = self.raw_read(id, Operation::ReadAuthenticated).await?;
         let context = AuthenticatedAuthorization::decode(&bytes, &self.config, browser_hash, now)
-            .map_err(|error| match error {
-            ContextError::Binding => StoreError::Missing,
-            _ => StoreError::Unavailable,
-        })?;
+            .map_err(context_error)?;
         if !context.matches_source(&id.hash()) || context.expires_at_ms() > expiry {
             return Err(StoreError::Unavailable);
         }
@@ -589,10 +591,7 @@ impl ValkeyTransactionStore {
         let (op, result) = if kind == b"authenticated" {
             let context =
                 AuthenticatedAuthorization::decode(&original, &self.config, browser_hash, now)
-                    .map_err(|error| match error {
-                        ContextError::Binding => StoreError::Missing,
-                        _ => StoreError::Unavailable,
-                    })?;
+                    .map_err(context_error)?;
             if !context.matches_source(&id.hash()) {
                 return Err(StoreError::Unavailable);
             }
@@ -609,7 +608,9 @@ impl ValkeyTransactionStore {
             )
         } else if kind == b"consent" {
             let session = ConsentSession::decode(&original, id, &self.config, browser_hash, now)
-                .map_err(|_| StoreError::Unavailable)?;
+                .map_err(|error| {
+                    consent_error(&original, id, &self.config, browser_hash, now, error)
+                })?;
             if session.expires_at_ms() > expiry {
                 return Err(StoreError::Unavailable);
             }
@@ -649,17 +650,69 @@ impl ValkeyTransactionStore {
         binding: &[u8; 32],
     ) -> Result<AuthenticatedAuthorization, StoreError> {
         let (now, expiry, bytes, _) = self.raw_read(id, Operation::ReadConsent).await?;
-        let session =
-            ConsentSession::decode(&bytes, id, &self.config, binding, now).map_err(|error| {
-                match error {
-                    ConsentError::Binding => StoreError::Missing,
-                    _ => StoreError::Unavailable,
-                }
-            })?;
+        let session = ConsentSession::decode(&bytes, id, &self.config, binding, now)
+            .map_err(|error| consent_error(&bytes, id, &self.config, binding, now, error))?;
         if session.expires_at_ms() > expiry {
             return Err(StoreError::Unavailable);
         }
         Ok(session.into_context())
+    }
+    /// Atomically removes a post-login record only after confirming it is policy-denied,
+    /// returning the validated transaction for the RFC 6749 `access_denied` redirect.
+    /// The compare-and-delete guards the exact snapshot that was classified.
+    pub async fn reject_ineligible(
+        &self,
+        id: &TransactionId,
+        browser_hash: &[u8; 32],
+    ) -> Result<AuthorizationTransaction, StoreError> {
+        let candidate = self.reject_candidate(id, browser_hash).await?;
+        self.commit_rejection(id, candidate).await
+    }
+    async fn reject_candidate(
+        &self,
+        id: &TransactionId,
+        browser_hash: &[u8; 32],
+    ) -> Result<RejectCandidate, StoreError> {
+        let (now, expiry, bytes, kind) = self.raw_read(id, Operation::ReadForConsent).await?;
+        let (kind, op) = if kind == b"authenticated" {
+            (PostLogin::Authenticated, Operation::ConsumeAuthenticated)
+        } else if kind == b"consent" {
+            (PostLogin::Consent, Operation::ConsumeConsent)
+        } else {
+            return Err(StoreError::Missing);
+        };
+        let (transaction, bound) =
+            policy_denied(kind, &bytes, id, &self.config, browser_hash, now)?
+                .ok_or(StoreError::Missing)?;
+        // Same stored-deadline consistency rule as every other post-login read.
+        if bound > expiry {
+            return Err(StoreError::Unavailable);
+        }
+        Ok(RejectCandidate {
+            op,
+            transaction,
+            expiry,
+            bound,
+            bytes,
+        })
+    }
+    async fn commit_rejection(
+        &self,
+        id: &TransactionId,
+        candidate: RejectCandidate,
+    ) -> Result<AuthorizationTransaction, StoreError> {
+        let RejectCandidate {
+            op,
+            transaction,
+            expiry,
+            bound,
+            bytes,
+        } = candidate;
+        Self::mutation(
+            self.call(op, id, expiry, &bytes, Some((bound, &[])))
+                .await?,
+        )?;
+        Ok(transaction)
     }
     pub(crate) async fn server_now_ms(&self) -> Result<u64, StoreError> {
         let (sec, micro): (u64, u64) = self
@@ -1863,6 +1916,25 @@ mod tests {
         let denied = ValkeyTransactionStore::new(Arc::new(denied), backend)
             .await
             .unwrap();
+        // A valid record whose identity no longer satisfies current policy is denied.
+        assert_eq!(
+            denied
+                .consume_authenticated(&created.id, &[7; 32])
+                .await
+                .err(),
+            Some(StoreError::AccessDenied)
+        );
+        // Tampered payloads stay `Unavailable` even under a policy that would deny.
+        let key = &a.keys(&created.id)[1];
+        let original: Vec<u8> = command(&a, redis::cmd("HGET").arg(key).arg("payload")).await;
+        let _: usize = command(
+            &a,
+            redis::cmd("HSET")
+                .arg(key)
+                .arg("payload")
+                .arg(b"{}".as_slice()),
+        )
+        .await;
         assert_eq!(
             denied
                 .consume_authenticated(&created.id, &[7; 32])
@@ -1870,6 +1942,7 @@ mod tests {
                 .err(),
             Some(StoreError::Unavailable)
         );
+        let _: usize = command(&a, redis::cmd("HSET").arg(key).arg("payload").arg(original)).await;
         let (left, expiry, bytes) = a.read_authenticated(&created.id, &[7; 32]).await.unwrap();
         let (right, other_expiry, other_bytes) =
             b.read_authenticated(&created.id, &[7; 32]).await.unwrap();
@@ -1968,6 +2041,176 @@ mod tests {
             );
         }
         let _: usize = command(&a, redis::cmd("DEL").arg(&keys).arg(&copied_keys[1])).await;
+    }
+
+    /// Ports the memory-store `policy_tightened_after_login_is_access_denied_not_corruption`
+    /// cases: a stricter store reads records written under the original policy.
+    async fn policy_denial_cases(backend: &BrowserBackendConfig) {
+        let (mut cfg, _, _) = super::super::context::tests::fixture().await;
+        cfg.max_authorization_transactions = 8;
+        cfg.authorization_transaction_ttl_seconds = 30;
+        let cfg = Arc::new(cfg);
+        let mut strict_cfg = (*cfg).clone();
+        strict_cfg.resources[0].scopes[0]
+            .required_roles
+            .push("absent".into());
+        let relaxed = ValkeyTransactionStore::new(cfg.clone(), backend)
+            .await
+            .unwrap();
+        let strict = ValkeyTransactionStore::new(Arc::new(strict_cfg), backend)
+            .await
+            .unwrap();
+        async fn promoted(store: &ValkeyTransactionStore) -> CreatedTransaction {
+            let (_, _, identity) = super::super::context::tests::fixture().await;
+            let created = store.create(request(&store.config), [7; 32]).await.unwrap();
+            let witness = store.lookup_bound(&created.id, &[7; 32]).await.unwrap();
+            let now = store.server_now_ms().await.unwrap();
+            let context = AuthenticatedAuthorization::new_bound(
+                witness,
+                identity,
+                &[7; 32],
+                &store.config,
+                now,
+            )
+            .unwrap();
+            store
+                .promote_authenticated(&created.id, &[7; 32], context)
+                .await
+                .unwrap();
+            created
+        }
+
+        // Authenticated (pre-consent) record.
+        let created = promoted(&relaxed).await;
+        let id = &created.id;
+        let keys = relaxed.keys(id);
+        assert_eq!(
+            strict.lookup_authenticated(id, &[7; 32]).await.err(),
+            Some(StoreError::AccessDenied)
+        );
+        assert_eq!(
+            strict.prepare_consent(id, &[7; 32]).await.err(),
+            Some(StoreError::AccessDenied)
+        );
+        // A foreign browser never learns the classification and cannot remove the record.
+        assert_eq!(
+            strict.reject_ineligible(id, &[8; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        // Still eligible under the original policy: no removal.
+        assert_eq!(
+            relaxed.reject_ineligible(id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        let exists: usize = command(&strict, redis::cmd("EXISTS").arg(&keys[1])).await;
+        assert_eq!(exists, 1);
+        let transaction = strict.reject_ineligible(id, &[7; 32]).await.unwrap();
+        assert_eq!(
+            transaction.request().redirect_uri(),
+            "https://app.example.org/cb"
+        );
+        let exists: usize = command(&strict, redis::cmd("EXISTS").arg(&keys[1])).await;
+        assert_eq!(exists, 0);
+        assert_eq!(
+            strict.reject_ineligible(id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+
+        // ConsentReady record.
+        let created = promoted(&relaxed).await;
+        let id = &created.id;
+        relaxed.prepare_consent(id, &[7; 32]).await.unwrap();
+        assert_eq!(
+            strict.consent_context(id, &[7; 32]).await.err(),
+            Some(StoreError::AccessDenied)
+        );
+        assert_eq!(
+            strict.prepare_consent(id, &[7; 32]).await.err(),
+            Some(StoreError::AccessDenied)
+        );
+        assert_eq!(
+            strict.consent_context(id, &[8; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        assert_eq!(
+            strict.reject_ineligible(id, &[8; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        assert_eq!(
+            relaxed.reject_ineligible(id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        assert!(relaxed.consent_context(id, &[7; 32]).await.is_ok());
+        strict.reject_ineligible(id, &[7; 32]).await.unwrap();
+        assert_eq!(
+            strict.consent_context(id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+
+        // A payload change between classification and delete loses the compare-and-delete:
+        // `Missing`, no redirect, and the replacement survives.
+        for consent in [false, true] {
+            let created = promoted(&relaxed).await;
+            let id = &created.id;
+            let keys = relaxed.keys(id);
+            if consent {
+                relaxed.prepare_consent(id, &[7; 32]).await.unwrap();
+            }
+            let candidate = strict.reject_candidate(id, &[7; 32]).await.unwrap();
+            let mut changed = candidate.bytes.clone();
+            changed.push(b' ');
+            let _: usize = command(
+                &strict,
+                redis::cmd("HSET")
+                    .arg(&keys[1])
+                    .arg("payload")
+                    .arg(&changed),
+            )
+            .await;
+            assert_eq!(
+                strict.commit_rejection(id, candidate).await.err(),
+                Some(StoreError::Missing),
+                "consent={consent}"
+            );
+            let payload: Vec<u8> =
+                command(&strict, redis::cmd("HGET").arg(&keys[1]).arg("payload")).await;
+            assert!(payload == changed);
+            let _: usize = command(&strict, redis::cmd("DEL").arg(&keys[1])).await;
+            let _: usize = command(&strict, redis::cmd("ZREM").arg(&keys[0]).arg(&keys[1])).await;
+        }
+
+        // A damaged consent envelope around a policy-denied context is corruption.
+        let created = promoted(&relaxed).await;
+        let id = &created.id;
+        let keys = relaxed.keys(id);
+        relaxed.prepare_consent(id, &[7; 32]).await.unwrap();
+        let payload: Vec<u8> =
+            command(&strict, redis::cmd("HGET").arg(&keys[1]).arg("payload")).await;
+        let mut envelope: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        envelope["version"] = 9.into();
+        let damaged = serde_json::to_vec(&envelope).unwrap();
+        for bytes in [damaged, b"{\"context\":\"%%%\"}".to_vec()] {
+            let _: usize = command(
+                &strict,
+                redis::cmd("HSET").arg(&keys[1]).arg("payload").arg(&bytes),
+            )
+            .await;
+            assert_eq!(
+                strict.consent_context(id, &[7; 32]).await.err(),
+                Some(StoreError::Unavailable)
+            );
+            assert_eq!(
+                strict.prepare_consent(id, &[7; 32]).await.err(),
+                Some(StoreError::Unavailable)
+            );
+            assert_eq!(
+                strict.reject_ineligible(id, &[7; 32]).await.err(),
+                Some(StoreError::Unavailable)
+            );
+            let exists: usize = command(&strict, redis::cmd("EXISTS").arg(&keys[1])).await;
+            assert_eq!(exists, 1);
+        }
+        let _: usize = command(&strict, redis::cmd("DEL").arg(&keys)).await;
     }
 
     #[tokio::test]
@@ -2220,6 +2463,7 @@ mod tests {
             assert_eq!(transaction_snapshot(&a).await, before);
         }
         consent_cases(&backend).await;
+        policy_denial_cases(&backend).await;
         effective_deadline_and_hash_shape_cases(&backend).await;
         authenticated_cases(&backend).await;
         code_cases(&backend).await;

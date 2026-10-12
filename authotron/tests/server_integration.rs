@@ -59,7 +59,7 @@ async fn oauth_fails_closed_before_browser_initialization() {
     config.providers.push(
         serde_json::from_value(serde_json::json!({
             "type": "plain", "name": "browser", "realm": "local", "users": [],
-            "browser": {"label": "Password"}
+            "browser": {"id": "password", "label": "Password"}
         }))
         .unwrap(),
     );
@@ -72,7 +72,7 @@ async fn oauth_fails_closed_before_browser_initialization() {
     config.providers.push(
         serde_json::from_value(serde_json::json!({
             "type": "plain", "name": "browser", "realm": "local", "users": [],
-            "browser": {"label": "Password"}
+            "browser": {"id": "password", "label": "Password"}
         }))
         .unwrap(),
     );

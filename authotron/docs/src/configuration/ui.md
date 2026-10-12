@@ -42,12 +42,14 @@ providers:
         password: replace-this-example-password
         roles: [reader]
     browser:
+      id: staff
       label: Staff login
   - type: ecmwf-api
     name: ECMWF API Provider
     realm: ecmwf
     uri: https://api.ecmwf.int/v1
     browser:
+      id: ecmwf-api-key
       label: ECMWF API key
   - type: plain
     name: Service accounts # API-only: no browser block
@@ -66,19 +68,32 @@ ui:
 
 Rules, checked at startup:
 
-- `browser` accepts only `label`. The label is trimmed and must be 1–64
-  characters without control characters. It is the chooser entry and form heading.
+- `browser` accepts exactly `id` (required) and `label` (required).
+- `id` is the stable method identifier used in the method URL, form flow tags
+  and the `method` metric label. It must match `^[a-z0-9][a-z0-9-]{0,31}$`
+  (1–32 bytes: lowercase ASCII letters, digits and hyphens, not starting with a
+  hyphen), be unique across providers, and not be one of the reserved values
+  `callback`, `new` or `account`. Valid: `staff`, `ecmwf-api-key`, `2fa`.
+  Invalid: `Staff`, `-staff`, `staff_login`, an empty string, `account`.
+- The label is trimmed and must be 1–64 characters without control characters.
+  It is the chooser entry and form heading.
 - A non-null `browser` block on any other provider type rejects the
   configuration. `browser: null` is the same as omitting it (API-only).
-- Labels are unique case-insensitively; at most 16 browser methods.
+- Ids are unique; labels are unique case-insensitively; at most 16 browser methods.
 - Any browser method requires `ui.browser_session` with an explicit `backend`.
 - Enabled OAuth requires at least one browser method.
 
-Each method is served at `/login/method/{n}`, where `n` is its 0-based index
-among browser-enabled providers in `providers` order (API-only providers are not
-counted). The chooser lists methods in provider order by label, followed by SSO
-links. Startup logs the configured methods at INFO level. Reordering providers
-or adding/removing a `browser` block changes method indexes.
+Each method is served at `/login/method/{id}` (for example
+`/login/method/ecmwf-api-key`). Ids are matched exactly against the raw request
+path; unknown, reserved or differently cased ids, and any percent-escaped spelling
+(for example `/login/method/pass%77ord`), return the branded 404 page. The chooser lists methods in
+provider order by label, followed by SSO links. Startup logs the configured
+methods by id at INFO level. Reordering providers or changing a label keeps every
+method URL; changing an `id` changes that method's URL.
+
+Migration: earlier releases served methods at `/login/method/{n}` by position and
+accepted `browser: {label}` alone. Every `browser` block now needs an `id`, and
+bookmarks or links to numeric method URLs must be updated to the id-based URL.
 
 Omitting `ui` or `branding` uses these defaults. Application name, title, and description are escaped plain text, not HTML. The footer is fixed: [Powered by Auth-O-Tron](https://github.com/ecmwf/auth-o-tron).
 
@@ -203,6 +218,7 @@ providers:
     realm: ecmwf
     uri: https://api.ecmwf.int/v1
     browser:
+      id: ecmwf-api-key
       label: ECMWF API key
 ui:
   enabled: true
@@ -218,7 +234,7 @@ must be an absolute HTTPS origin without credentials, path, query or fragment.
 Session TTL defaults to 300 seconds and must be between 60 and 86,400 seconds.
 Configuration is checked before creating stores or browser network state.
 
-The method's chooser entry opens `GET /login/method/{n}` with an `api_key` form. Submission requires a
+The method's chooser entry opens `GET /login/method/{id}` with an `api_key` form. Submission requires a
 same-origin POST with the host-only form-nonce cookie and one-use CSRF token;
 transactions expire after `transaction_ttl_seconds` (default five minutes). The response redirects only to the fixed
 `/login/account` identity view, not an arbitrary application callback.
@@ -282,7 +298,7 @@ ui:
     backend:
       type: valkey
       url: redis://service:6379/0
-      key_prefix: authotron:browser:v1:release
+      key_prefix: authotron:browser:release
       connect_timeout_ms: 2000
       operation_timeout_ms: 1000
 ```
@@ -420,12 +436,14 @@ providers:
         password: replace-this-example-password
         roles: [reader]
     browser:
+      id: staff
       label: Staff login
   - type: ecmwf-api
     name: ECMWF API Provider
     realm: ecmwf
     uri: https://api.ecmwf.int/v1
     browser:
+      id: ecmwf-api-key
       label: ECMWF API key
 augmenters:
   - type: plain
@@ -451,7 +469,7 @@ all browser methods. Configurations with browser methods must explicitly select
 backend settings above. UI is disabled by default; the session lifetime default
 is 300 seconds (range 60–86400).
 
-For a `plain` method, `GET /login/method/{n}` displays a username/password form;
+For a `plain` method, `GET /login/method/{id}` displays a username/password form;
 credentials are accepted only by form POST.
 Usernames are nonempty, at most 256 UTF-8 bytes, and cannot contain a colon or
 control characters. Passwords are nonempty and at most 1,024 UTF-8 bytes, with
@@ -470,7 +488,7 @@ transaction ID. Opening another form with that nonce, or completing one form,
 does not invalidate outstanding forms. Malformed or mismatched submissions cannot
 consume another form's transaction. CSRF tokens are cookie-bound, single-use,
 expire after the configured transaction TTL, and are also bound to the method
-index and provider type. Submitting a form to a different method returns 403 without
+id and provider type. Submitting a form to a different method returns 403 without
 consuming the form; a field set that does not match the method's provider type returns 400. Each POST requires exactly
 one Origin header matching the configured normalized HTTPS origin. Forwarded
 headers and submitted fields never choose the origin or destination.
@@ -479,10 +497,17 @@ This preserves multiple forms once the browser has a form nonce. Concurrent firs
 visits without a cookie (also after cookie expiry) can still race to establish
 different nonces; the losing form fails closed and must be reopened. The composite
 CSRF format rejects forms issued by earlier versions; Valkey form records carry a
-method-bound `flow` value (`basic:<n>` or `key:<n>`), and forms issued by earlier
-versions are rejected after upgrade. When upgrading, drain
-earlier-version replicas and ask users to load a fresh form; identity sessions
-remain readable, but forms are not compatible across that version boundary.
+method-bound `flow` value `<kind>:<id>` (`basic:<id>` or `key:<id>`, at most 38
+bytes), and the Lua script rejects any other shape.
+
+Auth-O-Tron stores browser records under `<key_prefix>:v2:` (for example
+`authotron:browser:release:v2:form:<sid>`); the `v2` segment is the record format
+version owned by the server. Upgrading from a release that stored records directly
+under `<key_prefix>:` orphans those records: in-flight forms are rejected and
+existing browser sessions are no longer found, so users sign in again. Orphaned
+keys expire with their original TTLs. Drain earlier-version replicas before
+upgrading, because mixed versions do not share forms, sessions, quotas or
+admission leases.
 
 After **each successful direct verification**, Auth-O-Tron invokes the existing
 `Auth::check_augmenters` pipeline: matching-realm ordinary augmenters run in
@@ -565,7 +590,7 @@ by rendering Kubernetes objects.
 
 ## Endpoints and Image Requirement
 
-When `ui.enabled: true`, `GET /login` serves the entry page and `GET /static/login.css` serves its stylesheet. Both require no authentication and exist only on the main application port (`server.port`), not the metrics port. When disabled, neither route is registered. Trailing-slash forms of the login pages (`/login/`, `/login/account/`, `/login/method/{n}/` for configured methods) redirect `GET`/`HEAD` with `308` to the relative canonical path, dropping any query string; they are registered only alongside the pages themselves. Existing `/` and `/authenticate` behavior is unchanged.
+When `ui.enabled: true`, `GET /login` serves the entry page and `GET /static/login.css` serves its stylesheet. Both require no authentication and exist only on the main application port (`server.port`), not the metrics port. When disabled, neither route is registered. Trailing-slash forms of the login pages (`/login/`, `/login/account/`, `/login/method/{id}/` for configured methods) redirect `GET`/`HEAD` with `308` to the relative canonical path, dropping any query string; they are registered only alongside the pages themselves. Existing `/` and `/authenticate` behavior is unchanged.
 
 The page uses origin-root asset paths (`/static/login.css` and `/favicon.ico`). If
 an ingress exposes Auth-O-Tron beneath a rewritten path prefix, route those root
