@@ -62,8 +62,12 @@ OAUTH_SCOPE = "mcp:read"
 # require the same single role.
 OAUTH_ROLE = "mcp-demo"
 OAUTH_REQUIRED_ROLES = (OAUTH_ROLE,)
-# Short-lived playground tokens; the server accepts 60..=3600 seconds.
-OAUTH_ACCESS_TOKEN_TTL_SECONDS = 120
+# Demo lifetime at the server maximum (60..=3600 seconds): no refresh tokens are
+# issued yet, so MCP clients re-run the browser flow after expiry.
+OAUTH_ACCESS_TOKEN_TTL_SECONDS = 3600
+# Opt-in Aviso MCP resource (--oauth-aviso-resource): any authenticated browser user
+# of the playground may use it, so its scope requires no role.
+OAUTH_AVISO_SCOPE = "aviso:read"
 # ECMWF uids become `username` in realm `ecmwf`; bounded like the server's browser uid.
 OAUTH_MAX_ECMWF_UIDS = 32
 OAUTH_MAX_UID_LENGTH = 128
@@ -655,16 +659,68 @@ def oauth_kid(pem):
     return f"playground-{hashlib.sha256(spki).hexdigest()[:16]}"
 
 
-def oauth_clients():
-    """mcp-local first (its fixed callback is unchanged), then the MCP client table."""
-    local = {"resource": OAUTH_RESOURCE, "scopes": [OAUTH_SCOPE]}
+def checked_aviso_resource(value, oauth_enabled):
+    """Canonical HTTPS resource URI without query, fragment or userinfo.
+    Valid: https://aviso-mcp.example.org/mcp. Invalid: http://a.example/mcp,
+    https://A.example/mcp, https://a.example:443/mcp, https://a.example/mcp?x=1."""
+    if value is None:
+        return None
+    if not oauth_enabled:
+        raise ValueError("--oauth-aviso-resource requires the OAuth profile")
+    match = isinstance(value, str) and re.fullmatch(
+        r"https://([a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?)(?::([0-9]{1,5}))?"
+        r"(/[A-Za-z0-9._~/-]*)",
+        value,
+    )
+    if (
+        not match
+        or ".." in match[1]
+        or (
+            match[2] is not None
+            # Canonical ports only: no default 443 and no leading zero.
+            and (match[2] == "443" or match[2][0] == "0" or int(match[2]) > 65535)
+        )
+        or "//" in match[3]
+        or value == OAUTH_RESOURCE
+    ):
+        raise ValueError("invalid Aviso OAuth resource URI")
+    return value
+
+
+def oauth_clients(aviso_resource=None):
+    """mcp-local first (its fixed callback and local-only binding are unchanged),
+    then the MCP client table bound to the local and optional Aviso resources."""
+    bindings = [{"resource": OAUTH_RESOURCE, "scopes": [OAUTH_SCOPE]}]
+    if aviso_resource is not None:
+        bindings.append({"resource": aviso_resource, "scopes": [OAUTH_AVISO_SCOPE]})
     return checked_mcp_clients(
         [copy.deepcopy(OAUTH_CLIENT)]
-        + [{**copy.deepcopy(c), "resources": [dict(local)]} for c in MCP_CLIENTS]
+        + [
+            {**copy.deepcopy(c), "resources": copy.deepcopy(bindings)}
+            for c in MCP_CLIENTS
+        ]
     )
 
 
-def oauth_config(host, kid, realms):
+def oauth_config(host, kid, realms, aviso_resource=None):
+    realms = list(dict.fromkeys(realms))
+    resources = [
+        {
+            "resource": OAUTH_RESOURCE,
+            "allowed_realms": list(realms),
+            "scopes": [
+                {"name": OAUTH_SCOPE, "required_roles": list(OAUTH_REQUIRED_ROLES)}
+            ],
+        }
+    ]
+    if aviso_resource is not None:
+        resources.append(
+            {
+                "resource": aviso_resource,
+                "allowed_realms": list(realms),
+                "scopes": [{"name": OAUTH_AVISO_SCOPE, "required_roles": []}],
+            }
+        )
     return {
         "enabled": True,
         "issuer": f"https://{host}/",
@@ -676,16 +732,8 @@ def oauth_config(host, kid, realms):
                 {"kid": kid, "private_key_file": f"{OAUTH_KEY_DIR}/{OAUTH_KEY_NAME}"}
             ],
         },
-        "clients": oauth_clients(),
-        "resources": [
-            {
-                "resource": OAUTH_RESOURCE,
-                "allowed_realms": list(dict.fromkeys(realms)),
-                "scopes": [
-                    {"name": OAUTH_SCOPE, "required_roles": list(OAUTH_REQUIRED_ROLES)}
-                ],
-            }
-        ],
+        "clients": oauth_clients(aviso_resource),
+        "resources": resources,
     }
 
 
@@ -733,12 +781,14 @@ def transform(
     transaction_ttl_seconds=300,
     oauth_key=None,
     oauth_allow_ecmwf_uids=(),
+    oauth_aviso_resource=None,
 ):
     checked_session_options(
         valkey_password, replicas, session_ttl_seconds, transaction_ttl_seconds
     )
     checked_oauth_profile(oauth_key is not None, valkey_password)
     ecmwf_uids = checked_ecmwf_uids(oauth_allow_ecmwf_uids, oauth_key is not None)
+    aviso = checked_aviso_resource(oauth_aviso_resource, oauth_key is not None)
     checked_token(token)
     resources = copy.deepcopy(baseline)
     config_map = next(d for d in resources if d["kind"] == "ConfigMap" and "data" in d)
@@ -803,7 +853,7 @@ def transform(
         )
     if oauth_key is not None:
         realms = [p["realm"] for p in config["providers"] if p.get("browser")]
-        config["oauth"] = oauth_config(host, oauth_kid(oauth_key), realms)
+        config["oauth"] = oauth_config(host, oauth_kid(oauth_key), realms, aviso)
     config_map["data"]["config.yaml"] = yaml.safe_dump(config)
     deployment = next(d for d in resources if d["kind"] == "Deployment")
     deployment["spec"]["replicas"] = replicas
@@ -920,6 +970,7 @@ def validate_resources(
     transaction_ttl_seconds=300,
     oauth_key=None,
     oauth_allow_ecmwf_uids=(),
+    oauth_aviso_resource=None,
 ):
     """Compare the full output to the narrowly transformed, validated prototype."""
     preview.validate_inputs(host, image)
@@ -968,6 +1019,7 @@ def validate_resources(
             transaction_ttl_seconds=transaction_ttl_seconds,
             oauth_key=oauth_key,
             oauth_allow_ecmwf_uids=oauth_allow_ecmwf_uids,
+            oauth_aviso_resource=oauth_aviso_resource,
         )
     )
     if resource_map(resources) != expected:
@@ -991,6 +1043,7 @@ def render_api_key(
     transaction_ttl_seconds=300,
     oauth_key=None,
     oauth_allow_ecmwf_uids=(),
+    oauth_aviso_resource=None,
 ):
     preview.validate_inputs(host, image)
     checked_token(token)
@@ -999,6 +1052,7 @@ def render_api_key(
     )
     checked_oauth_profile(oauth_key is not None, valkey_password)
     ecmwf_uids = checked_ecmwf_uids(oauth_allow_ecmwf_uids, oauth_key is not None)
+    aviso = checked_aviso_resource(oauth_aviso_resource, oauth_key is not None)
     if oauth_key is not None:
         checked_oauth_key({"private-key-pem": oauth_key})
     if basic is not None:
@@ -1014,6 +1068,8 @@ def render_api_key(
         options["oauth_key"] = oauth_key
     if ecmwf_uids:
         options["oauth_allow_ecmwf_uids"] = ecmwf_uids
+    if aviso is not None:
+        options["oauth_aviso_resource"] = aviso
     resources = transform(baseline, host, token, basic, **options)
     validate_resources(resources, baseline, host, image, token, basic, **options)
     return resources, archive
@@ -1038,6 +1094,11 @@ def main():
         metavar="UID",
         help="grant the OAuth role to this ECMWF API-key uid (repeatable)",
     )
+    parser.add_argument(
+        "--oauth-aviso-resource",
+        metavar="URL",
+        help=f"also register this Aviso MCP resource with scope {OAUTH_AVISO_SCOPE}",
+    )
     parser.add_argument("--replicas", type=int, default=1)
     parser.add_argument("--session-ttl-seconds", type=int, default=300)
     parser.add_argument("--transaction-ttl-seconds", type=int, default=300)
@@ -1052,6 +1113,7 @@ def main():
     )
     checked_oauth_profile(bool(args.oauth_secret_file), args.valkey_secret_file)
     checked_ecmwf_uids(args.oauth_allow_ecmwf_uids, bool(args.oauth_secret_file))
+    checked_aviso_resource(args.oauth_aviso_resource, bool(args.oauth_secret_file))
     project = Path(__file__).resolve().parents[3]
     output_dir = checked_output_directory(args.output_dir, project)
     credential_paths = [
@@ -1115,6 +1177,8 @@ def main():
     )
     if args.oauth_allow_ecmwf_uids:
         oauth["oauth_allow_ecmwf_uids"] = tuple(args.oauth_allow_ecmwf_uids)
+    if args.oauth_aviso_resource:
+        oauth["oauth_aviso_resource"] = args.oauth_aviso_resource
     resources, _ = render_api_key(
         project,
         args.chart,

@@ -46,6 +46,7 @@ API_KEY_PATH_RULES = [
     ("/static/", "Prefix"),
     ("/favicon.ico", "ImplementationSpecific"),
 ]
+AVISO = "https://aviso-mcp-dev.lumi.apps.dte.destination-earth.eu/mcp"
 OAUTH_ROUTES = [
     ("/oauth/authorize", "Exact"),
     ("/oauth/continue", "Exact"),
@@ -1234,6 +1235,117 @@ class RendererTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             renderer.checked_mcp_clients([good, copy.deepcopy(good)])
 
+    def test_oauth_aviso_resource_is_opt_in_and_bound_to_table_clients(self):
+        baseline, _ = self.baseline()
+        options = dict(
+            valkey_password=VALKEY_PASSWORD,
+            oauth_key=OAUTH_KEY,
+            oauth_aviso_resource=AVISO,
+        )
+        for basic, realms in ((None, ["ecmwf"]), (BASIC, ["browser-demo", "ecmwf"])):
+            with self.subTest(basic=basic is not None):
+                resources = renderer.transform(baseline, HOST, TOKEN, basic, **options)
+                renderer.validate_resources(
+                    resources, baseline, HOST, IMAGE, TOKEN, basic, **options
+                )
+                oauth = yaml.safe_load(
+                    find(resources, "ConfigMap")["data"]["config.yaml"]
+                )["oauth"]
+                self.assertEqual(oauth["access_token_ttl_seconds"], 3600)
+                self.assertEqual(
+                    oauth["resources"][1],
+                    {
+                        "resource": AVISO,
+                        "allowed_realms": realms,
+                        "scopes": [{"name": "aviso:read", "required_roles": []}],
+                    },
+                )
+                self.assertEqual(
+                    oauth["resources"][0]["scopes"],
+                    [{"name": "mcp:read", "required_roles": ["mcp-demo"]}],
+                )
+                local, *table = oauth["clients"]
+                self.assertEqual(local, renderer.OAUTH_CLIENT)
+                self.assertEqual(len(table), len(renderer.MCP_CLIENTS))
+                for client in table:
+                    self.assertEqual(
+                        client["resources"],
+                        [
+                            {
+                                "resource": renderer.OAUTH_RESOURCE,
+                                "scopes": ["mcp:read"],
+                            },
+                            {"resource": AVISO, "scopes": ["aviso:read"]},
+                        ],
+                    )
+                # Dropping or changing the flag is a guard mismatch.
+                for other in (None, AVISO + "2"):
+                    with self.assertRaises(ValueError):
+                        renderer.validate_resources(
+                            resources,
+                            baseline,
+                            HOST,
+                            IMAGE,
+                            TOKEN,
+                            basic,
+                            **{**options, "oauth_aviso_resource": other},
+                        )
+        without = renderer.oauth_config(HOST, "kid", ["ecmwf"])
+        self.assertEqual(
+            [r["resource"] for r in without["resources"]], [renderer.OAUTH_RESOURCE]
+        )
+        for client in without["clients"]:
+            self.assertEqual(
+                client["resources"],
+                [{"resource": renderer.OAUTH_RESOURCE, "scopes": ["mcp:read"]}],
+            )
+
+    def test_oauth_aviso_resource_validation(self):
+        for value in (AVISO, "https://a.example:8443/mcp", "https://a.example/"):
+            self.assertEqual(renderer.checked_aviso_resource(value, True), value)
+        self.assertIsNone(renderer.checked_aviso_resource(None, False))
+        for value in (
+            "http://a.example/mcp",
+            "https://A.example/mcp",
+            "https://a.example",
+            "https://a.example:443/mcp",
+            "https://a.example:0/mcp",
+            "https://a.example:08443/mcp",
+            "https://a.example:70000/mcp",
+            "https://a.example/mcp?x=1",
+            "https://a.example/mcp#x",
+            "https://u@a.example/mcp",
+            "https://a.example//mcp",
+            "https://a.example/m cp",
+            "https://a..example/mcp",
+            renderer.OAUTH_RESOURCE,
+            "",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    renderer.checked_aviso_resource(value, True)
+        with self.assertRaises(ValueError):
+            renderer.checked_aviso_resource(AVISO, False)
+        baseline, _ = self.baseline()
+        with self.assertRaises(ValueError):
+            renderer.transform(
+                baseline,
+                HOST,
+                TOKEN,
+                BASIC,
+                valkey_password=VALKEY_PASSWORD,
+                oauth_aviso_resource=AVISO,
+            )
+
+    def test_oauth_aviso_policy_admits_any_browser_realm_user(self):
+        config = renderer.oauth_config(HOST, "kid", ["browser-demo", "ecmwf"], AVISO)
+        aviso = config["resources"][1]
+        (scope,) = aviso["scopes"]
+        for realm in ("browser-demo", "ecmwf"):
+            self.assertIn(realm, aviso["allowed_realms"])
+        self.assertEqual(scope["required_roles"], [])
+        self.assertNotIn("other", aviso["allowed_realms"])
+
     def test_oauth_ecmwf_allowlist_grants_role_only_to_listed_uids(self):
         baseline, _ = self.baseline()
         options = dict(
@@ -1410,7 +1522,7 @@ class RendererTests(unittest.TestCase):
                 config = yaml.safe_load(public_text)
                 oauth = config["oauth"]
                 self.assertEqual(oauth["issuer"], f"https://{HOST}/")
-                self.assertEqual(oauth["access_token_ttl_seconds"], 120)
+                self.assertEqual(oauth["access_token_ttl_seconds"], 3600)
                 # Only the Basic demo user holds the OAuth role by default.
                 self.assertEqual(
                     [
@@ -1682,6 +1794,32 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(
             render.call_args.kwargs["oauth_allow_ecmwf_uids"], ("user_a", "user_b")
         )
+        self.assertNotIn("oauth_aviso_resource", render.call_args.kwargs)
+        with (
+            patch("sys.argv", arguments + ["--oauth-aviso-resource", AVISO]),
+            patch.object(renderer, "signing_secret", return_value=TOKEN),
+            patch.object(renderer, "basic_credentials", return_value=BASIC),
+            patch.object(renderer, "valkey_secret", return_value=VALKEY_PASSWORD),
+            patch.object(
+                renderer, "render_api_key", return_value=(resources, b"archive")
+            ) as render,
+            patch("builtins.print"),
+        ):
+            renderer.main()
+        self.assertEqual(render.call_args.kwargs["oauth_aviso_resource"], AVISO)
+        for bad in (
+            arguments[: arguments.index("--oauth-secret-file")]
+            + ["--oauth-aviso-resource", AVISO],
+            arguments + ["--oauth-aviso-resource", "http://a.example/mcp"],
+        ):
+            with (
+                patch("sys.argv", bad),
+                patch.object(renderer, "signing_secret") as signing,
+                patch.object(renderer, "render_api_key"),
+            ):
+                with self.assertRaises(ValueError):
+                    renderer.main()
+                signing.assert_not_called()
         self.assertEqual(oauth_file.stat().st_mode & 0o777, 0o600)
         printed_text = str(printed.call_args_list)
         self.assertIn(f"OAuth issuer: https://{HOST}/", printed_text)
