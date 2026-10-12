@@ -215,7 +215,13 @@ async fn metadata(State(state): State<AppState>) -> Response {
     let runtime = state.oauth.as_ref().unwrap();
     let issuer = runtime.config.issuer.as_deref().unwrap();
     let base = issuer.trim_end_matches('/');
-    secure_oauth_response(Json(json!({"issuer": issuer, "authorization_endpoint": format!("{base}/oauth/authorize"), "token_endpoint": format!("{base}/oauth/token"), "jwks_uri": format!("{base}/oauth/jwks"), "response_types_supported": ["code"], "grant_types_supported": ["authorization_code"], "token_endpoint_auth_methods_supported": ["none"], "code_challenge_methods_supported": ["S256"], "authorization_response_iss_parameter_supported": true})).into_response())
+    let scopes: std::collections::BTreeSet<&str> = runtime
+        .config
+        .resources
+        .iter()
+        .flat_map(|resource| resource.scopes.iter().map(|scope| scope.name.as_str()))
+        .collect();
+    secure_oauth_response(Json(json!({"issuer": issuer, "scopes_supported": scopes, "authorization_endpoint": format!("{base}/oauth/authorize"), "token_endpoint": format!("{base}/oauth/token"), "jwks_uri": format!("{base}/oauth/jwks"), "response_types_supported": ["code"], "grant_types_supported": ["authorization_code"], "token_endpoint_auth_methods_supported": ["none"], "code_challenge_methods_supported": ["S256"], "authorization_response_iss_parameter_supported": true})).into_response())
 }
 async fn jwks(State(state): State<AppState>) -> Response {
     secure_oauth_response(Json(state.oauth.as_ref().unwrap().keys.jwks()).into_response())

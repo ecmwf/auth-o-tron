@@ -638,6 +638,7 @@ async fn basic_and_api_key_http_flows_issue_verified_one_use_tokens() {
         json!(["none"])
     );
     assert!(metadata.get("registration_endpoint").is_none());
+    assert_eq!(metadata["scopes_supported"], json!(["read"]));
     complete(&app, &app, false).await;
     complete(&app, &app, true).await;
     request.assert_async().await;
@@ -654,6 +655,30 @@ async fn basic_and_api_key_http_flows_issue_verified_one_use_tokens() {
             StatusCode::NOT_FOUND
         );
     }
+}
+#[tokio::test]
+async fn metadata_scopes_supported_is_sorted_unique_union_of_resource_scopes() {
+    let (_key, mut config) = fixture("http://127.0.0.1:9");
+    let mut second = config.oauth.resources[0].clone();
+    second.resource = "https://mcp.example.test/other".into();
+    for name in ["write", "admin"] {
+        let mut scope = second.scopes[0].clone();
+        scope.name = name.into();
+        second.scopes.push(scope);
+    }
+    config.oauth.resources.push(second);
+    let (app, _) = startup::build_app(Arc::new(config)).await.unwrap();
+    let response = get(
+        &app,
+        "/.well-known/oauth-authorization-server",
+        &Jar::default(),
+    )
+    .await;
+    let metadata: Value = serde_json::from_str(&text(response).await).unwrap();
+    assert_eq!(
+        metadata["scopes_supported"],
+        json!(["admin", "read", "write"])
+    );
 }
 #[tokio::test]
 async fn invalid_authorization_and_stale_login_forms_never_verify_or_redirect() {
