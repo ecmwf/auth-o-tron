@@ -74,6 +74,85 @@ OAUTH_CLIENT = {
     "redirect_uris": ["http://127.0.0.1:49152/callback"],
     "resources": [{"resource": OAUTH_RESOURCE, "scopes": [OAUTH_SCOPE]}],
 }
+# Pre-registered public MCP clients, checked against vendor docs (2026-10). Loopback
+# HTTP callbacks require `native` and match any request port on the server, so a
+# registered port is irrelevant; `native` clients may also list HTTPS callbacks.
+# Hosted-only clients use `web`. Every row must pass checked_mcp_client.
+MCP_CLIENTS = (
+    {
+        "client_id": "claude-code",
+        "display_name": "Claude Code",
+        "application_type": "native",
+        "redirect_uris": ["http://localhost/callback", "http://127.0.0.1/callback"],
+    },
+    {
+        "client_id": "claude-ai",
+        "display_name": "Claude (web, Desktop, mobile)",
+        "application_type": "web",
+        "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+    },
+    {
+        "client_id": "codex",
+        "display_name": "OpenAI Codex",
+        "application_type": "native",
+        "redirect_uris": ["http://127.0.0.1/callback"],
+    },
+    {
+        "client_id": "chatgpt",
+        "display_name": "ChatGPT",
+        "application_type": "web",
+        "redirect_uris": ["https://chatgpt.com/connector_platform_oauth_redirect"],
+    },
+    {
+        "client_id": "gemini-cli",
+        "display_name": "Gemini CLI",
+        "application_type": "native",
+        "redirect_uris": ["http://localhost/oauth/callback"],
+    },
+    {
+        "client_id": "vscode",
+        "display_name": "Visual Studio Code",
+        "application_type": "native",
+        # VS Code documents the path-less loopback spelling; matching is literal on
+        # path, so the trailing-slash form is registered too.
+        "redirect_uris": [
+            "http://127.0.0.1:33418",
+            "http://127.0.0.1:33418/",
+            "https://vscode.dev/redirect",
+            "https://insiders.vscode.dev/redirect",
+        ],
+    },
+    {
+        "client_id": "cursor",
+        "display_name": "Cursor",
+        "application_type": "native",
+        "redirect_uris": [
+            "http://localhost/callback",
+            "https://www.cursor.com/agents/mcp/oauth/callback",
+        ],
+    },
+    {
+        "client_id": "mcp-inspector",
+        "display_name": "MCP Inspector",
+        "application_type": "native",
+        "redirect_uris": [
+            "http://127.0.0.1/oauth/callback",
+            "http://localhost/oauth/callback",
+            "http://localhost/oauth/callback/debug",
+        ],
+    },
+)
+# Each client receives floor(cap / client_count) non-borrowable transaction slots.
+OAUTH_MAX_AUTHORIZATION_TRANSACTIONS = 1024
+OAUTH_LOOPBACK_HOSTS = ("127.0.0.1", "[::1]", "localhost")
+OAUTH_RESERVED_CALLBACK_QUERY = {
+    "code",
+    "state",
+    "iss",
+    "error",
+    "error_description",
+    "error_uri",
+}
 # NGINX admission rejects dotted paths with Exact/Prefix, so the metadata document
 # uses ImplementationSpecific (prefix semantics); every other OAuth route is Exact.
 OAUTH_PATH_RULES = (
@@ -122,6 +201,96 @@ def checked_ecmwf_uids(uids, oauth_enabled):
         ):
             raise ValueError("invalid ECMWF uid in OAuth allowlist")
     return uids
+
+
+def checked_callback(value, application_type):
+    """Mirror of the server's callback rules.
+    Valid: https://claude.ai/api/mcp/auth_callback, native http://localhost/callback.
+    Invalid: web http://127.0.0.1/cb, http://127.0.0.2/cb, http://localhost:0/cb,
+    https://a.example/cb#x, https://a.example/cb?state=1."""
+    if not isinstance(value, str) or not value or len(value) > 2048 or "\\" in value:
+        raise ValueError("invalid OAuth callback")
+    if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError("invalid OAuth callback")
+    if re.search(r"%(?![0-9A-Fa-f]{2})", value):
+        raise ValueError("invalid OAuth callback percent escape")
+    url = urlsplit(value)
+    try:
+        port = url.port
+    except ValueError:
+        raise ValueError("invalid OAuth callback port") from None
+    if (
+        not url.hostname
+        or url.netloc.endswith(":")
+        or port == 0
+        or "@" in url.netloc
+        or "#" in value
+    ):
+        raise ValueError("invalid OAuth callback")
+    host = url.netloc.rsplit(":", 1)[0] if port is not None else url.netloc
+    if url.scheme == "https" and value.startswith("https://"):
+        pass
+    elif (
+        value.startswith("http://")
+        and application_type == "native"
+        and host in OAUTH_LOOPBACK_HOSTS
+    ):
+        pass
+    else:
+        raise ValueError("OAuth callback must be HTTPS or a native loopback URI")
+    names = {pair.split("=", 1)[0] for pair in url.query.split("&") if pair}
+    if names & OAUTH_RESERVED_CALLBACK_QUERY:
+        raise ValueError("OAuth callback query must not contain reserved parameters")
+    return value
+
+
+def checked_mcp_client(client):
+    """Mirror of the server's client rules for one OAUTH client entry."""
+    if not isinstance(client, dict) or not {
+        "client_id",
+        "display_name",
+        "application_type",
+        "redirect_uris",
+    } <= set(client) <= {
+        "client_id",
+        "display_name",
+        "application_type",
+        "redirect_uris",
+        "resources",
+    }:
+        raise ValueError("unexpected OAuth client fields")
+    if not isinstance(client["client_id"], str) or not re.fullmatch(
+        r"[A-Za-z0-9._-]{1,128}", client["client_id"]
+    ):
+        raise ValueError("invalid OAuth client_id")
+    name = client["display_name"]
+    if (
+        not isinstance(name, str)
+        or not name.strip()
+        or len(name.encode()) > 128
+        or any(ord(c) < 32 or 127 <= ord(c) < 160 for c in name)
+    ):
+        raise ValueError("invalid OAuth display_name")
+    if client["application_type"] not in ("web", "native"):
+        raise ValueError("invalid OAuth application_type")
+    uris = client["redirect_uris"]
+    if not isinstance(uris, list) or not 1 <= len(uris) <= 8:
+        raise ValueError("OAuth redirect_uris must contain 1..8 callbacks")
+    if len(set(uris)) != len(uris):
+        raise ValueError("duplicate OAuth redirect URI")
+    for uri in uris:
+        checked_callback(uri, client["application_type"])
+    return client
+
+
+def checked_mcp_clients(clients):
+    clients = [checked_mcp_client(c) for c in clients]
+    ids = [c["client_id"] for c in clients]
+    if len(set(ids)) != len(ids):
+        raise ValueError("duplicate OAuth client_id")
+    if not len(clients) <= OAUTH_MAX_AUTHORIZATION_TRANSACTIONS <= 100000:
+        raise ValueError("OAuth transaction capacity needs one slot per client")
+    return clients
 
 
 def checked_oauth_profile(oauth_enabled, valkey_password):
@@ -486,18 +655,28 @@ def oauth_kid(pem):
     return f"playground-{hashlib.sha256(spki).hexdigest()[:16]}"
 
 
+def oauth_clients():
+    """mcp-local first (its fixed callback is unchanged), then the MCP client table."""
+    local = {"resource": OAUTH_RESOURCE, "scopes": [OAUTH_SCOPE]}
+    return checked_mcp_clients(
+        [copy.deepcopy(OAUTH_CLIENT)]
+        + [{**copy.deepcopy(c), "resources": [dict(local)]} for c in MCP_CLIENTS]
+    )
+
+
 def oauth_config(host, kid, realms):
     return {
         "enabled": True,
         "issuer": f"https://{host}/",
         "access_token_ttl_seconds": OAUTH_ACCESS_TOKEN_TTL_SECONDS,
+        "max_authorization_transactions": OAUTH_MAX_AUTHORIZATION_TRANSACTIONS,
         "signing": {
             "active_kid": kid,
             "keys": [
                 {"kid": kid, "private_key_file": f"{OAUTH_KEY_DIR}/{OAUTH_KEY_NAME}"}
             ],
         },
-        "clients": [copy.deepcopy(OAUTH_CLIENT)],
+        "clients": oauth_clients(),
         "resources": [
             {
                 "resource": OAUTH_RESOURCE,

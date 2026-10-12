@@ -1118,6 +1118,122 @@ class RendererTests(unittest.TestCase):
             roles, [{"name": remote["scope"], "required_roles": ["mcp-demo"]}]
         )
 
+    def test_mcp_client_table_entries_render_and_validate(self):
+        expected = {
+            "claude-code": (
+                "native",
+                ["http://localhost/callback", "http://127.0.0.1/callback"],
+            ),
+            "claude-ai": ("web", ["https://claude.ai/api/mcp/auth_callback"]),
+            "codex": ("native", ["http://127.0.0.1/callback"]),
+            "chatgpt": (
+                "web",
+                ["https://chatgpt.com/connector_platform_oauth_redirect"],
+            ),
+            "gemini-cli": ("native", ["http://localhost/oauth/callback"]),
+            "vscode": (
+                "native",
+                [
+                    "http://127.0.0.1:33418",
+                    "http://127.0.0.1:33418/",
+                    "https://vscode.dev/redirect",
+                    "https://insiders.vscode.dev/redirect",
+                ],
+            ),
+            "cursor": (
+                "native",
+                [
+                    "http://localhost/callback",
+                    "https://www.cursor.com/agents/mcp/oauth/callback",
+                ],
+            ),
+            "mcp-inspector": (
+                "native",
+                [
+                    "http://127.0.0.1/oauth/callback",
+                    "http://localhost/oauth/callback",
+                    "http://localhost/oauth/callback/debug",
+                ],
+            ),
+        }
+        table = {
+            c["client_id"]: (c["application_type"], c["redirect_uris"])
+            for c in renderer.MCP_CLIENTS
+        }
+        self.assertEqual(table, expected)
+        clients = renderer.oauth_config(HOST, "kid", ["ecmwf"])["clients"]
+        self.assertEqual([c["client_id"] for c in clients], ["mcp-local", *expected])
+        for client in clients:
+            with self.subTest(client=client["client_id"]):
+                renderer.checked_mcp_client(client)
+                # Hosted-only callbacks need no native type; loopback HTTP does.
+                loopback = any(u.startswith("http://") for u in client["redirect_uris"])
+                self.assertEqual(client["application_type"] == "native", loopback)
+
+    def test_oauth_capacity_reserves_a_share_for_every_client(self):
+        clients = renderer.oauth_clients()
+        cap = renderer.OAUTH_MAX_AUTHORIZATION_TRANSACTIONS
+        # Server partitioning: floor(cap / n) each, remainder in configuration order.
+        shares = [
+            cap // len(clients) + (i < cap % len(clients)) for i in range(len(clients))
+        ]
+        self.assertEqual(sum(shares), cap)
+        self.assertGreaterEqual(min(shares), 100)
+        with patch.object(renderer, "OAUTH_MAX_AUTHORIZATION_TRANSACTIONS", 8):
+            with self.assertRaises(ValueError):
+                renderer.oauth_clients()
+
+    def test_mcp_client_redirect_validation_mirrors_server_rules(self):
+        for uri, kind in (
+            ("https://claude.ai/api/mcp/auth_callback", "web"),
+            ("https://claude.ai/api/mcp/auth_callback", "native"),
+            ("http://localhost/callback", "native"),
+            ("http://127.0.0.1:33418", "native"),
+            ("http://[::1]:8080/cb", "native"),
+            ("https://a.example/cb?x=1", "web"),
+        ):
+            with self.subTest(valid=uri, kind=kind):
+                self.assertEqual(renderer.checked_callback(uri, kind), uri)
+        for uri, kind in (
+            ("http://127.0.0.1/callback", "web"),
+            ("http://localhost/callback", "web"),
+            ("http://127.0.0.2/callback", "native"),
+            ("http://example.org/callback", "native"),
+            ("http://localhost:0/callback", "native"),
+            ("http://localhost:/callback", "native"),
+            ("https://u@a.example/cb", "web"),
+            ("https://a.example/cb#x", "web"),
+            ("https://a.example/cb?state=1", "web"),
+            ("https://a.example/c b", "web"),
+            ("https://a.example/c\\b", "web"),
+            ("https://a.example/%zz", "web"),
+            ("HTTPS://a.example/cb", "web"),
+            ("ftp://a.example/cb", "web"),
+            ("", "native"),
+        ):
+            with self.subTest(invalid=uri, kind=kind):
+                with self.assertRaises(ValueError):
+                    renderer.checked_callback(uri, kind)
+        good = copy.deepcopy(renderer.MCP_CLIENTS[0])
+        for mutate in (
+            lambda c: c.update(client_id="bad id"),
+            lambda c: c.update(display_name=" "),
+            lambda c: c.update(display_name="x\x00"),
+            lambda c: c.update(application_type="spa"),
+            lambda c: c.update(redirect_uris=[]),
+            lambda c: c.update(redirect_uris=["https://a.example/cb"] * 2),
+            lambda c: c.update(
+                redirect_uris=[f"https://a.example/{i}" for i in range(9)]
+            ),
+            lambda c: c.update(extra=1),
+        ):
+            client = copy.deepcopy(good)
+            mutate(client)
+            with self.assertRaises(ValueError):
+                renderer.checked_mcp_client(client)
+        with self.assertRaises(ValueError):
+            renderer.checked_mcp_clients([good, copy.deepcopy(good)])
+
     def test_oauth_ecmwf_allowlist_grants_role_only_to_listed_uids(self):
         baseline, _ = self.baseline()
         options = dict(
@@ -1330,10 +1446,9 @@ class RendererTests(unittest.TestCase):
                         ],
                     },
                 )
-                self.assertEqual(
-                    oauth["clients"],
-                    [renderer.OAUTH_CLIENT],
-                )
+                self.assertEqual(oauth["clients"], renderer.oauth_clients())
+                self.assertEqual(oauth["clients"][0], renderer.OAUTH_CLIENT)
+                self.assertEqual(oauth["max_authorization_transactions"], 1024)
                 self.assertEqual(
                     oauth["resources"],
                     [
