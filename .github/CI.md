@@ -73,5 +73,7 @@ Helm installation, and Docker fixture images. No agent-specific directory is a
 prerequisite.
 
 Checks report results in job logs; they do not measure line coverage or publish
-test/preview artifacts. The preview smoke check validates rendered resources;
-the server build compiles the checkout, not the generated source archive.
+test/preview artifacts. The preview smoke check validates rendered resources and
+compiles its generated public source archive in a separate directory. This catches
+missing modules/assets in the explicit packaging manifest. The server is then
+built from the checkout for MCP tests.

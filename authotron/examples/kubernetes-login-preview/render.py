@@ -36,6 +36,8 @@ ANNOTATIONS = {
     "cert-manager.io/cluster-issuer": "letsencrypt-production",
     "dns.operators.ecmwf.int/on-transport-server": "vs-transport-https",
 }
+# Reviewed public build-input manifest, not an extension filter or Git snapshot.
+# Add new modules/assets here explicitly; SOURCE_DIRS only reserves private paths.
 SOURCE_FILES = (
     "Cargo.toml",
     "Cargo.lock",
@@ -44,6 +46,88 @@ SOURCE_FILES = (
     "authotron/schema.json",
     "authotron-types/Cargo.toml",
     "authotron-client/Cargo.toml",
+    "authotron-client/src/lib.rs",
+    "authotron-types/src/lib.rs",
+    "authotron/src/augmenters/base.rs",
+    "authotron/src/augmenters/ldap_augmenter.rs",
+    "authotron/src/augmenters/mod.rs",
+    "authotron/src/augmenters/plain_advanced_augmenter.rs",
+    "authotron/src/augmenters/plain_augmenter.rs",
+    "authotron/src/auth.rs",
+    "authotron/src/browser.rs",
+    "authotron/src/browser/valkey.lua",
+    "authotron/src/browser/valkey.rs",
+    "authotron/src/config/logging.rs",
+    "authotron/src/config/mod.rs",
+    "authotron/src/config/oauth.rs",
+    "authotron/src/config/oauth_policy.rs",
+    "authotron/src/config/oauth_signing.rs",
+    "authotron/src/config/store.rs",
+    "authotron/src/config/types.rs",
+    "authotron/src/config/ui.rs",
+    "authotron/src/lib.rs",
+    "authotron/src/main.rs",
+    "authotron/src/metrics/mod.rs",
+    "authotron/src/metrics/recorder.rs",
+    "authotron/src/middleware/http_metrics.rs",
+    "authotron/src/middleware/mod.rs",
+    "authotron/src/models/mod.rs",
+    "authotron/src/models/token.rs",
+    "authotron/src/models/user.rs",
+    "authotron/src/oauth/authentication.rs",
+    "authotron/src/oauth/authorization.rs",
+    "authotron/src/oauth/code_grant.rs",
+    "authotron/src/oauth/codes.rs",
+    "authotron/src/oauth/consent.rs",
+    "authotron/src/oauth/context.rs",
+    "authotron/src/oauth/keys.rs",
+    "authotron/src/oauth/mod.rs",
+    "authotron/src/oauth/records.rs",
+    "authotron/src/oauth/runtime.rs",
+    "authotron/src/oauth/store.rs",
+    "authotron/src/oauth/tokens.rs",
+    "authotron/src/oauth/valkey_issue_code.lua",
+    "authotron/src/oauth/valkey_redeem_code.lua",
+    "authotron/src/oauth/valkey_transactions.lua",
+    "authotron/src/oauth/valkey_transactions.rs",
+    "authotron/src/providers/base.rs",
+    "authotron/src/providers/ecmwf_token_generator_provider.rs",
+    "authotron/src/providers/ecmwfapi_provider.rs",
+    "authotron/src/providers/efasapi_provider.rs",
+    "authotron/src/providers/jwt_provider.rs",
+    "authotron/src/providers/mod.rs",
+    "authotron/src/providers/openid_offline_provider.rs",
+    "authotron/src/providers/plain_provider.rs",
+    "authotron/src/routes/augmenters.rs",
+    "authotron/src/routes/auth.rs",
+    "authotron/src/routes/browser_login.rs",
+    "authotron/src/routes/health.rs",
+    "authotron/src/routes/homepage.rs",
+    "authotron/src/routes/login.rs",
+    "authotron/src/routes/metrics.rs",
+    "authotron/src/routes/mod.rs",
+    "authotron/src/routes/oauth.rs",
+    "authotron/src/routes/providers.rs",
+    "authotron/src/routes/tokens.rs",
+    "authotron/src/routes/whoami.rs",
+    "authotron/src/startup.rs",
+    "authotron/src/state.rs",
+    "authotron/src/static/aviso-logo.base64",
+    "authotron/src/static/favicon.ico",
+    "authotron/src/static/index.html",
+    "authotron/src/static/login.css",
+    "authotron/src/static/login.js",
+    "authotron/src/static/logo.png",
+    "authotron/src/store/base.rs",
+    "authotron/src/store/mod.rs",
+    "authotron/src/store/mongodb_store.rs",
+    "authotron/src/store/no_store.rs",
+    "authotron/src/utils/http_helpers.rs",
+    "authotron/src/utils/log_throttle.rs",
+    "authotron/src/utils/logger.rs",
+    "authotron/src/utils/mod.rs",
+    "authotron/src/utils/valkey.rs",
+    "authotron/src/utils/value.rs",
 )
 SOURCE_DIRS = ("authotron/src", "authotron-types/src", "authotron-client/src")
 ALLOWED_API_KIND_PAIRS = {
@@ -73,17 +157,8 @@ def checked_source_path(project, path):
 
 
 def source_archive(project):
-    """Archive only build inputs; exclude local config, tooling and credentials."""
+    """Read current bytes of the explicit public build-input manifest, even in exports."""
     files = [project / name for name in SOURCE_FILES]
-    for name in SOURCE_DIRS:
-        directory = checked_source_path(project, project / name)
-        if directory.is_symlink() or not directory.is_dir():
-            raise ValueError(f"not a regular source directory: {name}")
-        for path in directory.rglob("*"):
-            if path.is_symlink():
-                raise ValueError(f"source symlink is not allowed: {path}")
-            if not path.is_dir():
-                files.append(path)
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w", format=tarfile.GNU_FORMAT) as archive:
         for path in sorted(files):

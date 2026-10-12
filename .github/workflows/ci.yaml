@@ -110,6 +110,12 @@ jobs:
             --output-dir "$RUNNER_TEMP/preview-render"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Compile the public source archive
+        run: |
+          mkdir -p "$RUNNER_TEMP/preview-source"
+          tar -xzf "$RUNNER_TEMP/preview-render/source.tar.gz" -C "$RUNNER_TEMP/preview-source"
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked \
+            --manifest-path "$RUNNER_TEMP/preview-source/Cargo.toml" -p authotron --bin authotron
       - name: Build the real server for MCP process tests
         run: cargo build --locked -p authotron --bin authotron
       - name: MCP unit, HTTPS process and end-to-end tests

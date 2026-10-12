@@ -246,7 +246,65 @@ class PreviewTests(unittest.TestCase):
     def test_archive_rejects_symlinks(self):
         private = self.project / "private.txt"
         private.write_text("private credential")
-        (self.project / "authotron/src/link.rs").symlink_to(private)
+        source = self.project / "authotron/src/lib.rs"
+        source.unlink()
+        source.symlink_to(private)
+        with self.assertRaises(ValueError):
+            render.source_archive(self.project)
+
+    def test_archive_never_enumerates_or_reads_virtual_untracked_secrets(self):
+        read_bytes = Path.read_bytes
+        reads = set()
+        secrets = [
+            self.project / directory / filename
+            for directory in render.SOURCE_DIRS
+            for filename in (
+                ".env",
+                "credentials.json",
+                "credentials.rs",
+                "private.lua",
+            )
+        ]
+
+        def read_public(path):
+            self.assertNotIn(path, secrets)
+            reads.add(path.relative_to(self.project).as_posix())
+            return read_bytes(path)
+
+        with (
+            patch.object(Path, "rglob", return_value=iter(secrets)) as enumerate_files,
+            patch.object(Path, "read_bytes", read_public),
+        ):
+            data = render.source_archive(self.project)
+        enumerate_files.assert_not_called()
+        self.assertEqual(reads, set(render.SOURCE_FILES))
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+            self.assertEqual(set(archive.getnames()), set(render.SOURCE_FILES))
+
+    def test_exported_tree_includes_current_source_and_runtime_assets(self):
+        self.assertFalse((self.project / ".git").exists())
+        name = "authotron/src/lib.rs"
+        (self.project / name).write_text("// current local modification\n")
+        with patch.object(render.subprocess, "run", side_effect=AssertionError("git")):
+            data = render.source_archive(self.project)
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+            self.assertEqual(
+                archive.extractfile(name).read(), b"// current local modification\n"
+            )
+            for asset in (
+                "browser/valkey.lua",
+                "oauth/valkey_transactions.lua",
+                "static/aviso-logo.base64",
+                "static/login.css",
+                "static/login.js",
+                "static/favicon.ico",
+                "static/logo.png",
+                "static/index.html",
+            ):
+                self.assertIn("authotron/src/" + asset, archive.getnames())
+
+    def test_missing_manifest_input_fails_closed(self):
+        (self.project / "authotron/src/static/login.js").unlink()
         with self.assertRaises(ValueError):
             render.source_archive(self.project)
 

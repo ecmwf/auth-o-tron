@@ -11,6 +11,18 @@ tooling, Git metadata and kubeconfig files are excluded; source symlinks are
 rejected. The immutable source ConfigMap and Deployment annotation use a digest
 of deterministic archive bytes. Application configuration comes from the public
 `examples/login-ui/aviso.yaml` fixture, with the bind address adjusted for a Pod.
+`render.py`'s `SOURCE_FILES` is the reviewed public build-input manifest, including
+Rust modules, Lua scripts, base64 images, CSS, JavaScript and other embedded assets.
+Packaging reads the current bytes of those exact paths, so local source edits and
+source exports without Git metadata work identically. Missing inputs or symlinked
+inputs/ancestors fail closed. Unlisted files are never enumerated or read: this
+excludes `.env`, credential JSON, and even a credential disguised as a new `.rs`
+file under a source directory. `SOURCE_DIRS` reserves private-output locations;
+it does not authorize recursive packaging. When adding or renaming build inputs,
+update the manifest after reviewing the paths as public source. Never put private
+data in a listed input: the manifest authorizes its entire current content, not
+only its committed bytes. The direct-login and SSO renderers share this policy.
+
 No real providers, token store, metrics server or MongoDB are enabled. The
 fixture's signing-secret value is public demo data, not a production credential.
 
