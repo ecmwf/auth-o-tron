@@ -1,3 +1,5 @@
 /target
 config.yaml
 skaffold.env
+__pycache__/
+*.pyc
