@@ -242,9 +242,113 @@ impl OAuthRuntime {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::{
+        augmenters::AugmenterConfig, config::ConfigV2, oauth::refresh::tests::grant,
+        store::no_store::NoStore,
+    };
+    use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+    use std::{io::Write, sync::Arc};
+
+    async fn runtime() -> (tempfile::NamedTempFile, ConfigV2, Arc<OAuthRuntime>) {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let pem = super::super::keys::tests::keys()[0]
+            .to_pkcs8_pem(LineEnding::LF)
+            .unwrap();
+        file.write_all(pem.as_bytes()).unwrap();
+        let config: ConfigV2 = serde_json::from_value(serde_json::json!({
+            "store": {"enabled": false}, "services": [], "augmenters": [],
+            "providers": [{"type": "plain", "name": "basic", "realm": "local", "users": [], "browser": {"id": "password", "label": "Password"}}],
+            "server": {"port": 0}, "jwt": {"iss": "fixture", "exp": 300, "secret": "fixture-only"}, "logging": {"level": "warn", "format": "console"},
+            "ui": {"enabled": true, "browser_session": {"public_origin": "https://login.example.org", "backend": {"type": "memory"}}},
+            "oauth": {"enabled": true, "issuer": "https://login.example.org/", "signing": {"active_kid": "k", "keys": [{"kid": "k", "private_key_file": file.path()}]},
+                "clients": [{"client_id": "desktop", "display_name": "Desktop", "redirect_uris": ["https://app.example.org/cb"],
+                    "resources": [{"resource": "https://mcp.example.org/mcp", "scopes": ["read"]}],
+                    "refresh_tokens": {"enabled": true, "idle_ttl_seconds": 600, "absolute_ttl_seconds": 3600}}],
+                "resources": [{"resource": "https://mcp.example.org/mcp", "allowed_realms": ["local"], "scopes": [{"name": "read", "required_roles": ["reader"]}]}]}
+        }))
+        .unwrap();
+        let runtime = OAuthRuntime::initialize(&config).await.unwrap().unwrap();
+        (file, config, runtime)
+    }
+    async fn family(runtime: &OAuthRuntime, grant: &RefreshGrant) -> RefreshToken {
+        let token = RefreshToken::generate().unwrap();
+        let backend = runtime.refresh.as_ref().unwrap();
+        let policy = runtime.refresh_policy("desktop").unwrap();
+        let now = runtime.now().await.unwrap();
+        refresh_dispatch!(backend, issue(grant, token.hash(), now, policy)).unwrap();
+        token
+    }
+    fn auth(config: &ConfigV2, augmenters: serde_json::Value) -> Auth {
+        let augmenters: Vec<AugmenterConfig> = serde_json::from_value(augmenters).unwrap();
+        Auth::new(
+            &config.providers,
+            &augmenters,
+            Arc::new(NoStore),
+            config.auth.clone(),
+        )
+    }
+    fn request(token: &RefreshToken) -> RefreshRequest<'_> {
+        RefreshRequest {
+            token: token.as_secret_str(),
+            client_id: "desktop",
+            scope: None,
+            resource: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_reruns_augmentation_from_provider_roles_and_fails_closed() {
+        let (_file, config, runtime) = runtime().await;
+        let metrics = Metrics::new();
+        let timeout = Duration::from_secs(5);
+        let mut stale = grant();
+        stale.provider_roles = vec![];
+        // Provider roles alone lack `reader`; no augmenter grants it, so policy denies.
+        let token = family(&runtime, &stale).await;
+        let none = auth(&config, serde_json::json!([]));
+        assert_eq!(
+            runtime
+                .refresh(request(&token), &none, &metrics, timeout)
+                .await
+                .err(),
+            Some(RefreshGrantError::InvalidGrant)
+        );
+        // The augmenter now grants `reader`: the same family refreshes successfully.
+        let granting = auth(
+            &config,
+            serde_json::json!([{"type": "plain", "name": "r", "realm": "local", "roles": {"reader": ["alice"]}}]),
+        );
+        let response = runtime
+            .refresh(request(&token), &granting, &metrics, timeout)
+            .await
+            .unwrap();
+        let next = serde_json::to_value(response).unwrap()["refresh_token"]
+            .as_str()
+            .map(String::from)
+            .unwrap();
+        // An unreachable LDAP augmenter fails strict augmentation: 503 class, token kept.
+        let failing = auth(
+            &config,
+            serde_json::json!([{"type": "ldap", "name": "l", "realm": "local", "uri": "ldap://127.0.0.1:9", "search_base": "dc=example", "filter": "cn", "ldap_password": "y"}]),
+        );
+        let next = RefreshToken::parse(&next).unwrap();
+        assert_eq!(
+            runtime
+                .refresh(request(&next), &failing, &metrics, timeout)
+                .await
+                .err(),
+            Some(RefreshGrantError::Unavailable)
+        );
+        assert!(
+            runtime
+                .refresh(request(&next), &granting, &metrics, timeout)
+                .await
+                .is_ok()
+        );
+    }
 
     #[test]
     fn scope_narrowing_accepts_only_unique_granted_subsets() {
