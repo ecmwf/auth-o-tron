@@ -160,9 +160,12 @@ impl OAuthClient {
     }
 }
 
-/// Valid native callback: `http://127.0.0.1:49152/callback`. Invalid: `http://localhost/callback`.
+/// Valid native callbacks: `http://127.0.0.1:49152/callback`, `http://localhost:49152/callback`.
+/// Invalid: `http://localhost/callback`, `http://127.0.0.2:49152/callback`.
+/// `localhost` is accepted as a deliberate interoperability deviation from RFC 8252 §8.3,
+/// because common native MCP clients register `localhost` loopback callbacks.
 fn validate_callback(value: &str, application_type: ApplicationType) -> Result<(), &'static str> {
-    let error = "OAuth callback must be an absolute HTTPS URI, or a native HTTP IP-loopback URI with an explicit nonzero port; no userinfo, fragment, backslash, whitespace, controls or malformed percent escapes";
+    let error = "OAuth callback must be an absolute HTTPS URI, or a native HTTP loopback URI (127.0.0.1, [::1] or localhost) with an explicit nonzero port; no userinfo, fragment, backslash, whitespace, controls or malformed percent escapes";
     if value.len() > 2048
         || !valid_percent_triplets(value)
         || value.contains('\\')
@@ -187,7 +190,7 @@ fn validate_callback(value: &str, application_type: ApplicationType) -> Result<(
         Some("https") if url.scheme() == "https" => {}
         Some("http")
             if application_type == ApplicationType::Native
-                && matches!(uri.host(), Some("127.0.0.1" | "[::1]"))
+                && matches!(uri.host(), Some("127.0.0.1" | "[::1]" | "localhost"))
                 && uri.port_u16().is_some_and(|port| port != 0) => {}
         _ => return Err(error),
     }
@@ -565,6 +568,7 @@ mod tests {
             "http://127.0.0.1:49152/cb?fixed=1",
             "http://[::1]:49152/cb",
             "http://127.0.0.1:80/cb",
+            "http://localhost:49152/cb",
         ] {
             let mut candidate = client(callback);
             assert!(candidate.validate().is_err());
@@ -573,7 +577,11 @@ mod tests {
             assert_eq!(candidate.redirect_uris[0], callback);
         }
         for callback in [
-            "http://localhost:49152/cb",
+            "http://localhost/cb",
+            "http://localhost:0/cb",
+            "http://LOCALHOST:49152/cb",
+            "http://localhost.:49152/cb",
+            "http://app.localhost:49152/cb",
             "http://127.0.0.2:49152/cb",
             "http://127.1:49152/cb",
             "http://0177.0.0.1:49152/cb",

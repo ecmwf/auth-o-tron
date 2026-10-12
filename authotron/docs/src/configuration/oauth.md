@@ -224,8 +224,10 @@ CORS is disabled; cross-origin public SPAs are not supported in this baseline.
 
 Requests require exact client/callback/resource and all requested scopes. There is no
 URI aliasing, partial consent, first-party skip or variable native loopback-port matching.
-Web callbacks require HTTPS; native callbacks additionally permit literal HTTP loopback
-with an explicit fixed port. Callback userinfo/fragments/control characters, malformed
+Web callbacks require HTTPS; native callbacks additionally permit HTTP loopback
+on `127.0.0.1`, `[::1]` or `localhost` with an explicit fixed port. Accepting `localhost`
+deliberately deviates from RFC 8252 §8.3 for interoperability: Claude Code, MCP Inspector,
+Cursor and Gemini CLI use `localhost` callbacks. Callback userinfo/fragments/control characters, malformed
 percent escapes, and reserved response query names are rejected. Resource URIs also
 reject malformed percent escapes; valid escapes retain their literal spelling rather
 than being decoded for matching. Resources are canonical HTTPS and explicitly
