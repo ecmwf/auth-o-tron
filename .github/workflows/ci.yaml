@@ -4,31 +4,122 @@ on:
   push:
     branches:
       - '**'
+  pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Check out code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Cache Cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
 
       - name: Check code formatting
-        run: cargo fmt -- --check
+        run: cargo fmt --all -- --check
+
+      - name: Strict workspace Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Run tests
         env:
           NO_PROXY: "127.0.0.1,localhost"
         run: |
           unset HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy
-          cargo test -- --test-threads=1
+          cargo test --locked --workspace -- --test-threads=1
+
+      - name: Run all three disposable Docker Valkey fixtures serially
+        env:
+          NO_PROXY: "127.0.0.1,localhost"
+        run: |
+          unset HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy
+          docker info
+          cargo test --locked -p authotron disposable -- --ignored --test-threads=1
+
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install declared minimum Rust version
+        uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Check all workspace targets and features on MSRV
+        run: cargo check --locked --workspace --all-targets --all-features
+
+  python-examples:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      NO_PROXY: "127.0.0.1,localhost"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check out the chart 0.4.0 renderer contract
+        uses: actions/checkout@v4
+        with:
+          repository: ecmwf/auth-o-tron-chart
+          ref: c5531f45a9652a89c21e067bc0167f7660ecd4b6
+          path: .ci-chart
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install renderer and MCP test dependencies
+        run: |
+          python -m pip install 'PyYAML>=6,<7' 'ruff==0.15.2' './authotron/examples/mcp-local[test]'
+          python -m pip check
+      - name: Check Python formatting and lint
+        run: |
+          python -m ruff check authotron/examples
+          python -m ruff format --check authotron/examples
+      - uses: azure/setup-helm@v4.3.0
+        with:
+          version: v4.0.1
+      - name: Renderer and private-path unit tests
+        run: |
+          python -m unittest discover -s authotron/examples/kubernetes-login-preview -p 'test_*.py' -v
+          python -m unittest discover -s authotron/examples/ecmwf-api-key -p 'test_*.py' -v
+          python -m unittest discover -s authotron/examples/browser-sso -p 'test_*.py' -v
+      - name: Render preview against the pinned chart
+        env:
+          HELM_CACHE_HOME: ${{ runner.temp }}/helm/cache
+          HELM_CONFIG_HOME: ${{ runner.temp }}/helm/config
+          HELM_DATA_HOME: ${{ runner.temp }}/helm/data
+        run: |
+          python authotron/examples/kubernetes-login-preview/render.py \
+            --chart "$GITHUB_WORKSPACE/.ci-chart" \
+            --host preview.example.org \
+            --build-image 'docker.io/library/rust@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+            --output-dir "$RUNNER_TEMP/preview-render"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the real server for MCP process tests
+        run: cargo build --locked -p authotron --bin authotron
+      - name: MCP unit, HTTPS process and end-to-end tests
+        working-directory: authotron/examples/mcp-local
+        env:
+          AUTHOTRON_DEMO_BIN: ${{ github.workspace }}/target/debug/authotron
+        run: |
+          unset HTTP_PROXY http_proxy HTTPS_PROXY https_proxy ALL_PROXY all_proxy
+          test -x "$AUTHOTRON_DEMO_BIN"
+          python -m pytest -v
 
   # Compile with the SAME toolchain and profile the release image uses
   # (Dockerfile pins rust:1.90), so a compiler-version- or release-specific
@@ -42,6 +133,8 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install build tools (match Dockerfile)
         run: apt-get update && apt-get install -y libssl-dev pkg-config build-essential && rm -rf /var/lib/apt/lists/*
@@ -50,4 +143,4 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Release build (matches the Docker release image)
-        run: cargo build --release -p authotron
+        run: cargo build --locked --release -p authotron
