@@ -62,9 +62,17 @@ OAUTH_SCOPE = "mcp:read"
 # require the same single role.
 OAUTH_ROLE = "mcp-demo"
 OAUTH_REQUIRED_ROLES = (OAUTH_ROLE,)
-# Demo lifetime at the server maximum (60..=3600 seconds): no refresh tokens are
-# issued yet, so MCP clients re-run the browser flow after expiry.
+# Demo lifetime at the server maximum (60..=3600 seconds); clients renew it with
+# their rotating refresh token instead of repeating the browser flow.
 OAUTH_ACCESS_TOKEN_TTL_SECONDS = 3600
+# Every rendered client gets refresh tokens: 30 days idle, 90 days after sign-in.
+# Server bounds: each lifetime 300..=34560000 seconds (400 days), idle <= absolute.
+OAUTH_REFRESH_TOKENS = {
+    "enabled": True,
+    "idle_ttl_seconds": 30 * 86400,
+    "absolute_ttl_seconds": 90 * 86400,
+}
+OAUTH_REFRESH_TTL_RANGE = range(300, 34560000 + 1)
 # Opt-in Aviso MCP resource (--oauth-aviso-resource): any authenticated browser user
 # of the playground may use it, so its scope requires no role.
 OAUTH_AVISO_SCOPE = "aviso:read"
@@ -77,6 +85,7 @@ OAUTH_CLIENT = {
     "application_type": "native",
     "redirect_uris": ["http://127.0.0.1:49152/callback"],
     "resources": [{"resource": OAUTH_RESOURCE, "scopes": [OAUTH_SCOPE]}],
+    "refresh_tokens": dict(OAUTH_REFRESH_TOKENS),
 }
 # Pre-registered public MCP clients, checked against vendor docs (2026-10). Loopback
 # HTTP callbacks require `native` and match any request port on the server, so a
@@ -164,6 +173,7 @@ OAUTH_PATH_RULES = (
     ("/oauth/continue", "Exact"),
     ("/oauth/consent", "Exact"),
     ("/oauth/token", "Exact"),
+    ("/oauth/revoke", "Exact"),
     ("/oauth/jwks", "Exact"),
     ("/.well-known/oauth-authorization-server", "ImplementationSpecific"),
 )
@@ -261,8 +271,11 @@ def checked_mcp_client(client):
         "application_type",
         "redirect_uris",
         "resources",
+        "refresh_tokens",
     }:
         raise ValueError("unexpected OAuth client fields")
+    if "refresh_tokens" in client:
+        checked_refresh_tokens(client["refresh_tokens"])
     if not isinstance(client["client_id"], str) or not re.fullmatch(
         r"[A-Za-z0-9._-]{1,128}", client["client_id"]
     ):
@@ -285,6 +298,26 @@ def checked_mcp_client(client):
     for uri in uris:
         checked_callback(uri, client["application_type"])
     return client
+
+
+def checked_refresh_tokens(policy):
+    """Mirror of the server's per-client refresh-token policy rules."""
+    if not isinstance(policy, dict) or set(policy) != {
+        "enabled",
+        "idle_ttl_seconds",
+        "absolute_ttl_seconds",
+    }:
+        raise ValueError("unexpected OAuth refresh_tokens fields")
+    idle, absolute = policy["idle_ttl_seconds"], policy["absolute_ttl_seconds"]
+    if (
+        not isinstance(policy["enabled"], bool)
+        or any(type(v) is not int for v in (idle, absolute))
+        or idle not in OAUTH_REFRESH_TTL_RANGE
+        or absolute not in OAUTH_REFRESH_TTL_RANGE
+        or idle > absolute
+    ):
+        raise ValueError("invalid OAuth refresh_tokens lifetimes")
+    return policy
 
 
 def checked_mcp_clients(clients):
@@ -696,7 +729,11 @@ def oauth_clients(aviso_resource=None):
     return checked_mcp_clients(
         [copy.deepcopy(OAUTH_CLIENT)]
         + [
-            {**copy.deepcopy(c), "resources": copy.deepcopy(bindings)}
+            {
+                **copy.deepcopy(c),
+                "resources": copy.deepcopy(bindings),
+                "refresh_tokens": dict(OAUTH_REFRESH_TOKENS),
+            }
             for c in MCP_CLIENTS
         ]
     )

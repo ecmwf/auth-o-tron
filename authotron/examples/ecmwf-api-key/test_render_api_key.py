@@ -53,6 +53,7 @@ OAUTH_ROUTES = [
     ("/oauth/continue", "Exact"),
     ("/oauth/consent", "Exact"),
     ("/oauth/token", "Exact"),
+    ("/oauth/revoke", "Exact"),
     ("/oauth/jwks", "Exact"),
     ("/.well-known/oauth-authorization-server", "ImplementationSpecific"),
 ]
@@ -1168,9 +1169,34 @@ class RendererTests(unittest.TestCase):
         for client in clients:
             with self.subTest(client=client["client_id"]):
                 renderer.checked_mcp_client(client)
+                self.assertEqual(
+                    client["refresh_tokens"],
+                    {
+                        "enabled": True,
+                        "idle_ttl_seconds": 2592000,
+                        "absolute_ttl_seconds": 7776000,
+                    },
+                )
                 # Hosted-only callbacks need no native type; loopback HTTP does.
                 loopback = any(u.startswith("http://") for u in client["redirect_uris"])
                 self.assertEqual(client["application_type"] == "native", loopback)
+
+    def test_refresh_token_policy_validation_mirrors_server_rules(self):
+        good = renderer.OAUTH_REFRESH_TOKENS
+        renderer.checked_refresh_tokens(dict(good))
+        for change in (
+            {"idle_ttl_seconds": 299},
+            {"absolute_ttl_seconds": 34560001},
+            {"idle_ttl_seconds": 7776001},
+            {"idle_ttl_seconds": 600.0},
+            {"enabled": "yes"},
+            {"extra": True},
+        ):
+            with self.subTest(change=change):
+                with self.assertRaises(ValueError):
+                    renderer.checked_refresh_tokens({**good, **change})
+        with self.assertRaises(ValueError):
+            renderer.checked_refresh_tokens({"enabled": True})
 
     def test_oauth_capacity_reserves_a_share_for_every_client(self):
         clients = renderer.oauth_clients()

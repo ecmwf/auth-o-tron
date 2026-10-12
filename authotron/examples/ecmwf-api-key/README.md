@@ -249,6 +249,7 @@ oauth:
       resources:
         - resource: https://127.0.0.1:8444/mcp
           scopes: [mcp:read]
+      refresh_tokens: { enabled: true, idle_ttl_seconds: 2592000, absolute_ttl_seconds: 7776000 }
     - client_id: claude-code # ...one entry per pre-registered MCP client (below)
       display_name: Claude Code
       application_type: native
@@ -258,6 +259,7 @@ oauth:
           scopes: [mcp:read]
         - resource: <--oauth-aviso-resource> # only with the flag
           scopes: [aviso:read]
+      refresh_tokens: { enabled: true, idle_ttl_seconds: 2592000, absolute_ttl_seconds: 7776000 }
   resources:
     - resource: https://127.0.0.1:8444/mcp
       allowed_realms: [browser-demo, ecmwf] # browser-demo only with Basic
@@ -286,8 +288,10 @@ Clients must use the issuer
 **`https://authotron-playground.lumi.apps.dte.destination-earth.eu/`** (with the
 trailing slash), which matches `ui.browser_session.public_origin`. Its metadata is
 at `/.well-known/oauth-authorization-server`. Access tokens live **3600 seconds**
-(the server maximum; default 300): no refresh tokens are issued yet, so clients
-repeat the browser sign-in after expiry. `max_authorization_transactions` is set
+(the server maximum; default 300). Every client registration enables rotating
+refresh tokens (`refresh_tokens: {enabled: true, idle_ttl_seconds: 2592000,
+absolute_ttl_seconds: 7776000}`): a client stays signed in for up to 90 days and
+30 days without use, then repeats the browser sign-in. `max_authorization_transactions` is set
 explicitly to 1024; the server splits it into non-borrowable per-client shares
 (113–114 slots for each of the 9 clients). Other OAuth settings keep server defaults.
 
@@ -331,10 +335,13 @@ login.
   The renderer never prints it; it never appears in ConfigMaps, the source
   archive, annotations or command output.
 - Only the public client registrations above exist; there is no dynamic
-  registration, refresh token or confidential client. Client IDs are public and
+  registration or confidential client. Client IDs are public and
   not proof of identity: any local program may claim `claude-code` and receive
   a loopback callback. The user's consent page names the client it asked for.
-- An `aviso:read` token is valid for one hour and cannot be revoked early.
+- An `aviso:read` access token is valid for one hour and cannot be revoked early.
+  Refresh tokens rotate on every use; reusing an already-rotated token revokes the
+  whole sign-in, and `POST /oauth/revoke` ends it explicitly. The playground Valkey
+  runs without persistence, so restarting it ends every refresh-token sign-in.
 
 ### Pre-registered MCP clients
 
@@ -406,7 +413,7 @@ clients discover it. Setup, with `AVISO` set to the `--oauth-aviso-resource` URL
   and scope `aviso:read`.
 
 The Ingress adds exactly `/oauth/authorize`, `/oauth/continue`, `/oauth/consent`,
-`/oauth/token` and `/oauth/jwks` (Exact) and
+`/oauth/token`, `/oauth/revoke` and `/oauth/jwks` (Exact) and
 `/.well-known/oauth-authorization-server` (ImplementationSpecific, because NGINX
 admission rejects dotted paths with Exact/Prefix; NGINX treats it as a prefix, and
 unknown suffixes return 404 from the application). No other API path is exposed.
