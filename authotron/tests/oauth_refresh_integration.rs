@@ -316,3 +316,75 @@ async fn revocation_is_client_bound_and_always_succeeds_for_unknown_tokens() {
     assert_eq!((status, body.as_str()), (StatusCode::OK, ""));
     error(refresh_as(&app, "desktop", &current).await, "invalid_grant");
 }
+
+struct Container(String);
+impl Drop for Container {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("docker")
+            .args(["rm", "-f", &self.0])
+            .output();
+    }
+}
+fn docker(args: &[&str]) -> String {
+    let output = std::process::Command::new("docker")
+        .args(args)
+        .output()
+        .expect("Docker CLI required");
+    assert!(output.status.success(), "disposable Valkey fixture failed");
+    String::from_utf8(output.stdout).unwrap().trim().into()
+}
+
+#[tokio::test]
+#[ignore = "requires Docker; creates and removes its own Valkey fixture"]
+async fn disposable_valkey_refresh_rotates_across_replicas() {
+    let container = Container(docker(&[
+        "run",
+        "--rm",
+        "-d",
+        "-p",
+        "127.0.0.1::6379",
+        "valkey/valkey:8",
+        "valkey-server",
+        "--requirepass",
+        "public-disposable-fixture",
+        "--save",
+        "",
+        "--appendonly",
+        "no",
+    ]));
+    let (_key, mut config) = fixture();
+    config.ui.browser_session.as_mut().unwrap().backend =
+        authotron::config::ui::BrowserBackendConfig::Valkey {
+            url: format!("redis://{}/0", docker(&["port", &container.0, "6379/tcp"])),
+            key_prefix: "authotron:refresh-http".into(),
+            password: "public-disposable-fixture".into(),
+            connect_timeout_ms: 2000,
+            operation_timeout_ms: 1000,
+        };
+    let config = Arc::new(config);
+    let mut ready = None;
+    for _ in 0..100 {
+        if let Ok((app, _)) = startup::build_app(config.clone()).await {
+            ready = Some(app);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let a = ready.expect("disposable Valkey did not become ready");
+    let (b, _) = startup::build_app(config.clone()).await.unwrap();
+    let t1 = refresh_token(&authorize(&a, "desktop").await);
+    let (status, second) = refresh_as(&b, "desktop", &t1).await;
+    assert_eq!(status, StatusCode::OK);
+    let t2 = refresh_token(&second);
+    error(refresh_as(&a, "desktop", &t1).await, "invalid_grant");
+    let (status, third) = refresh_as(&a, "desktop", &t2).await;
+    assert_eq!(status, StatusCode::OK);
+    let t3 = refresh_token(&third);
+    error(refresh_as(&b, "desktop", &t1).await, "invalid_grant");
+    error(refresh_as(&a, "desktop", &t3).await, "invalid_grant");
+    let t4 = refresh_token(&authorize(&b, "desktop").await);
+    let fields = [("token", t4.as_str()), ("client_id", "desktop")];
+    let response = post(&a, "/oauth/revoke", &Jar::default(), &fields).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    error(refresh_as(&b, "desktop", &t4).await, "invalid_grant");
+}

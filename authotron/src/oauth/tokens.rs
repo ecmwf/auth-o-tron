@@ -482,6 +482,16 @@ mod tests {
             )
             .is_err()
         );
+        let refresh = RefreshToken::generate().unwrap();
+        let with_refresh = serde_json::to_value(
+            issuer
+                .issue_access_token("desktop", RESOURCE, &scopes, &user)
+                .unwrap()
+                .with_refresh_token(&refresh),
+        )
+        .unwrap();
+        assert_eq!(with_refresh["refresh_token"], refresh.as_secret_str());
+        // Signing alone never issues a refresh token; only an opted-in exchange adds one.
         let response = serde_json::to_value(response).unwrap();
         assert_eq!(response["token_type"], "Bearer");
         assert_eq!(response["expires_in"], 300);
