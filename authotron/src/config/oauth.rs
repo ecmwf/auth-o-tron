@@ -32,6 +32,10 @@ pub struct OAuthConfig {
     pub max_authentication_age_seconds: u64,
     #[schemars(range(min = 0, max = 60))]
     pub authentication_clock_skew_seconds: u64,
+    /// Live refresh-token families per user across all clients; issuing beyond the
+    /// cap revokes that user's oldest family.
+    #[schemars(range(min = 1, max = 1000))]
+    pub max_refresh_token_families_per_user: usize,
     #[schemars(length(max = 64))]
     pub clients: Vec<OAuthClient>,
     #[schemars(length(max = 64))]
@@ -51,6 +55,7 @@ impl Default for OAuthConfig {
             max_authorization_codes: 1024,
             max_authentication_age_seconds: 300,
             authentication_clock_skew_seconds: 30,
+            max_refresh_token_families_per_user: 50,
             clients: Vec::new(),
             resources: Vec::new(),
             signing: None,
@@ -90,6 +95,9 @@ impl OAuthConfig {
         if self.authentication_clock_skew_seconds > 60 {
             return Err("oauth.authentication_clock_skew_seconds must be between 0 and 60");
         }
+        if !(1..=1000).contains(&self.max_refresh_token_families_per_user) {
+            return Err("oauth.max_refresh_token_families_per_user must be between 1 and 1000");
+        }
         if self.clients.len() > 64 {
             return Err("oauth.clients must contain at most 64 clients");
         }
@@ -118,6 +126,50 @@ pub struct OAuthClient {
     #[serde(default)]
     #[schemars(length(max = 64))]
     pub resources: Vec<ClientResource>,
+    #[serde(default)]
+    pub refresh_tokens: RefreshTokenPolicy,
+}
+
+/// Longest permitted refresh-token family lifetime (400 days).
+pub const MAX_REFRESH_TOKEN_ABSOLUTE_TTL_SECONDS: u64 = 400 * 86_400;
+
+/// Per-client opt-in for rotating refresh tokens. A family ends at the earlier of
+/// `idle_ttl_seconds` after its last use and `absolute_ttl_seconds` after the login.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct RefreshTokenPolicy {
+    pub enabled: bool,
+    #[schemars(range(min = 300, max = 34560000))]
+    pub idle_ttl_seconds: u64,
+    #[schemars(range(min = 300, max = 34560000))]
+    pub absolute_ttl_seconds: u64,
+}
+
+impl Default for RefreshTokenPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            idle_ttl_seconds: 30 * 86_400,
+            absolute_ttl_seconds: 90 * 86_400,
+        }
+    }
+}
+
+impl RefreshTokenPolicy {
+    fn validate(&self) -> Result<(), &'static str> {
+        let range = 300..=MAX_REFRESH_TOKEN_ABSOLUTE_TTL_SECONDS;
+        if !range.contains(&self.idle_ttl_seconds) || !range.contains(&self.absolute_ttl_seconds) {
+            return Err(
+                "OAuth refresh_tokens idle_ttl_seconds and absolute_ttl_seconds must be between 300 and 34560000 (400 days)",
+            );
+        }
+        if self.idle_ttl_seconds > self.absolute_ttl_seconds {
+            return Err(
+                "OAuth refresh_tokens idle_ttl_seconds must not exceed absolute_ttl_seconds",
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Uses the OpenID Connect `application_type` terminology.
@@ -156,7 +208,7 @@ impl OAuthClient {
         for value in &self.redirect_uris {
             validate_callback(value, self.application_type)?;
         }
-        Ok(())
+        self.refresh_tokens.validate()
     }
 }
 
@@ -372,6 +424,7 @@ mod tests {
             ("max_authorization_codes", 1, 100000, 1024),
             ("max_authentication_age_seconds", 1, 3600, 300),
             ("authentication_clock_skew_seconds", 0, 60, 30),
+            ("max_refresh_token_families_per_user", 1, 1000, 50),
         ] {
             let property = &schema["properties"][field];
             assert_eq!(property["minimum"], min);
@@ -389,6 +442,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn refresh_token_policy_defaults_bounds_and_ordering() {
+        let defaults = client("https://app.example.org/cb").refresh_tokens;
+        assert_eq!(defaults, RefreshTokenPolicy::default());
+        assert!(!defaults.enabled);
+        assert_eq!(
+            (defaults.idle_ttl_seconds, defaults.absolute_ttl_seconds),
+            (2_592_000, 7_776_000)
+        );
+        let schema = serde_json::to_value(schemars::schema_for!(RefreshTokenPolicy)).unwrap();
+        assert_eq!(schema["additionalProperties"], false);
+        for field in ["idle_ttl_seconds", "absolute_ttl_seconds"] {
+            assert_eq!(schema["properties"][field]["minimum"], 300);
+            assert_eq!(
+                schema["properties"][field]["maximum"],
+                MAX_REFRESH_TOKEN_ABSOLUTE_TTL_SECONDS
+            );
+        }
+        let max = MAX_REFRESH_TOKEN_ABSOLUTE_TTL_SECONDS;
+        for (idle, absolute, valid) in [
+            (300, 300, true),
+            (2_592_000, max, true),
+            (max, max, true),
+            (299, 7_776_000, false),
+            (300, max + 1, false),
+            (7_776_001, 7_776_000, false),
+        ] {
+            let mut client = client("https://app.example.org/cb");
+            client.refresh_tokens = RefreshTokenPolicy {
+                enabled: true,
+                idle_ttl_seconds: idle,
+                absolute_ttl_seconds: absolute,
+            };
+            assert_eq!(client.validate().is_ok(), valid, "{idle} {absolute}");
+        }
+        assert!(serde_json::from_value::<RefreshTokenPolicy>(json!({"enable": true})).is_err());
     }
 
     fn client(callback: &str) -> OAuthClient {
