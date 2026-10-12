@@ -219,6 +219,16 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 64
+        },
+        "refresh_max_lifetime_seconds": {
+          "description": "Upper bound on the absolute lifetime of OAuth refresh-token families started\nby a login with this method; the client's `absolute_ttl_seconds` still applies.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 300,
+          "maximum": 34560000
         }
       },
       "additionalProperties": false,

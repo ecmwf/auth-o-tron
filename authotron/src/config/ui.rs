@@ -55,6 +55,11 @@ pub struct ProviderBrowserConfig {
     #[serde(deserialize_with = "browser_label")]
     #[schemars(length(min = 1, max = 64))]
     pub label: String,
+    /// Upper bound on the absolute lifetime of OAuth refresh-token families started
+    /// by a login with this method; the client's `absolute_ttl_seconds` still applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 300, max = 34560000))]
+    pub refresh_max_lifetime_seconds: Option<u64>,
 }
 
 /// Matches [`BROWSER_ID_PATTERN`] and is not a reserved id.
@@ -142,6 +147,7 @@ pub enum BrowserMethodProvider<'a> {
 pub struct BrowserMethodConfig<'a> {
     pub id: &'a str,
     pub label: &'a str,
+    pub refresh_max_lifetime_seconds: Option<u64>,
     pub provider: BrowserMethodProvider<'a>,
 }
 
@@ -165,12 +171,14 @@ pub fn browser_methods(
             ProviderConfig::Plain(config) => config.browser.as_ref().map(|b| BrowserMethodConfig {
                 id: &b.id,
                 label: &b.label,
+                refresh_max_lifetime_seconds: b.refresh_max_lifetime_seconds,
                 provider: BrowserMethodProvider::Plain(config),
             }),
             ProviderConfig::EcmwfApi(config) => {
                 config.browser.as_ref().map(|b| BrowserMethodConfig {
                     id: &b.id,
                     label: &b.label,
+                    refresh_max_lifetime_seconds: b.refresh_max_lifetime_seconds,
                     provider: BrowserMethodProvider::EcmwfApi(config),
                 })
             }
@@ -440,6 +448,15 @@ impl UiConfig {
             .any(|method| !labels.insert(method.label.to_lowercase()))
         {
             return Err("provider browser labels must be unique (case-insensitive)");
+        }
+        if methods.iter().any(|method| {
+            method.refresh_max_lifetime_seconds.is_some_and(|seconds| {
+                !(300..=crate::config::MAX_REFRESH_TOKEN_ABSOLUTE_TTL_SECONDS).contains(&seconds)
+            })
+        }) {
+            return Err(
+                "provider browser refresh_max_lifetime_seconds must be between 300 and 34560000 (400 days)",
+            );
         }
         if !methods.is_empty() && self.browser_session.is_none() {
             return Err("provider browser login requires ui.browser_session");
@@ -812,6 +829,41 @@ mod tests {
                 .unwrap_err()
                 .contains("browser_session")
         );
+    }
+
+    #[test]
+    fn browser_refresh_lifetime_cap_is_optional_and_bounded() {
+        let ui = direct_config("https://login.example.test", 300);
+        let capped = |seconds: serde_json::Value| {
+            provider(serde_json::json!({
+                "type": "plain", "name": "a", "realm": "r", "users": [],
+                "browser": {"id": "a", "label": "A", "refresh_max_lifetime_seconds": seconds}
+            }))
+        };
+        let methods = [plain("a", Some("A"))];
+        let methods = ui.validate_browser_login(&methods).unwrap();
+        assert_eq!(methods[0].refresh_max_lifetime_seconds, None);
+        for (seconds, valid) in [
+            (299, false),
+            (300, true),
+            (2_592_000, true),
+            (34_560_000, true),
+            (34_560_001, false),
+        ] {
+            let providers = [capped(seconds.into())];
+            let result = ui.validate_browser_login(&providers);
+            assert_eq!(result.is_ok(), valid, "{seconds}");
+            if valid {
+                assert_eq!(
+                    result.unwrap()[0].refresh_max_lifetime_seconds,
+                    Some(seconds)
+                );
+            }
+        }
+        let schema = serde_json::to_value(schemars::schema_for!(ProviderBrowserConfig)).unwrap();
+        let property = &schema["properties"]["refresh_max_lifetime_seconds"];
+        assert_eq!(property["minimum"], 300);
+        assert_eq!(property["maximum"], 34_560_000);
     }
 
     #[test]
