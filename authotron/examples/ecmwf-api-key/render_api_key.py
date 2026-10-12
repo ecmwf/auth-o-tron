@@ -46,6 +46,35 @@ LOGO_PATH = "/static/aviso-logo.png"
 VALKEY_IMAGE = shared_images.VALKEY_IMAGE
 VALKEY_NAME = f"{preview.RELEASE}-browser-valkey"
 VALKEY_PASSWORD_ENV = "AOT_UI__BROWSER_SESSION__BACKEND__PASSWORD"
+BASIC_REALM = "browser-demo"
+# Opt-in OAuth profile matching the mcp-local remote-mode client registration;
+# test_render_api_key.py guards these values against ../mcp-local/demo_settings.py.
+OAUTH_KEY_DIR = "/run/secrets/oauth"
+OAUTH_KEY_NAME = "signing.pem"
+OAUTH_SECRET_KEY = "oauth-signing.pem"
+OAUTH_VOLUME = "oauth-signing"
+OAUTH_RESOURCE = "https://127.0.0.1:8444/mcp"
+OAUTH_SCOPE = "mcp:read"
+# The demo tool is synthetic: any verified direct-login user qualifies. mcp-local's
+# remote settings mirror this with "required_role": null.
+OAUTH_REQUIRED_ROLES = ()
+OAUTH_CLIENT = {
+    "client_id": "mcp-local",
+    "display_name": "Local MCP demo",
+    "application_type": "native",
+    "redirect_uris": ["http://127.0.0.1:49152/callback"],
+    "resources": [{"resource": OAUTH_RESOURCE, "scopes": [OAUTH_SCOPE]}],
+}
+# NGINX admission rejects dotted paths with Exact/Prefix, so the metadata document
+# uses ImplementationSpecific (prefix semantics); every other OAuth route is Exact.
+OAUTH_PATH_RULES = (
+    ("/oauth/authorize", "Exact"),
+    ("/oauth/continue", "Exact"),
+    ("/oauth/consent", "Exact"),
+    ("/oauth/token", "Exact"),
+    ("/oauth/jwks", "Exact"),
+    ("/.well-known/oauth-authorization-server", "ImplementationSpecific"),
+)
 
 
 def checked_session_options(
@@ -62,6 +91,12 @@ def checked_session_options(
         raise ValueError("multiple application replicas require Valkey")
     if valkey_password is not None:
         checked_token(valkey_password)
+
+
+def checked_oauth_profile(oauth_enabled, valkey_password):
+    """OAuth state shares the browser backend; the playground requires Valkey."""
+    if oauth_enabled and valkey_password is None:
+        raise ValueError("the OAuth profile requires the shared Valkey profile")
 
 
 def secret_env(name, key):
@@ -361,6 +396,88 @@ def valkey_secret(path):
     )
 
 
+def checked_oauth_key(payload):
+    """Accept only a canonical unencrypted RSA-2048 PKCS8 PEM; return the PEM text."""
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != {"private-key-pem"}
+        or not isinstance(payload["private-key-pem"], str)
+    ):
+        raise ValueError("OAuth key file must contain only private-key-pem")
+    pem = payload["private-key-pem"]
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    try:
+        key = serialization.load_pem_private_key(pem.encode("ascii"), password=None)
+    except Exception:
+        raise ValueError("invalid OAuth signing key") from None
+    if (
+        not isinstance(key, rsa.RSAPrivateKey)
+        or key.key_size != 2048
+        or key.public_key().public_numbers().e != 65537
+        or oauth_pem(key) != pem
+    ):
+        raise ValueError("expected a generated RSA-2048 PKCS8 OAuth signing key")
+    return pem
+
+
+def oauth_pem(key):
+    from cryptography.hazmat.primitives import serialization
+
+    return key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode("ascii")
+
+
+def oauth_signing_key(path):
+    def generate():
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        return {"private-key-pem": oauth_pem(key)}
+
+    return private_json(path, generate, checked_oauth_key)
+
+
+def oauth_kid(pem):
+    """Derive a public key ID, e.g. playground-0123456789abcdef, from the SPKI."""
+    from cryptography.hazmat.primitives import serialization
+
+    checked_oauth_key({"private-key-pem": pem})
+    key = serialization.load_pem_private_key(pem.encode("ascii"), password=None)
+    spki = key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return f"playground-{hashlib.sha256(spki).hexdigest()[:16]}"
+
+
+def oauth_config(host, kid, realms):
+    return {
+        "enabled": True,
+        "issuer": f"https://{host}/",
+        "signing": {
+            "active_kid": kid,
+            "keys": [
+                {"kid": kid, "private_key_file": f"{OAUTH_KEY_DIR}/{OAUTH_KEY_NAME}"}
+            ],
+        },
+        "clients": [copy.deepcopy(OAUTH_CLIENT)],
+        "resources": [
+            {
+                "resource": OAUTH_RESOURCE,
+                "allowed_realms": list(realms),
+                "scopes": [
+                    {"name": OAUTH_SCOPE, "required_roles": list(OAUTH_REQUIRED_ROLES)}
+                ],
+            }
+        ],
+    }
+
+
 def private_write(parent, name, text):
     fd = private_fd(parent, name, os.O_WRONLY | os.O_CREAT)
     with os.fdopen(fd, "w") as stream:
@@ -403,10 +520,12 @@ def transform(
     replicas=1,
     session_ttl_seconds=300,
     transaction_ttl_seconds=300,
+    oauth_key=None,
 ):
     checked_session_options(
         valkey_password, replicas, session_ttl_seconds, transaction_ttl_seconds
     )
+    checked_oauth_profile(oauth_key is not None, valkey_password)
     checked_token(token)
     resources = copy.deepcopy(baseline)
     config_map = next(d for d in resources if d["kind"] == "ConfigMap" and "data" in d)
@@ -438,7 +557,7 @@ def transform(
             {
                 "type": "plain",
                 "name": BASIC_PROVIDER_NAME,
-                "realm": "browser-demo",
+                "realm": BASIC_REALM,
                 "users": [],
             }
         )
@@ -449,7 +568,7 @@ def transform(
             {
                 "type": "plain_advanced",
                 "name": "Playground Basic roles",
-                "realm": "browser-demo",
+                "realm": BASIC_REALM,
                 "match": {"username": [BASIC_USERNAME]},
                 "augment": {
                     "roles": ["demo-user", "augmented"],
@@ -457,6 +576,9 @@ def transform(
                 },
             }
         ]
+    if oauth_key is not None:
+        realms = [PROVIDER["realm"]] + ([BASIC_REALM] if basic is not None else [])
+        config["oauth"] = oauth_config(host, oauth_kid(oauth_key), realms)
     config_map["data"]["config.yaml"] = yaml.safe_dump(config)
     deployment = next(d for d in resources if d["kind"] == "Deployment")
     deployment["spec"]["replicas"] = replicas
@@ -481,6 +603,15 @@ def transform(
                 "backend": copy.deepcopy(paths[0]["backend"]),
             }
         )
+    if oauth_key is not None:
+        for path, path_type in OAUTH_PATH_RULES:
+            paths.append(
+                {
+                    "path": path,
+                    "pathType": path_type,
+                    "backend": copy.deepcopy(paths[0]["backend"]),
+                }
+            )
     resources.append(
         {
             "apiVersion": "v1",
@@ -506,6 +637,28 @@ def transform(
             "items": [{"key": "config.yaml", "path": "config.yaml"}],
         }
         mounted_yaml = private_yaml
+    if oauth_key is not None:
+        resources[-1]["data"][OAUTH_SECRET_KEY] = base64.b64encode(
+            oauth_key.encode("ascii")
+        ).decode("ascii")
+        template["spec"]["volumes"].append(
+            {
+                "name": OAUTH_VOLUME,
+                # 0440 plus the pod's fsGroup 1000 lets the non-root app read the key
+                # without making it world-readable.
+                "secret": {
+                    "secretName": SECRET_NAME,
+                    "defaultMode": 0o440,
+                    "items": [{"key": OAUTH_SECRET_KEY, "path": OAUTH_KEY_NAME}],
+                },
+            }
+        )
+        template["spec"]["containers"][0]["volumeMounts"].append(
+            {"name": OAUTH_VOLUME, "mountPath": OAUTH_KEY_DIR, "readOnly": True}
+        )
+        template["metadata"]["annotations"]["checksum/oauth-signing-key"] = (
+            hashlib.sha256(oauth_key.encode("ascii")).hexdigest()
+        )
     if valkey_password is not None:
         secret = resources[-1]
         secret["data"].update(
@@ -544,6 +697,7 @@ def validate_resources(
     replicas=1,
     session_ttl_seconds=300,
     transaction_ttl_seconds=300,
+    oauth_key=None,
 ):
     """Compare the full output to the narrowly transformed, validated prototype."""
     preview.validate_inputs(host, image)
@@ -590,6 +744,7 @@ def validate_resources(
             replicas=replicas,
             session_ttl_seconds=session_ttl_seconds,
             transaction_ttl_seconds=transaction_ttl_seconds,
+            oauth_key=oauth_key,
         )
     )
     if resource_map(resources) != expected:
@@ -611,12 +766,16 @@ def render_api_key(
     replicas=1,
     session_ttl_seconds=300,
     transaction_ttl_seconds=300,
+    oauth_key=None,
 ):
     preview.validate_inputs(host, image)
     checked_token(token)
     checked_session_options(
         valkey_password, replicas, session_ttl_seconds, transaction_ttl_seconds
     )
+    checked_oauth_profile(oauth_key is not None, valkey_password)
+    if oauth_key is not None:
+        checked_oauth_key({"private-key-pem": oauth_key})
     if basic is not None:
         checked_basic_credentials(basic)
     baseline, archive = preview.render_preview(
@@ -628,6 +787,8 @@ def render_api_key(
         session_ttl_seconds=session_ttl_seconds,
         transaction_ttl_seconds=transaction_ttl_seconds,
     )
+    if oauth_key is not None:
+        options["oauth_key"] = oauth_key
     resources = transform(baseline, host, token, basic, **options)
     validate_resources(resources, baseline, host, image, token, basic, **options)
     return resources, archive
@@ -643,6 +804,7 @@ def main():
     parser.add_argument("--browser-start-url")
     parser.add_argument("--basic-secret-file", type=Path)
     parser.add_argument("--valkey-secret-file", type=Path)
+    parser.add_argument("--oauth-secret-file", type=Path)
     parser.add_argument("--replicas", type=int, default=1)
     parser.add_argument("--session-ttl-seconds", type=int, default=300)
     parser.add_argument("--transaction-ttl-seconds", type=int, default=300)
@@ -655,11 +817,17 @@ def main():
         args.session_ttl_seconds,
         args.transaction_ttl_seconds,
     )
+    checked_oauth_profile(bool(args.oauth_secret_file), args.valkey_secret_file)
     project = Path(__file__).resolve().parents[3]
     output_dir = checked_output_directory(args.output_dir, project)
     credential_paths = [
         checked_credential_path(path, project)
-        for path in (args.secret_file, args.basic_secret_file, args.valkey_secret_file)
+        for path in (
+            args.secret_file,
+            args.basic_secret_file,
+            args.valkey_secret_file,
+            args.oauth_secret_file,
+        )
         if path
     ]
     if len(set(credential_paths)) != len(credential_paths):
@@ -706,6 +874,11 @@ def main():
     valkey_password = (
         valkey_secret(args.valkey_secret_file) if args.valkey_secret_file else None
     )
+    oauth = (
+        {"oauth_key": oauth_signing_key(args.oauth_secret_file)}
+        if args.oauth_secret_file
+        else {}
+    )
     resources, _ = render_api_key(
         project,
         args.chart,
@@ -718,6 +891,7 @@ def main():
         replicas=args.replicas,
         session_ttl_seconds=args.session_ttl_seconds,
         transaction_ttl_seconds=args.transaction_ttl_seconds,
+        **oauth,
     )
     output = directory_fd(output_dir, create=True)
     try:
@@ -728,6 +902,8 @@ def main():
         os.close(output)
     print(f"Validated {len(resources)} resources for {NAMESPACE}.")
     print(f"Direct login: https://{args.host}/login")
+    if oauth:
+        print(f"OAuth issuer: https://{args.host}/")
 
 
 if __name__ == "__main__":

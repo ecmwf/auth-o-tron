@@ -179,6 +179,94 @@ and runs in the foreground with `/data` on `emptyDir`. UID/GID 1000, read-only
 root, dropped capabilities, RuntimeDefault seccomp, no service-account token and
 a 256 MiB memory limit constrain the pod.
 
+### Opt-in OAuth authorization server
+
+OAuth is off unless `--oauth-secret-file` is given. Without it, the rendered
+bundle is byte-identical to the profiles above. OAuth state shares the browser
+backend, so the flag requires `--valkey-secret-file`; combining it with the memory
+backend is rejected before any credential file is created. Example (Basic optional):
+
+```bash
+python3 authotron/examples/ecmwf-api-key/render_api_key.py \
+  --chart ../auth-o-tron-chart \
+  --host authotron-palyground.lumi.apps.dte.destination-earth.eu \
+  --build-image docker.io/library/rust@sha256:<resolved-digest> \
+  --secret-file /tmp/opencode/authotron-api-key-signing.json \
+  --basic-secret-file /tmp/opencode/authotron-basic-demo.json \
+  --valkey-secret-file /tmp/opencode/authotron-browser-valkey.json \
+  --oauth-secret-file /tmp/opencode/authotron-oauth-signing.json \
+  --output-dir /tmp/opencode/authotron-api-key
+```
+
+The OAuth file holds **only `private-key-pem`**: an unencrypted RSA-2048 PKCS8 PEM
+generated on first use with mode `0600` and reused afterwards. It follows the same
+ownership, single-link, no-symlink, outside-Git/archive and distinct-path rules as
+the other credential files. Only canonical RSA-2048 (e=65537) PKCS8 PEM is accepted.
+Generation and validation use the Python `cryptography` package, which is needed only
+with this flag. Deleting the file rotates the key on the next render.
+
+The key is stored as `data.oauth-signing.pem` in the existing Opaque Secret and
+mounted read-only (mode 0440, group 1000) at `/run/secrets/oauth/signing.pem`,
+only into the application container. Configuration references the path, never the
+PEM. `active_kid` is `playground-<first 16 hex of SHA-256(public SPKI DER)>`, so a
+new key changes the configuration checksum; the pod template additionally carries
+`checksum/oauth-signing-key` (a SHA-256 digest only). The rendered fragment is:
+
+```yaml
+oauth:
+  enabled: true
+  issuer: https://authotron-palyground.lumi.apps.dte.destination-earth.eu/
+  signing:
+    active_kid: playground-<sha256-prefix>
+    keys:
+      - kid: playground-<sha256-prefix>
+        private_key_file: /run/secrets/oauth/signing.pem
+  clients:
+    - client_id: mcp-local
+      display_name: Local MCP demo
+      application_type: native
+      redirect_uris: ["http://127.0.0.1:49152/callback"]
+      resources:
+        - resource: https://127.0.0.1:8444/mcp
+          scopes: [mcp:read]
+  resources:
+    - resource: https://127.0.0.1:8444/mcp
+      allowed_realms: [ecmwf, browser-demo] # browser-demo only with Basic
+      scopes:
+        - name: mcp:read
+          required_roles: []
+```
+
+Clients must use the issuer
+**`https://authotron-palyground.lumi.apps.dte.destination-earth.eu/`** (with the
+trailing slash), which matches `ui.browser_session.public_origin`. Its metadata is
+at `/.well-known/oauth-authorization-server`. Other OAuth settings keep server
+defaults (for example 1024 transactions, 300-second tokens).
+
+**Security notes.**
+
+- `required_roles: []` is deliberate because the MCP tool is synthetic: **any
+  successfully authenticated playground user** (any valid ECMWF API key, or the
+  Basic demo user) can obtain an `mcp:read` token for resource identifier
+  `https://127.0.0.1:8444/mcp`. Tokens therefore carry `roles: []`; mcp-local's
+  remote settings set `"required_role": null` so its resource server accepts
+  them (a test guards that both sides agree). Do not reuse this policy for a
+  real resource.
+- The resource identifier is a loopback URL for the local MCP example; any other
+  service accepting tokens with that audience and this issuer would accept them.
+- The bundle now also contains the RSA private key (Base64 is not encryption).
+  The renderer never prints it; it never appears in ConfigMaps, the source
+  archive, annotations or command output.
+- Only the public client registration above exists; there is no dynamic
+  registration, refresh token or confidential client.
+
+The Ingress adds exactly `/oauth/authorize`, `/oauth/continue`, `/oauth/consent`,
+`/oauth/token` and `/oauth/jwks` (Exact) and
+`/.well-known/oauth-authorization-server` (ImplementationSpecific, because NGINX
+admission rejects dotted paths with Exact/Prefix; NGINX treats it as a prefix, and
+unknown suffixes return 404 from the application). No other API path is exposed.
+The plain `kubernetes-login-preview` Ingress is unchanged.
+
 The secret file's parent directory must already exist. The file must be outside
 Git. On first use, the renderer generates 32 random bytes encoded as URL-safe
 text and persists a JSON object with **only `jwt-secret`**, mode `0600`. Subsequent
@@ -201,7 +289,8 @@ Output is only `resources.yaml`, mode `0600`, containing **six resources** by de
 5. Immutable public source-archive ConfigMap.
 6. Opaque Secret `authotron-ecmwf-browser`, using Base64 `data.jwt-secret` and,
    when Basic is enabled, `data.config.yaml`. With Valkey it additionally holds
-   `data.valkey-password` and `data.valkey.conf`.
+   `data.valkey-password` and `data.valkey.conf`. With OAuth it additionally
+   holds `data.oauth-signing.pem`.
 
 The shared profile contains **nine resources**: these six plus Deployment,
 ClusterIP Service and NetworkPolicy, each named

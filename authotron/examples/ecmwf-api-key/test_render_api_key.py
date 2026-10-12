@@ -3,6 +3,7 @@
 import base64
 import copy
 import hashlib
+import importlib.util
 import json
 import os
 import tempfile
@@ -12,6 +13,8 @@ from unittest.mock import patch
 
 import render_api_key as renderer
 import yaml
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 HOST = "authotron-palyground.lumi.apps.dte.destination-earth.eu"
 IMAGE = "docker.io/library/rust@sha256:" + "a" * 64
@@ -20,6 +23,36 @@ VALKEY_PASSWORD = (
     base64.urlsafe_b64encode(bytes(reversed(range(32)))).decode().rstrip("=")
 )
 BASIC = {"username": renderer.BASIC_USERNAME, "password": TOKEN}
+# Synthetic disposable keys generated per test run; never read from private files.
+OAUTH_KEY = renderer.oauth_pem(
+    rsa.generate_private_key(public_exponent=65537, key_size=2048)
+)
+OTHER_OAUTH_KEY = renderer.oauth_pem(
+    rsa.generate_private_key(public_exponent=65537, key_size=2048)
+)
+# sha256 of yaml.safe_dump_all(..., sort_keys=False) captured before the OAuth profile.
+PRE_OAUTH_DIGESTS = {
+    "plain": "ab7daacb49c0dbb7e3075ebffd1758aeec36393b795d91bbbfbfe793955c2b94",
+    "basic": "b935549437525316d3f7431708e0b990c455405f75bf7e0208f5743d0d2b22c7",
+    "shared": "ebcc35c3fa9feffaa3b1ce316debb3d55d95827ef29a7faf3fa4d1790bd1068f",
+}
+OAUTH_ROUTES = [
+    ("/oauth/authorize", "Exact"),
+    ("/oauth/continue", "Exact"),
+    ("/oauth/consent", "Exact"),
+    ("/oauth/token", "Exact"),
+    ("/oauth/jwks", "Exact"),
+    ("/.well-known/oauth-authorization-server", "ImplementationSpecific"),
+]
+
+
+def load_mcp_settings():
+    """Load mcp-local's settings contract by path; it is not an installed module."""
+    path = Path(__file__).resolve().parent.parent / "mcp-local" / "demo_settings.py"
+    spec = importlib.util.spec_from_file_location("mcp_local_demo_settings", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def find(resources, kind):
@@ -1013,6 +1046,389 @@ class RendererTests(unittest.TestCase):
         self.assertNotIn(
             base64.b64encode(token.encode()).decode(), str(printed.call_args_list)
         )
+
+    def oauth_resources(self, baseline, basic=BASIC, key=OAUTH_KEY):
+        return renderer.transform(
+            baseline,
+            HOST,
+            TOKEN,
+            basic,
+            valkey_password=VALKEY_PASSWORD,
+            oauth_key=key,
+        )
+
+    def test_oauth_off_output_is_unchanged_from_previous_profiles(self):
+        baseline, _ = self.baseline()
+        for name, args, options in (
+            ("plain", (), {}),
+            ("basic", (BASIC,), {}),
+            ("shared", (BASIC,), dict(valkey_password=VALKEY_PASSWORD, replicas=2)),
+        ):
+            with self.subTest(profile=name):
+                text = yaml.safe_dump_all(
+                    renderer.transform(baseline, HOST, TOKEN, *args, **options),
+                    sort_keys=False,
+                )
+                self.assertEqual(
+                    hashlib.sha256(text.encode()).hexdigest(), PRE_OAUTH_DIGESTS[name]
+                )
+                self.assertNotIn("oauth", text)
+                explicit = yaml.safe_dump_all(
+                    renderer.transform(
+                        baseline, HOST, TOKEN, *args, oauth_key=None, **options
+                    ),
+                    sort_keys=False,
+                )
+                self.assertEqual(explicit.encode(), text.encode())
+
+    def test_oauth_registration_matches_mcp_local_remote_settings(self):
+        demo = load_mcp_settings()
+        remote = demo.make_settings("https://issuer.example.org/")
+        client = renderer.OAUTH_CLIENT
+        self.assertEqual(client["client_id"], remote["client_id"])
+        self.assertEqual(client["redirect_uris"], [remote["callback"]])
+        self.assertEqual(renderer.OAUTH_RESOURCE, remote["resource"])
+        self.assertEqual(renderer.OAUTH_SCOPE, remote["scope"])
+        self.assertEqual(
+            client["resources"],
+            [{"resource": remote["resource"], "scopes": [remote["scope"]]}],
+        )
+        # Empty required_roles in the issuer must pair with no role check in the resource.
+        required = remote["required_role"]
+        self.assertEqual(
+            list(renderer.OAUTH_REQUIRED_ROLES), [] if required is None else [required]
+        )
+        self.assertIsNone(required)
+        roles = renderer.oauth_config(HOST, "kid", ["ecmwf"])["resources"][0]["scopes"]
+        self.assertEqual(roles, [{"name": remote["scope"], "required_roles": []}])
+
+    def test_oauth_key_generation_reuse_permissions_and_schema(self):
+        path = self.root / "oauth.json"
+        pem = renderer.oauth_signing_key(path)
+        self.assertEqual(renderer.oauth_signing_key(path), pem)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(set(json.loads(path.read_text())), {"private-key-pem"})
+        self.assertTrue(pem.startswith("-----BEGIN PRIVATE KEY-----\n"))
+        key = serialization.load_pem_private_key(pem.encode(), None)
+        self.assertEqual(key.key_size, 2048)
+        kid = renderer.oauth_kid(pem)
+        self.assertRegex(kid, r"^playground-[0-9a-f]{16}$")
+        self.assertEqual(renderer.oauth_kid(pem), kid)
+        self.assertNotEqual(renderer.oauth_kid(OTHER_OAUTH_KEY), kid)
+        pkcs1 = key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        ).decode()
+        small = renderer.oauth_pem(
+            rsa.generate_private_key(public_exponent=65537, key_size=1024)
+        )
+        for payload in (
+            {"private-key-pem": pkcs1},
+            {"private-key-pem": small},
+            {"private-key-pem": "not a key"},
+            {"private-key-pem": pem + "\n"},
+            {"private-key-pem": pem, "jwt-secret": TOKEN},
+            {"private-key-pem": 1},
+            [],
+        ):
+            path.write_text(json.dumps(payload))
+            with self.assertRaises(ValueError):
+                renderer.oauth_signing_key(path)
+        path.write_text(json.dumps({"private-key-pem": pem}))
+        path.chmod(0o644)
+        with self.assertRaises(ValueError):
+            renderer.oauth_signing_key(path)
+        path.chmod(0o600)
+        link = self.root / "oauth-link.json"
+        link.symlink_to(path)
+        with self.assertRaises(OSError):
+            renderer.oauth_signing_key(link)
+        hard = self.root / "oauth-hard.json"
+        os.link(path, hard)
+        with self.assertRaises(ValueError):
+            renderer.oauth_signing_key(path)
+        hard.unlink()
+        (self.project / ".git").mkdir()
+        with self.assertRaises(ValueError):
+            renderer.oauth_signing_key(self.project / "oauth.json")
+
+    def test_oauth_config_shape_secret_mount_and_ingress(self):
+        baseline, archive = self.baseline()
+        kid = renderer.oauth_kid(OAUTH_KEY)
+        for basic, realms in ((None, ["ecmwf"]), (BASIC, ["ecmwf", "browser-demo"])):
+            with self.subTest(basic=basic is not None):
+                resources = self.oauth_resources(baseline, basic)
+                renderer.validate_resources(
+                    resources,
+                    baseline,
+                    HOST,
+                    IMAGE,
+                    TOKEN,
+                    basic,
+                    valkey_password=VALKEY_PASSWORD,
+                    oauth_key=OAUTH_KEY,
+                )
+                self.assertEqual(len(resources), 9)
+                public_text = find(resources, "ConfigMap")["data"]["config.yaml"]
+                config = yaml.safe_load(public_text)
+                oauth = config["oauth"]
+                self.assertEqual(oauth["issuer"], f"https://{HOST}/")
+                self.assertEqual(
+                    oauth["issuer"].rstrip("/"),
+                    config["ui"]["browser_session"]["public_origin"],
+                )
+                self.assertEqual(
+                    config["ui"]["browser_session"]["backend"]["type"], "valkey"
+                )
+                self.assertEqual(
+                    oauth["signing"],
+                    {
+                        "active_kid": kid,
+                        "keys": [
+                            {
+                                "kid": kid,
+                                "private_key_file": "/run/secrets/oauth/signing.pem",
+                            }
+                        ],
+                    },
+                )
+                self.assertEqual(
+                    oauth["clients"],
+                    [renderer.OAUTH_CLIENT],
+                )
+                self.assertEqual(
+                    oauth["resources"],
+                    [
+                        {
+                            "resource": renderer.OAUTH_RESOURCE,
+                            "allowed_realms": realms,
+                            "scopes": [
+                                {"name": renderer.OAUTH_SCOPE, "required_roles": []}
+                            ],
+                        }
+                    ],
+                )
+                self.assertEqual(
+                    sorted(p["realm"] for p in config["providers"]), sorted(realms)
+                )
+                secret = find(resources, "Secret")["data"]
+                self.assertEqual(
+                    base64.b64decode(secret["oauth-signing.pem"]).decode(), OAUTH_KEY
+                )
+                if basic:
+                    private = yaml.safe_load(base64.b64decode(secret["config.yaml"]))
+                    self.assertEqual(private["oauth"], oauth)
+                app = find(resources, "Deployment")["spec"]["template"]
+                pod = app["spec"]
+                self.assertEqual(
+                    pod["volumes"][-1],
+                    {
+                        "name": "oauth-signing",
+                        "secret": {
+                            "secretName": renderer.SECRET_NAME,
+                            "defaultMode": 0o440,
+                            "items": [
+                                {"key": "oauth-signing.pem", "path": "signing.pem"}
+                            ],
+                        },
+                    },
+                )
+                self.assertEqual(
+                    pod["containers"][0]["volumeMounts"][-1],
+                    {
+                        "name": "oauth-signing",
+                        "mountPath": "/run/secrets/oauth",
+                        "readOnly": True,
+                    },
+                )
+                self.assertEqual(
+                    app["metadata"]["annotations"]["checksum/oauth-signing-key"],
+                    hashlib.sha256(OAUTH_KEY.encode()).hexdigest(),
+                )
+                paths = find(resources, "Ingress")["spec"]["rules"][0]["http"]["paths"]
+                self.assertEqual(
+                    [(p["path"], p["pathType"]) for p in paths],
+                    list(renderer.preview.PATH_RULES)
+                    + [(p, "Exact") for p in renderer.LOGIN_PATHS]
+                    + ([("/login/basic", "Exact")] if basic else [])
+                    + OAUTH_ROUTES,
+                )
+                self.assertEqual(len({str(p["backend"]) for p in paths}), 1)
+                self.assert_no_key_leak(resources, archive)
+
+    def assert_no_key_leak(self, resources, archive):
+        body = "".join(OAUTH_KEY.splitlines()[1:-1])
+        encoded = base64.b64encode(OAUTH_KEY.encode()).decode()
+        for doc in resources:
+            text = yaml.safe_dump(doc)
+            if doc["kind"] == "Secret":
+                text = yaml.safe_dump(
+                    {k: v for k, v in doc["data"].items() if k != "oauth-signing.pem"}
+                )
+            for needle in ("PRIVATE KEY", body[:64], encoded[:64]):
+                self.assertNotIn(needle, text)
+        self.assertNotIn(b"PRIVATE KEY", archive)
+
+    def test_oauth_key_rotation_rolls_out_with_digest_only(self):
+        baseline, _ = self.baseline()
+        first = self.oauth_resources(baseline)
+        second = self.oauth_resources(baseline, key=OTHER_OAUTH_KEY)
+        annotations = [
+            find(d, "Deployment")["spec"]["template"]["metadata"]["annotations"]
+            for d in (first, second)
+        ]
+        for key in ("checksum/oauth-signing-key", "checksum/config"):
+            self.assertNotEqual(annotations[0][key], annotations[1][key])
+        self.assertEqual(len(annotations[0]["checksum/oauth-signing-key"]), 64)
+
+    def test_oauth_requires_shared_valkey_profile(self):
+        baseline, _ = self.baseline()
+        for basic in (None, BASIC):
+            with self.assertRaisesRegex(ValueError, "Valkey"):
+                renderer.transform(baseline, HOST, TOKEN, basic, oauth_key=OAUTH_KEY)
+        with patch.object(renderer.preview.subprocess, "run") as command:
+            with self.assertRaisesRegex(ValueError, "Valkey"):
+                renderer.render_api_key(
+                    self.project, self.project, HOST, IMAGE, TOKEN, oauth_key=OAUTH_KEY
+                )
+            command.assert_not_called()
+        with (
+            patch(
+                "sys.argv",
+                self.cli_arguments()
+                + ["--oauth-secret-file", str(self.root / "oauth.json")],
+            ),
+            patch.object(renderer, "signing_secret") as signing,
+            patch.object(renderer, "oauth_signing_key") as oauth,
+            patch.object(renderer, "render_api_key") as render,
+        ):
+            with self.assertRaisesRegex(ValueError, "Valkey"):
+                renderer.main()
+            for mocked in (signing, oauth, render):
+                mocked.assert_not_called()
+        self.assertFalse((self.root / "oauth.json").exists())
+
+    def test_oauth_guard_rejects_exposure_and_reference_mutations(self):
+        baseline, _ = self.baseline()
+        resources = self.oauth_resources(baseline)
+        options = dict(valkey_password=VALKEY_PASSWORD, oauth_key=OAUTH_KEY)
+
+        def pod(docs):
+            return find(docs, "Deployment")["spec"]["template"]["spec"]
+
+        def paths(docs):
+            return find(docs, "Ingress")["spec"]["rules"][0]["http"]["paths"]
+
+        mutations = [
+            lambda d: paths(d).append(
+                {
+                    "path": "/authenticate",
+                    "pathType": "Exact",
+                    "backend": paths(d)[0]["backend"],
+                }
+            ),
+            lambda d: paths(d)[-2].update(pathType="Prefix"),
+            lambda d: paths(d).pop(),
+            lambda d: pod(d)["volumes"][-1]["secret"].update(defaultMode=0o444),
+            lambda d: pod(d)["volumes"][-1]["secret"]["items"][0].update(
+                key="jwt-secret"
+            ),
+            lambda d: pod(d)["containers"][0]["volumeMounts"][-1].update(
+                readOnly=False
+            ),
+            lambda d: find(d, "Secret")["data"].update(
+                **{
+                    "oauth-signing.pem": base64.b64encode(
+                        OTHER_OAUTH_KEY.encode()
+                    ).decode()
+                }
+            ),
+            lambda d: find(d, "ConfigMap")["data"].update(key=OAUTH_KEY),
+            lambda d: find(d, "Deployment")["spec"]["template"]["metadata"][
+                "annotations"
+            ].update(**{"checksum/oauth-signing-key": "wrong"}),
+        ]
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index):
+                candidate = copy.deepcopy(resources)
+                mutate(candidate)
+                with self.assertRaises(ValueError):
+                    renderer.validate_resources(
+                        candidate, baseline, HOST, IMAGE, TOKEN, BASIC, **options
+                    )
+        for mutate in (
+            lambda c: c["oauth"].update(issuer="https://other.example.org/"),
+            lambda c: c["oauth"]["resources"][0]["scopes"][0].update(
+                required_roles=["x"]
+            ),
+            lambda c: c["oauth"]["clients"][0]["redirect_uris"].append(
+                "http://127.0.0.1:1/cb"
+            ),
+            lambda c: c["oauth"]["signing"]["keys"][0].update(
+                private_key_file="/tmp/k.pem"
+            ),
+            lambda c: c.pop("oauth"),
+        ):
+            candidate = copy.deepcopy(resources)
+            secret = find(candidate, "Secret")["data"]
+            config = yaml.safe_load(base64.b64decode(secret["config.yaml"]))
+            mutate(config)
+            secret["config.yaml"] = base64.b64encode(
+                yaml.safe_dump(config).encode()
+            ).decode()
+            with self.assertRaises(ValueError):
+                renderer.validate_resources(
+                    candidate, baseline, HOST, IMAGE, TOKEN, BASIC, **options
+                )
+
+    def test_oauth_cli_passes_key_without_printing_it(self):
+        baseline, _ = self.baseline()
+        resources = self.oauth_resources(baseline)
+        oauth_file = self.root / "oauth.json"
+        output_dir = self.root / "bundle"
+        arguments = self.cli_arguments() + [
+            "--valkey-secret-file",
+            str(self.root / "valkey.json"),
+            "--basic-secret-file",
+            str(self.root / "basic.json"),
+            "--oauth-secret-file",
+            str(oauth_file),
+        ]
+        with (
+            patch("sys.argv", arguments),
+            patch.object(renderer, "signing_secret", return_value=TOKEN),
+            patch.object(renderer, "basic_credentials", return_value=BASIC),
+            patch.object(renderer, "valkey_secret", return_value=VALKEY_PASSWORD),
+            patch.object(
+                renderer, "render_api_key", return_value=(resources, b"archive")
+            ) as render,
+            patch("builtins.print") as printed,
+        ):
+            renderer.main()
+        pem = json.loads(oauth_file.read_text())["private-key-pem"]
+        self.assertEqual(render.call_args.kwargs["oauth_key"], pem)
+        self.assertEqual(oauth_file.stat().st_mode & 0o777, 0o600)
+        printed_text = str(printed.call_args_list)
+        self.assertIn(f"OAuth issuer: https://{HOST}/", printed_text)
+        for needle in ("PRIVATE KEY", pem.splitlines()[1], TOKEN, VALKEY_PASSWORD):
+            self.assertNotIn(needle, printed_text)
+        self.assertEqual((output_dir / "resources.yaml").stat().st_mode & 0o777, 0o600)
+        for extra in (
+            ["--oauth-secret-file", str(self.root / "jwt.json")],
+            ["--oauth-secret-file", str(self.root / "valkey.json")],
+            ["--oauth-secret-file", str(output_dir / "resources.yaml")],
+        ):
+            with (
+                self.subTest(extra=extra),
+                patch("sys.argv", arguments + extra),
+                patch.object(renderer, "oauth_signing_key") as oauth,
+                patch.object(renderer, "render_api_key") as render,
+            ):
+                with self.assertRaises((ValueError, SystemExit)):
+                    renderer.main()
+                oauth.assert_not_called()
+                render.assert_not_called()
 
 
 if __name__ == "__main__":
