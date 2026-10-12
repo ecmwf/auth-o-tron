@@ -118,6 +118,40 @@ code or token labels. Metadata advertises no registration endpoint. When any cli
 enables refresh tokens, `grant_types_supported` adds `refresh_token` and metadata adds
 `revocation_endpoint` with `revocation_endpoint_auth_methods_supported: ["none"]`.
 
+### Token and revocation rate limits
+
+`POST /oauth/token` and `POST /oauth/revoke` are limited per client IP with a fixed
+window, before the request body is parsed:
+
+```yaml
+oauth:
+  endpoint_rate_limit:
+    window_seconds: 60               # 1..3600, default 60
+    token_requests_per_window: 60    # 1..100000, default 60
+    revoke_requests_per_window: 30   # 1..100000, default 30
+    max_tracked_clients: 10000       # 1..1000000, default 10000
+    trusted_proxies: [10.0.0.0/8]    # CIDRs, default none
+```
+
+A request over the limit gets `429 Too Many Requests`, `Retry-After: <seconds until
+the window resets>` and `{"error": "temporarily_unavailable"}`. RFC 6749 registers no
+token-endpoint error for throttling; `temporarily_unavailable` is its closest error code,
+and `slow_down` is reserved for device-flow polling.
+
+- **Client IP.** The TCP peer address. If the peer matches `trusted_proxies`, the
+  server reads `X-Forwarded-For` from right to left and uses the first address that
+  is not a trusted proxy. A malformed entry stops the walk at the last trusted hop.
+  Without `trusted_proxies`, forwarded headers are ignored. Behind an ingress or load
+  balancer, every client then shares the proxy's address and therefore one window.
+  List the proxy ranges so that clients are counted separately.
+- **Keys.** IPv4 addresses are counted individually. IPv6 addresses are counted per
+  /64. IPv4-mapped IPv6 addresses count as IPv4. Each endpoint has its own window.
+- **Memory.** Counters live in each replica's memory and are not shared through
+  Valkey. With N replicas, a client can get up to N times the limit. Counters reset
+  on restart. At most `max_tracked_clients` client windows are kept per replica. When
+  the table is full, expired windows are dropped first. If it is still full, requests
+  from IPs not already in the table get 429 until windows expire.
+
 ## Client flow
 
 Generate a fresh verifier and S256 challenge for each authorization attempt. For example:
