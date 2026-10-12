@@ -112,13 +112,14 @@ Landing page with service info and version.
 
 ### GET /login
 
-Serves the branded login entry when ConfigV2 `ui.enabled: true`. Without actions
-or direct login it remains a preview. Configured actions link to approved browser
-clients; configured Basic or ECMWF API-key login opens its direct credential form
-in a same-page dialog, with standalone navigation as the JavaScript-free fallback.
-An existing direct browser session redirects to `/login/account` only when no
-alternative direct flow or sign-in actions are configured; otherwise the chooser stays visible.
-With opt-in OAuth enabled and a bound authorization transaction, the same direct
+Serves the branded login entry when ConfigV2 `ui.enabled: true`. Without SSO links
+or browser methods it remains a preview. The chooser lists browser methods in
+provider order by label, then `ui.sso` links. SSO links navigate to approved browser
+clients; a browser method opens its credential form (`/login/method/{n}`) in a
+same-page dialog, with standalone navigation as the JavaScript-free fallback.
+An existing browser session redirects to `/login/account` only when exactly one
+browser method and no SSO links are configured; otherwise the chooser stays visible.
+With opt-in OAuth enabled and a bound authorization transaction, the same method
 forms perform fresh strict verification and continue to explicit consent instead
 of creating an ordinary browser session. See [OAuth](../configuration/oauth.md)
 for metadata/JWKS, authorize, consent and code/S256 token endpoints. The login entry
@@ -128,7 +129,7 @@ OAuth authentication.
 | Aspect | Details |
 |--------|---------|
 | **Auth** | None |
-| **Success (200)** | HTML login entry or preview; signed-in direct sessions receive a 303 identity-view redirect only when one direct flow and no sign-in actions are configured |
+| **Success (200)** | HTML login entry or preview; signed-in direct sessions receive a 303 identity-view redirect only when exactly one browser method and no SSO links are configured |
 | **Failure (503)** | Generic, private response if a direct browser session lookup fails against its backend; no missing-session redirect or new cookie |
 | **Availability** | Main application port only; route is not registered when UI is disabled |
 
@@ -195,11 +196,15 @@ auth_duration_seconds_bucket{result="success",realm="internal",le="0.1"} 35
 
 ### Optional direct browser login
 
-When `ui.enabled` and either `ui.basic` or `ui.ecmwf_api_key` are configured,
-`ui.browser_session` with an explicit `backend.type` (`memory` or `valkey`) is required and the application port serves the corresponding
-`GET/POST /login/basic` or `GET/POST /login/ecmwf-api-key`, plus `GET /login/account`.
-Both forms share bounded admission, a configurable verification/augmentation/lease-release
-deadline (default ten seconds), exact Origin checks, and cookie-bound single-use flow-specific CSRF.
+When `ui.enabled` and at least one `plain` or `ecmwf-api` provider has a
+`browser: {label}` block,
+`ui.browser_session` with an explicit `backend.type` (`memory` or `valkey`) is required and the application port serves `GET/POST /login/method/{n}` for each
+browser method, plus `GET /login/account`. `n` is the method's 0-based index among
+browser-enabled providers in `providers` order, written as `0` or one to two digits
+without a leading zero; unknown indexes return 404. API-only providers have no
+route. See [Choosing browser methods](../configuration/ui.md#choosing-browser-methods).
+All forms share bounded admission, a configurable verification/augmentation/lease-release
+deadline (default ten seconds), exact Origin checks, and cookie-bound single-use CSRF bound to the method index and provider type.
 `max_inflight_logins` is a per-pod nonblocking limit (default 8). Optional nullable
 `max_shared_inflight_logins` adds a global Valkey lease cap (1–65536); its default
 is disabled. Local admission happens before backend quota/lease commands. Quotas,
@@ -219,15 +224,15 @@ They return 404 when disabled. See [Login UI](../configuration/ui.md).
 
 | Endpoint | Request / response |
 |----------|--------------------|
-| `GET /login/basic` | Escaped username/password form with form-nonce cookie and independent transaction/challenge in `csrf`; never consumes query credentials |
-| `POST /login/basic` | URL-encoded `username`, `password`, `csrf` only; username ≤256 UTF-8 bytes, password ≤1,024 UTF-8 bytes; Unicode/whitespace password preserved |
-| `GET /login/ecmwf-api-key` | API-key form with the same stable form-nonce cookie and its own opaque `csrf` value |
-| `POST /login/ecmwf-api-key` | URL-encoded `api_key`, `csrf` only; key ≤512 bytes |
+| `GET /login/method/{n}` | Form headed by the method label, with form-nonce cookie and independent transaction/challenge in `csrf`; field set follows the provider type; never consumes query credentials |
+| `POST /login/method/{n}` (`plain`) | URL-encoded `username`, `password`, `csrf` (plus `oauth_transaction` during OAuth) only; username ≤256 UTF-8 bytes, password ≤1,024 UTF-8 bytes; Unicode/whitespace password preserved |
+| `POST /login/method/{n}` (`ecmwf-api`) | URL-encoded `api_key`, `csrf` (plus `oauth_transaction` during OAuth) only; key ≤512 bytes |
 | `GET /login/account` | Session-only augmented identity, escaped roles, and allowlisted `ecmwf-email`, `email`, `display_name`; no session →303 `/login` |
 
 POSTs are limited to 8 KiB. Successful POST →303 `/login/account` with a rotated
 Secure/HttpOnly/SameSite=Lax host-only opaque session cookie. Failures are generic:
-400 malformed/unknown/duplicate fields, 403 invalid Origin or CSRF, 401 invalid
+400 malformed/unknown/duplicate fields or a field set not matching the method's provider type,
+403 invalid Origin or CSRF (including a form issued for another method, which is not consumed), 401 invalid
 credentials or verification/augmentation timeout, 413 oversized body, 429
 form/verification quota or admission exhausted, 503 form/session capacity or
 backend unavailable. A backend lookup failure on `/login/account` or the direct
@@ -259,6 +264,5 @@ Session cookies are not accepted by `/authenticate`, `/whoami`, or token APIs.
 | GET | / | 8080 | None | Service info |
 | GET | /login | 8080 | None | Configured login entry or preview (only when `ui.enabled: true`) |
 | GET | /static/login.css | 8080 | None | Preview stylesheet (only when `ui.enabled: true`) |
-| GET/POST | /login/basic | 8080 | Form + CSRF on POST | Optional direct Basic browser login |
-| GET/POST | /login/ecmwf-api-key | 8080 | Form + CSRF on POST | Optional direct API-key browser login |
+| GET/POST | /login/method/{n} | 8080 | Form + CSRF on POST | Browser login for the n-th browser-enabled provider |
 | GET | /login/account | 8080 | Browser session | Augmented browser identity view |

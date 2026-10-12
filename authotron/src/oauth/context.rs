@@ -231,15 +231,16 @@ pub(super) mod tests {
     pub(in crate::oauth) async fn fixture()
     -> (OAuthConfig, AuthorizationTransaction, VerifiedOAuthIdentity) {
         let config: ConfigV2 = serde_json::from_value(json!({"store": {"enabled": false}, "services": [], "augmenters": [],
-            "providers": [{"type": "plain", "name": "basic", "realm": "local", "users": [{"username": "alice", "password": "päss:秘密", "roles": ["reader", "member"]}]}],
+            "providers": [{"type": "plain", "name": "basic", "realm": "local", "users": [{"username": "alice", "password": "päss:秘密", "roles": ["reader", "member"]}], "browser": {"label": "Password"}}],
             "server": {"port": 0}, "jwt": {"iss": "fixture", "exp": 300, "secret": "fixture-only"}, "logging": {"level": "warn", "format": "console"},
-            "ui": {"basic": {"provider_name": "basic"}, "browser_session": {"public_origin": "https://login.example.org", "backend": {"type": "memory"}}},
+            "ui": {"browser_session": {"public_origin": "https://login.example.org", "backend": {"type": "memory"}}},
             "oauth": {"issuer": "https://login.example.org", "clients": [{"client_id": "desktop", "display_name": "Desktop", "redirect_uris": ["https://app.example.org/cb"], "resources": [{"resource": "https://mcp.example.org/mcp", "scopes": ["read"]}]}],
             "resources": [{"resource": "https://mcp.example.org/mcp", "allowed_realms": ["local"], "scopes": [{"name": "read", "required_roles": ["reader", "member"]}]}]}
         })).unwrap();
         let browser = BrowserLoginState::new(&config).unwrap();
         let auth = Auth::new(&config.providers, &[], Arc::new(NoStore), config.auth);
         let identity = verify_identity(
+            0,
             BrowserCredentials::Basic {
                 username: "alice",
                 password: "päss:秘密",

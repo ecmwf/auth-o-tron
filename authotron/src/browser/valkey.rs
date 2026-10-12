@@ -152,10 +152,10 @@ mod tests {
     fn config(url: &str, prefix: &str) -> ConfigV2 {
         serde_json::from_value(serde_json::json!({
             "store": {"enabled": false}, "services": [], "augmenters": [],
-            "providers": [{"type": "plain", "name": "fixture", "realm": "fixture", "users": [{"username": "alice", "password": "public-fixture", "roles": ["reader"]}]}],
+            "providers": [{"type": "plain", "name": "fixture", "realm": "fixture", "users": [{"username": "alice", "password": "public-fixture", "roles": ["reader"]}], "browser": {"label": "Password"}}],
             "server": {"port": 0}, "jwt": {"iss": "fixture", "exp": 300, "secret": "public-test-only"},
             "logging": {"level": "warn", "format": "console"},
-            "ui": {"enabled": true, "basic": {"provider_name": "fixture"}, "browser_session": {
+            "ui": {"enabled": true, "browser_session": {
                 "public_origin": "https://login.example.test", "transaction_ttl_seconds": 45, "max_forms": 2, "max_sessions": 1,
                 "max_forms_per_window": 100, "max_logins_per_window": 100, "max_inflight_logins": 1,
                 "max_shared_inflight_logins": 1,
@@ -180,7 +180,9 @@ mod tests {
         disabled.ui.enabled = false;
         let _ = crate::startup::build_app(Arc::new(disabled)).await.unwrap();
         let mut chooser = config("redis://127.0.0.1:1/0", "chooser");
-        chooser.ui.basic = None;
+        if let crate::providers::ProviderConfig::Plain(provider) = &mut chooser.providers[0] {
+            provider.browser = None;
+        }
         let _ = crate::startup::build_app(Arc::new(chooser)).await.unwrap();
     }
 
@@ -247,26 +249,27 @@ mod tests {
         let b = state(&url, prefix).await;
         let backend = a.valkey.as_ref().unwrap();
 
-        let (sid, csrf) = a.form(LoginFlow::Basic).await.unwrap();
+        let (sid, csrf) = a.form(LoginFlow::basic(0)).await.unwrap();
         assert!(
-            !b.consume(&sid, &"a".repeat(64), LoginFlow::Basic)
+            !b.consume(&sid, &"a".repeat(64), LoginFlow::basic(0))
                 .await
                 .unwrap()
         );
-        assert!(!b.consume(&sid, &csrf, LoginFlow::ApiKey).await.unwrap());
+        assert!(!b.consume(&sid, &csrf, LoginFlow::api_key(0)).await.unwrap());
+        assert!(!b.consume(&sid, &csrf, LoginFlow::basic(1)).await.unwrap());
         let (left, right) = tokio::join!(
-            a.consume(&sid, &csrf, LoginFlow::Basic),
-            b.consume(&sid, &csrf, LoginFlow::Basic)
+            a.consume(&sid, &csrf, LoginFlow::basic(0)),
+            b.consume(&sid, &csrf, LoginFlow::basic(0))
         );
         assert_ne!(
             left.unwrap(),
             right.unwrap(),
             "exactly one atomic consumer wins"
         );
-        let (f1, _) = a.form(LoginFlow::Basic).await.unwrap();
-        let (f2, _) = b.form(LoginFlow::ApiKey).await.unwrap();
+        let (f1, _) = a.form(LoginFlow::basic(0)).await.unwrap();
+        let (f2, _) = b.form(LoginFlow::api_key(0)).await.unwrap();
         assert!(matches!(
-            a.form(LoginFlow::Basic).await,
+            a.form(LoginFlow::basic(0)).await,
             Err(BrowserVerifyError::Capacity)
         ));
         b.discard(&f1).await.unwrap();
@@ -274,11 +277,11 @@ mod tests {
 
         let form_nonce = opaque_id();
         let first = a
-            .form_with_nonce(LoginFlow::Basic, &form_nonce)
+            .form_with_nonce(LoginFlow::basic(0), &form_nonce)
             .await
             .unwrap();
         let second = b
-            .form_with_nonce(LoginFlow::Basic, &form_nonce)
+            .form_with_nonce(LoginFlow::basic(0), &form_nonce)
             .await
             .unwrap();
         let (first_id, _) = first.split_once('.').unwrap();
@@ -290,33 +293,33 @@ mod tests {
             format!("{first}.extra"),
         ] {
             assert!(
-                !b.consume_with_nonce(&invalid, &form_nonce, LoginFlow::Basic)
+                !b.consume_with_nonce(&invalid, &form_nonce, LoginFlow::basic(0))
                     .await
                     .unwrap()
             );
         }
         assert!(
-            !b.consume_with_nonce(&first, &opaque_id(), LoginFlow::Basic)
+            !b.consume_with_nonce(&first, &opaque_id(), LoginFlow::basic(0))
                 .await
                 .unwrap()
         );
         assert!(
-            !b.consume_with_nonce(&first, &form_nonce, LoginFlow::ApiKey)
+            !b.consume_with_nonce(&first, &form_nonce, LoginFlow::api_key(0))
                 .await
                 .unwrap()
         );
         let (left, right) = tokio::join!(
-            a.consume_with_nonce(&first, &form_nonce, LoginFlow::Basic),
-            b.consume_with_nonce(&first, &form_nonce, LoginFlow::Basic)
+            a.consume_with_nonce(&first, &form_nonce, LoginFlow::basic(0)),
+            b.consume_with_nonce(&first, &form_nonce, LoginFlow::basic(0))
         );
         assert_ne!(left.unwrap(), right.unwrap());
         assert!(
-            a.consume_with_nonce(&second, &form_nonce, LoginFlow::Basic)
+            a.consume_with_nonce(&second, &form_nonce, LoginFlow::basic(0))
                 .await
                 .unwrap()
         );
         assert!(
-            !b.consume_with_nonce(&second, &form_nonce, LoginFlow::Basic)
+            !b.consume_with_nonce(&second, &form_nonce, LoginFlow::basic(0))
                 .await
                 .unwrap()
         );
@@ -380,7 +383,7 @@ mod tests {
                 "form".into(),
                 short.clone(),
                 csrf.clone(),
-                "basic".into(),
+                LoginFlow::basic(0).tag(),
                 "40".into(),
                 "2".into(),
                 "100".into(),
@@ -389,7 +392,26 @@ mod tests {
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(70)).await;
-        assert!(!b.consume(&short, &csrf, LoginFlow::Basic).await.unwrap());
+        assert!(!b.consume(&short, &csrf, LoginFlow::basic(0)).await.unwrap());
+        // The script stores only method-bound flow tags: valid `basic:0`, invalid `basic`.
+        for invalid in ["basic", "basic:", "basic:100", "Basic:0", "basic:0:x"] {
+            assert!(
+                backend
+                    .call(&[
+                        "form".into(),
+                        opaque_id(),
+                        opaque_id(),
+                        invalid.into(),
+                        "40".into(),
+                        "2".into(),
+                        "100".into(),
+                        "60000".into(),
+                    ])
+                    .await
+                    .is_err(),
+                "untagged or malformed flow {invalid:?} must be rejected"
+            );
+        }
         let _: usize = command(backend, "DEL", &[&key, &format!("{prefix}:sessions")]).await;
         let short_session = opaque_id();
         backend
@@ -424,9 +446,9 @@ mod tests {
         let time: Vec<String> = command(backend, "TIME", &[]).await;
         let micros: u64 = time[1].parse().unwrap();
         tokio::time::sleep(Duration::from_micros(1_050_000 - micros)).await;
-        q1.form(LoginFlow::Basic).await.unwrap();
+        q1.form(LoginFlow::basic(0)).await.unwrap();
         assert!(matches!(
-            q2.form(LoginFlow::Basic).await,
+            q2.form(LoginFlow::basic(0)).await,
             Err(BrowserVerifyError::Limited)
         ));
         assert!(matches!(
@@ -593,7 +615,7 @@ mod tests {
         .await;
         let mut reconnected = false;
         for _ in 0..100 {
-            if b.form(LoginFlow::Basic).await.is_ok() {
+            if b.form(LoginFlow::basic(0)).await.is_ok() {
                 reconnected = true;
                 break;
             }
@@ -839,7 +861,7 @@ mod tests {
         let acl_form_nonce = opaque_id();
         let acl_token = app_state
             .browser
-            .form_with_nonce(LoginFlow::Basic, &acl_form_nonce)
+            .form_with_nonce(LoginFlow::basic(0), &acl_form_nonce)
             .await
             .unwrap();
         let _: String = command(backend, "ACL", &["SETUSER", "default", "-zadd"]).await;
@@ -868,7 +890,7 @@ mod tests {
         let response = app
             .clone()
             .oneshot(
-                Request::post("/login/basic")
+                Request::post("/login/method/0")
                     .header("origin", "https://login.example.test")
                     .header("cookie", format!("__Host-authotron_form={acl_form_nonce}"))
                     .header("content-type", "application/x-www-form-urlencoded")
@@ -888,7 +910,7 @@ mod tests {
         assert!(metrics.contains("authotron_browser_logins_inflight 0"));
         let form = app
             .clone()
-            .oneshot(Request::get("/login/basic").body(Body::empty()).unwrap())
+            .oneshot(Request::get("/login/method/0").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(form.status(), StatusCode::OK);
@@ -917,7 +939,7 @@ mod tests {
         let wrong_browser = other_app
             .clone()
             .oneshot(
-                Request::post("/login/basic")
+                Request::post("/login/method/0")
                     .header("origin", "https://login.example.test")
                     .header("cookie", format!("__Host-authotron_form={}", opaque_id()))
                     .header("content-type", "application/x-www-form-urlencoded")
@@ -931,7 +953,7 @@ mod tests {
         assert_eq!(wrong_browser.status(), StatusCode::FORBIDDEN);
         let response = other_app
             .oneshot(
-                Request::post("/login/basic")
+                Request::post("/login/method/0")
                     .header("origin", "https://login.example.test")
                     .header("cookie", cookie)
                     .header("content-type", "application/x-www-form-urlencoded")
@@ -1109,6 +1131,7 @@ mod tests {
         let outcome = tokio::time::timeout(
             Duration::from_millis(1800),
             crate::oauth::authentication::verify_identity(
+                0,
                 crate::browser::BrowserCredentials::Basic {
                     username: "alice",
                     password: "public-fixture",
@@ -1138,6 +1161,7 @@ mod tests {
         let direct = tokio::time::timeout(
             Duration::from_millis(1800),
             browser.verify_identity(
+                0,
                 crate::browser::BrowserCredentials::Basic {
                     username: "alice",
                     password: "public-fixture",
@@ -1161,6 +1185,7 @@ mod tests {
         auth.augmenters.clear();
         assert!(
             crate::oauth::authentication::verify_identity(
+                0,
                 crate::browser::BrowserCredentials::Basic {
                     username: "alice",
                     password: "public-fixture"
@@ -1178,7 +1203,7 @@ mod tests {
             b.lookup(&rotated).await,
             Err(BrowserVerifyError::Unavailable)
         ));
-        for path in ["/login/basic", "/login/account", "/login"] {
+        for path in ["/login/method/0", "/login/account", "/login"] {
             let response = app
                 .clone()
                 .oneshot(

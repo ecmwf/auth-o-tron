@@ -75,8 +75,8 @@ impl OAuthRuntime {
         if !config.oauth.enabled {
             return Ok(());
         }
-        if !config.ui.enabled || !config.ui.has_direct_login() {
-            return Err("OAuth requires enabled UI and a direct login provider");
+        if !config.ui.enabled || crate::config::browser_methods(&config.providers).is_empty() {
+            return Err("OAuth requires enabled UI and a provider with a browser block");
         }
         if config.oauth.signing.is_none()
             || config.oauth.clients.is_empty()

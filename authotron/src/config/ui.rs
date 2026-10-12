@@ -12,26 +12,128 @@ use http::Uri;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Controls branding, trusted browser sign-in links, and optional direct login.
+/// Controls branding, trusted SSO links, and the shared direct-login session.
+///
+/// Direct browser login methods are declared by `browser` blocks on `plain`
+/// and `ecmwf-api` providers.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct UiConfig {
     pub enabled: bool,
     pub branding: BrandingConfig,
-    pub sign_in_actions: Vec<BrowserSignInAction>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ecmwf_api_key: Option<DirectLoginConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub basic: Option<DirectLoginConfig>,
+    pub sso: Vec<BrowserSignInAction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub browser_session: Option<Box<BrowserSessionConfig>>,
 }
 
-/// Direct browser login selects one configured provider, never a submitted URL.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+/// Upper bound on direct browser methods so the chooser stays short and
+/// `/login/method/{n}` indices and form flow tags stay small.
+pub const MAX_BROWSER_METHODS: usize = 16;
+const BROWSER_LABEL_CHARS: usize = 64;
+
+/// Offers a `plain` or `ecmwf-api` provider as a direct browser sign-in method.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct DirectLoginConfig {
-    pub provider_name: String,
+pub struct ProviderBrowserConfig {
+    /// Chooser button text, trimmed, 1-64 characters, no control characters.
+    #[serde(deserialize_with = "browser_label")]
+    #[schemars(length(min = 1, max = 64))]
+    pub label: String,
+}
+
+/// Valid: `"  Staff login "` (stored as `Staff login`). Invalid: `"   "`,
+/// `"Line\nbreak"`, or a label longer than 64 characters after trimming.
+fn browser_label<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let label = String::deserialize(deserializer)?;
+    let label = label.trim();
+    if label.is_empty()
+        || label.chars().count() > BROWSER_LABEL_CHARS
+        || label.chars().any(char::is_control)
+    {
+        return Err(serde::de::Error::custom(
+            "provider browser label must be 1-64 characters after trimming, without control characters",
+        ));
+    }
+    Ok(label.to_owned())
+}
+
+/// Credential form offered by a browser method; follows the provider type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserMethodKind {
+    Basic,
+    ApiKey,
+}
+
+impl BrowserMethodKind {
+    /// Provider `type` value that offers this credential form.
+    pub fn provider_type(self) -> &'static str {
+        match self {
+            Self::Basic => "plain",
+            Self::ApiKey => "ecmwf-api",
+        }
+    }
+
+    /// Lowercase prefix of the stored form flow tag `<prefix>:<index>`.
+    pub fn tag_prefix(self) -> &'static str {
+        match self {
+            Self::Basic => "basic",
+            Self::ApiKey => "key",
+        }
+    }
+
+    /// Fixed metric label per credential type; method indices are not exported.
+    pub fn metric_label(self) -> &'static str {
+        match self {
+            Self::Basic => "basic",
+            Self::ApiKey => "ecmwf-api-key",
+        }
+    }
+}
+
+/// A provider offered for direct browser login, indexed by its position among
+/// browser-enabled providers in `providers` order.
+#[derive(Debug, Clone, Copy)]
+pub enum BrowserMethodProvider<'a> {
+    Plain(&'a crate::providers::plain_provider::PlainAuthConfig),
+    EcmwfApi(&'a crate::providers::ecmwfapi_provider::EcmwfApiProviderConfig),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BrowserMethodConfig<'a> {
+    pub label: &'a str,
+    pub provider: BrowserMethodProvider<'a>,
+}
+
+impl BrowserMethodConfig<'_> {
+    pub fn kind(&self) -> BrowserMethodKind {
+        match self.provider {
+            BrowserMethodProvider::Plain(_) => BrowserMethodKind::Basic,
+            BrowserMethodProvider::EcmwfApi(_) => BrowserMethodKind::ApiKey,
+        }
+    }
+}
+
+/// Browser-enabled providers in configuration order, without validation.
+pub fn browser_methods(
+    providers: &[crate::providers::ProviderConfig],
+) -> Vec<BrowserMethodConfig<'_>> {
+    use crate::providers::ProviderConfig;
+    providers
+        .iter()
+        .filter_map(|provider| match provider {
+            ProviderConfig::Plain(config) => config.browser.as_ref().map(|b| BrowserMethodConfig {
+                label: &b.label,
+                provider: BrowserMethodProvider::Plain(config),
+            }),
+            ProviderConfig::EcmwfApi(config) => {
+                config.browser.as_ref().map(|b| BrowserMethodConfig {
+                    label: &b.label,
+                    provider: BrowserMethodProvider::EcmwfApi(config),
+                })
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// One origin and absolute session lifetime shared by all direct login flows.
@@ -274,72 +376,31 @@ impl BrowserSessionConfig {
 }
 
 impl UiConfig {
-    pub fn has_direct_login(&self) -> bool {
-        self.ecmwf_api_key.is_some() || self.basic.is_some()
-    }
-
-    pub fn validate_basic_login<'a>(
-        &self,
-        providers: &'a [crate::providers::ProviderConfig],
-    ) -> Result<Option<&'a crate::providers::plain_provider::PlainAuthConfig>, &'static str> {
-        let Some(settings) = &self.basic else {
-            return Ok(None);
-        };
-        match selected_provider(providers, &settings.provider_name)? {
-            crate::providers::ProviderConfig::Plain(config) => Ok(Some(config)),
-            _ => Err("browser Basic provider must have type plain"),
-        }
-    }
-
+    /// Validates browser methods against the session settings and returns them in
+    /// chooser order. Labels must be unique ignoring case so buttons are unambiguous.
     pub fn validate_browser_login<'a>(
         &self,
         providers: &'a [crate::providers::ProviderConfig],
-    ) -> Result<Option<&'a crate::providers::ecmwfapi_provider::EcmwfApiProviderConfig>, &'static str>
-    {
-        use crate::providers::ProviderConfig;
-        if self.has_direct_login() && self.browser_session.is_none() {
-            return Err("direct browser login requires ui.browser_session");
+    ) -> Result<Vec<BrowserMethodConfig<'a>>, &'static str> {
+        let methods = browser_methods(providers);
+        if methods.len() > MAX_BROWSER_METHODS {
+            return Err("at most 16 providers may declare a browser block");
+        }
+        let mut labels = std::collections::HashSet::new();
+        if methods
+            .iter()
+            .any(|method| !labels.insert(method.label.to_lowercase()))
+        {
+            return Err("provider browser labels must be unique (case-insensitive)");
+        }
+        if !methods.is_empty() && self.browser_session.is_none() {
+            return Err("provider browser login requires ui.browser_session");
         }
         if let Some(settings) = &self.browser_session {
             settings.validate()?;
         }
-        self.validate_basic_login(providers)?;
-        let Some(settings) = &self.ecmwf_api_key else {
-            return Ok(None);
-        };
-        match selected_provider(providers, &settings.provider_name)? {
-            ProviderConfig::EcmwfApi(config) => Ok(Some(config)),
-            _ => Err("browser provider must have type ecmwf-api"),
-        }
+        Ok(methods)
     }
-}
-
-fn selected_provider<'a>(
-    providers: &'a [crate::providers::ProviderConfig],
-    name: &str,
-) -> Result<&'a crate::providers::ProviderConfig, &'static str> {
-    use crate::providers::ProviderConfig;
-    if name.trim().is_empty() {
-        return Err("browser provider name must not be blank");
-    }
-    let mut matches = providers.iter().filter(|provider| {
-        let provider_name = match provider {
-            ProviderConfig::EcmwfApi(c) => &c.name,
-            ProviderConfig::EcmwfTokenGenerator(c) => &c.name,
-            ProviderConfig::EfasApiProvider(c) => &c.name,
-            ProviderConfig::Jwt(c) => &c.name,
-            ProviderConfig::OpenIDOffline(c) => &c.name,
-            ProviderConfig::Plain(c) => &c.name,
-        };
-        provider_name == name
-    });
-    let selected = matches
-        .next()
-        .ok_or("browser provider name must match exactly one provider")?;
-    if matches.next().is_some() {
-        return Err("browser provider name must be unique");
-    }
-    Ok(selected)
 }
 
 /// An operator-configured entry into an application's browser login flow.
@@ -573,7 +634,7 @@ mod tests {
 
     fn direct_config(origin: &str, ttl: u64) -> UiConfig {
         serde_json::from_value(serde_json::json!({
-            "enabled": true, "ecmwf_api_key": {"provider_name": "ECMWF API Provider"},
+            "enabled": true,
             "browser_session": { "public_origin": origin, "backend": {"type": "memory"},
                 "session_ttl_seconds": ttl
             }
@@ -622,26 +683,118 @@ mod tests {
         assert_eq!(parsed.session_ttl_seconds, 300);
     }
 
+    fn provider(json: serde_json::Value) -> crate::providers::ProviderConfig {
+        serde_json::from_value(json).unwrap()
+    }
+
+    fn plain(name: &str, label: Option<&str>) -> crate::providers::ProviderConfig {
+        let mut json =
+            serde_json::json!({"type": "plain", "name": name, "realm": "r", "users": []});
+        if let Some(label) = label {
+            json["browser"] = serde_json::json!({"label": label});
+        }
+        provider(json)
+    }
+
     #[test]
-    fn browser_provider_requires_unique_exact_name_and_ecmwf_type() {
-        use crate::providers::ProviderConfig;
+    fn browser_methods_follow_provider_order_and_require_unique_labels() {
         let ui = direct_config("https://login.example.test", 300);
-        let ecmwf = || {
-            serde_json::from_value::<ProviderConfig>(serde_json::json!({
-            "type": "ecmwf-api", "name": "ECMWF API Provider", "realm": "ecmwf", "uri": "https://api.ecmwf.int/v1"
-        })).unwrap()
-        };
-        let plain = || {
-            serde_json::from_value::<ProviderConfig>(serde_json::json!({
-                "type": "plain", "name": "ECMWF API Provider", "realm": "ecmwf", "users": []
-            }))
-            .unwrap()
-        };
-        assert!(ui.validate_browser_login(&[]).is_err());
-        assert!(ui.validate_browser_login(&[plain()]).is_err());
-        assert!(ui.validate_browser_login(&[ecmwf(), ecmwf()]).is_err());
-        assert!(ui.validate_browser_login(&[ecmwf(), plain()]).is_err());
-        assert!(ui.validate_browser_login(&[ecmwf()]).unwrap().is_some());
+        let api = provider(serde_json::json!({
+            "type": "ecmwf-api", "name": "api", "realm": "ecmwf",
+            "uri": "https://api.example.test/v1", "browser": {"label": "  API key  "}
+        }));
+        let api_only = provider(serde_json::json!({
+            "type": "ecmwf-api", "name": "api-only", "realm": "ecmwf", "uri": "https://api.example.test/v1"
+        }));
+        let providers = [
+            plain("a", Some("Staff")),
+            api_only,
+            api,
+            plain("b", Some("Guests")),
+        ];
+        let methods = ui.validate_browser_login(&providers).unwrap();
+        let summary: Vec<_> = methods.iter().map(|m| (m.label, m.kind())).collect();
+        assert_eq!(
+            summary,
+            [
+                ("Staff", BrowserMethodKind::Basic),
+                ("API key", BrowserMethodKind::ApiKey),
+                ("Guests", BrowserMethodKind::Basic),
+            ]
+        );
+        assert!(
+            ui.validate_browser_login(&[plain("a", Some("Staff")), plain("b", Some("sTAFF"))])
+                .unwrap_err()
+                .contains("unique")
+        );
+        let many: Vec<_> = (0..=MAX_BROWSER_METHODS)
+            .map(|n| plain(&n.to_string(), Some(&format!("Method {n}"))))
+            .collect();
+        assert!(
+            ui.validate_browser_login(&many[..MAX_BROWSER_METHODS])
+                .is_ok()
+        );
+        assert!(ui.validate_browser_login(&many).is_err());
+        let mut no_session = ui.clone();
+        no_session.browser_session = None;
+        assert!(
+            no_session
+                .validate_browser_login(&[plain("a", None)])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            no_session
+                .validate_browser_login(&[plain("a", Some("Staff"))])
+                .unwrap_err()
+                .contains("browser_session")
+        );
+    }
+
+    #[test]
+    fn browser_labels_and_unsupported_provider_types_are_rejected() {
+        for (label, valid) in [
+            ("Staff".to_owned(), true),
+            ("名".repeat(64), true),
+            ("名".repeat(65), false),
+            ("x".repeat(64), true),
+            (format!("  {}  ", "x".repeat(64)), true),
+            ("x".repeat(65), false),
+            ("   ".to_owned(), false),
+            ("Line\nbreak".to_owned(), false),
+        ] {
+            let json = serde_json::json!({"type": "plain", "name": "p", "realm": "r", "users": [], "browser": {"label": label}});
+            assert_eq!(
+                serde_json::from_value::<crate::providers::ProviderConfig>(json).is_ok(),
+                valid,
+                "{label:?}"
+            );
+        }
+        let extra = serde_json::json!({"type": "plain", "name": "p", "realm": "r", "users": [], "browser": {"label": "Staff", "url": "/x"}});
+        assert!(serde_json::from_value::<crate::providers::ProviderConfig>(extra).is_err());
+        let jwt = serde_json::json!({
+            "type": "jwt", "name": "jwt", "cert_uri": "https://idp.example.test/certs",
+            "realm": "r", "iam_realm": "r", "browser": {"label": "SSO"}
+        });
+        let error = serde_json::from_value::<crate::providers::ProviderConfig>(jwt.clone())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("plain and ecmwf-api"), "{error}");
+        let mut jwt_without = jwt;
+        jwt_without.as_object_mut().unwrap().remove("browser");
+        assert!(
+            serde_json::from_value::<crate::providers::ProviderConfig>(jwt_without.clone()).is_ok()
+        );
+        let mut jwt_null = jwt_without;
+        jwt_null["browser"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<crate::providers::ProviderConfig>(jwt_null).is_ok());
+        for json in [
+            serde_json::json!({"type": "plain", "name": "p", "realm": "r", "users": [], "browser": null}),
+            serde_json::json!({"type": "ecmwf-api", "name": "k", "realm": "r", "uri": "https://api.example.test/v1", "browser": null}),
+        ] {
+            let config = serde_json::from_value::<crate::providers::ProviderConfig>(json).unwrap();
+            assert!(browser_methods(std::slice::from_ref(&config)).is_empty());
+        }
     }
 
     #[test]
@@ -652,7 +805,7 @@ mod tests {
         assert!(config.branding.logo_url.is_none());
         assert!(config.branding.title.is_none());
         assert!(config.branding.description.is_none());
-        assert!(config.sign_in_actions.is_empty());
+        assert!(config.sso.is_empty());
     }
 
     #[test]
@@ -673,7 +826,7 @@ mod tests {
     fn custom_branding_round_trips_as_plain_strings() {
         let json = serde_json::json!({
             "enabled": true,
-            "sign_in_actions": [],
+            "sso": [],
             "branding": {
                 "application_name": "Aviso",
                 "logo_url": "https://aviso.example.org/assets/logo.png",
@@ -744,7 +897,7 @@ mod tests {
             "BrandingConfig",
             "UiUrl",
             "BrowserSignInAction",
-            "DirectLoginConfig",
+            "ProviderBrowserConfig",
             "BrowserSessionConfig",
             "BrowserBackendConfig",
         ] {

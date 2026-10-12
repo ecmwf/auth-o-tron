@@ -9,10 +9,12 @@
   const content = document.getElementById("login-dialog-content");
   const status = document.getElementById("login-dialog-status");
   const close = dialog.querySelector(".login-dialog-close");
-  const endpoints = new Map([
-    ["basic", "/login/basic"],
-    ["api-key", "/login/ecmwf-api-key"],
-  ]);
+  // Indices 0-15 mirror MAX_BROWSER_METHODS (16) in src/config/ui.rs; the server
+  // still answers 404 for indices without a configured method.
+  // Valid: /login/method/0, /login/method/15. Invalid: /login/method/01, /login/method/16, /login/method/x.
+  const methodPath = /^\/login\/method\/(?:[0-9]|1[0-5])$/;
+  // Credential fields must form exactly one known set; hidden fields are optional extras.
+  const credentialSets = [["username", "password"], ["api_key"]];
   const failure = "Sign-in could not be completed. Please try again.";
   let endpoint = null;
   let opener = null;
@@ -57,7 +59,7 @@
     button.focus();
   }
 
-  // Accept /login/basic, never /login/basic?return_to=... or another origin.
+  // Accept /login/method/0, never /login/method/0?return_to=... or another origin.
   function fixedUrl(value, path) {
     const url = new URL(value, window.location.origin);
     return url.origin === window.location.origin && url.pathname === path &&
@@ -74,13 +76,18 @@
     const title = card?.querySelector("h2#login-card-title");
     if (!source || !title || source.getAttribute("method")?.toLowerCase() !== "post" ||
         !fixedUrl(source.getAttribute("action"), selected)) return false;
-    const names = selected === "/login/basic" ? ["csrf", "username", "password"] : ["csrf", "api_key"];
+    const inputs = [...source.querySelectorAll("input")];
+    const credentials = inputs.map((input) => input.name)
+      .filter((name) => !["csrf", "oauth_transaction"].includes(name));
+    const expected = credentialSets.find((set) => set.length === credentials.length &&
+      set.every((name) => credentials.includes(name)));
+    if (!expected) return false;
+    const names = ["csrf", ...expected];
     const transaction = source.querySelector('input[name="oauth_transaction"]');
     if (transaction) {
       if (transaction.type !== "hidden" || !/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(transaction.value)) return false;
       names.push("oauth_transaction");
     }
-    const inputs = [...source.querySelectorAll("input")];
     if (inputs.length !== names.length || names.some((name) =>
       inputs.filter((input) => input.name === name).length !== 1)) return false;
     const csrf = inputs.find((input) => input.name === "csrf");
@@ -210,8 +217,9 @@
   }
 
   document.querySelectorAll("a[data-login-dialog]").forEach((link) => {
-    const selected = endpoints.get(link.dataset.loginDialog);
-    if (!selected || !fixedUrl(link.href, selected)) return;
+    if (link.dataset.loginDialog !== "method") return;
+    const selected = new URL(link.href, window.location.origin).pathname;
+    if (!methodPath.test(selected) || !fixedUrl(link.href, selected)) return;
     link.addEventListener("click", (event) => {
       if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
       event.preventDefault();

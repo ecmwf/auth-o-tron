@@ -31,10 +31,12 @@ By default, this endpoint is available on port `9090`. The format follows the Pr
 Browser metrics reuse the existing per-process registry and `metrics.enabled`
 endpoint behavior. They do not connect to Valkey for exporting metrics or change
 API/CLI `auth_requests_total` semantics. The unlabeled in-flight gauge is exposed
-at zero on idle processes, including pods with configured direct flows; no login
+at zero on idle processes, including pods with configured browser methods; no login
 is needed before an HPA scrape sees it.
 
-`flow` has exactly two values: `basic` and `ecmwf-api-key`. `outcome` has the fixed
+`flow` has exactly two values, determined by the method's provider type rather
+than its index or label: `basic` for `plain` methods and `ecmwf-api-key` for
+`ecmwf-api` methods. `outcome` has the fixed
 values `success`, `rejected`, `malformed`, `origin`, `csrf`, `limited`,
 `backend_unavailable`, `capacity`, `timeout`, `cancelled`. They describe the actual
 POST result: successful verification followed by a failed session write is a

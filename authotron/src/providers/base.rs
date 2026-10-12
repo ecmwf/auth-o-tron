@@ -29,7 +29,7 @@ use tracing::debug;
 
 /// Configuration options for each authentication provider.
 #[derive(Deserialize, Serialize, JsonSchema, Debug)]
-#[serde(tag = "type")]
+#[serde(tag = "type", remote = "Self")]
 pub enum ProviderConfig {
     #[serde(rename = "ecmwf-api")]
     EcmwfApi(EcmwfApiProviderConfig),
@@ -43,6 +43,39 @@ pub enum ProviderConfig {
     OpenIDOffline(OpenIDOfflineProviderConfig),
     #[serde(rename = "plain")]
     Plain(PlainAuthConfig),
+}
+
+const BROWSER_PROVIDER_TYPES: [&str; 2] = ["plain", "ecmwf-api"];
+
+impl<'de> Deserialize<'de> for ProviderConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Provider structs ignore unknown fields, so an unsupported `browser` block
+        // is rejected here instead of being silently dropped.
+        // Valid: `{type: plain, name: staff, realm: r, users: [], browser: {label: Staff}}`.
+        // Invalid: `{type: jwt, name: sso, ..., browser: {label: Staff}}`.
+        // `browser: null` is treated as absent for every provider type.
+        let value = Value::deserialize(deserializer)?;
+        if let Some(object) = value.as_object()
+            && object
+                .get("browser")
+                .is_some_and(|browser| !browser.is_null())
+            && !object
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| BROWSER_PROVIDER_TYPES.contains(&kind))
+        {
+            return Err(serde::de::Error::custom(
+                "provider browser block is supported only for plain and ecmwf-api providers",
+            ));
+        }
+        ProviderConfig::deserialize(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Serialize for ProviderConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        ProviderConfig::serialize(self, serializer)
+    }
 }
 
 /// An authentication provider must be able to return a User or an error.

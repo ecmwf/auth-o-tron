@@ -325,7 +325,7 @@ async fn posting_to_the_preview_cannot_start_authentication() {
 async fn configured_sign_in_action_is_escaped_and_ignores_request_destinations() {
     let (app, _) = startup::build_app(Arc::new(config(json!({
         "enabled": true,
-        "sign_in_actions": [{
+        "sso": [{
             "label": "Continue <with> SSO",
             "start_url": "https://app.example.org/oauth2/start?rd=%2Faccount&mode=demo"
         }]
@@ -360,21 +360,23 @@ fn direct_config() -> ConfigV2 {
     let mut config = config(json!({
         "enabled": true,
         "branding": {"application_name": "Aviso", "logo_url": "/static/aviso-logo.png"},
-        "basic": {"provider_name": "local"},
-        "ecmwf_api_key": {"provider_name": "key-provider"},
         "browser_session": {"public_origin": "https://login.example.test", "backend": {"type": "memory"}},
-        "sign_in_actions": [
+        "sso": [
             {"label": "Continue with SSO", "start_url": "https://app.example.test/sso/start"},
-            {"label": "Configured basic link", "start_url": "/login/basic"}
+            {"label": "Configured method link", "start_url": "/login/method/0"}
         ]
     }));
-    config.providers.push(
-        serde_json::from_value(json!({
-            "type": "ecmwf-api", "name": "key-provider", "realm": "ecmwf",
-            "uri": "http://127.0.0.1:9"
-        }))
-        .unwrap(),
-    );
+    config.providers = [
+        json!({"type": "plain", "name": "local", "realm": "aviso",
+            "users": [{"username": "alice", "password": "example-password"}],
+            "browser": {"label": "Username & <password>"}}),
+        json!({"type": "ecmwf-api", "name": "api-only", "realm": "ecmwf", "uri": "http://127.0.0.1:9"}),
+        json!({"type": "ecmwf-api", "name": "key-provider", "realm": "ecmwf",
+            "uri": "http://127.0.0.1:9", "browser": {"label": "ECMWF API key"}}),
+    ]
+    .into_iter()
+    .map(|provider| serde_json::from_value(provider).unwrap())
+    .collect();
     config
 }
 
@@ -392,13 +394,18 @@ async fn direct_chooser_marks_only_direct_links_and_does_not_create_form_transac
     );
     let html = body(response).await;
     assert!(html.contains("<script src=\"/static/login.js\" defer></script>"));
-    assert!(html.contains("href=\"/login/basic\" data-login-dialog=\"basic\""));
-    assert!(html.contains("href=\"/login/ecmwf-api-key\" data-login-dialog=\"api-key\""));
+    let first = "<a class=\"login-action\" href=\"/login/method/0\" data-login-dialog=\"method\">Username &amp; &lt;password&gt;</a>";
+    let second = "<a class=\"login-action\" href=\"/login/method/1\" data-login-dialog=\"method\">ECMWF API key</a>";
+    let sso = "<a class=\"login-action\" href=\"https://app.example.test/sso/start\">Continue with SSO</a>";
+    let configured =
+        "<a class=\"login-action\" href=\"/login/method/0\">Configured method link</a>";
+    let positions: Vec<usize> = [first, second, sso, configured]
+        .iter()
+        .map(|link| html.find(link).unwrap_or_else(|| panic!("missing {link}")))
+        .collect();
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     assert_eq!(html.matches("data-login-dialog=").count(), 2);
-    assert!(
-        html.contains("<a class=\"login-action\" href=\"/login/basic\">Configured basic link</a>")
-    );
-    assert!(html.contains("href=\"https://app.example.test/sso/start\">Continue with SSO</a>"));
+    assert!(!html.contains("/login/method/2"));
     assert!(html.contains("<dialog id=\"login-dialog\""));
     assert!(html.contains("aria-labelledby=\"login-dialog-title\""));
     assert!(html.contains("aria-live=\"polite\""));
@@ -424,8 +431,8 @@ async fn direct_chooser_marks_only_direct_links_and_does_not_create_form_transac
 async fn standalone_forms_keep_native_post_fallback_and_no_dialog_script() {
     let (app, _) = startup::build_app(Arc::new(direct_config())).await.unwrap();
     for (path, fields) in [
-        ("/login/basic", vec!["username", "password"]),
-        ("/login/ecmwf-api-key", vec!["api_key"]),
+        ("/login/method/0", vec!["username", "password"]),
+        ("/login/method/1", vec!["api_key"]),
     ] {
         let response = get(app.clone(), path).await;
         assert_eq!(response.status(), StatusCode::OK);

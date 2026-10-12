@@ -57,7 +57,8 @@ async fn login(State(state): State<AppState>, headers: axum::http::HeaderMap) ->
         Ok(transaction) => transaction.is_some(),
         Err(status) => return super::oauth::local(status),
     };
-    let session = if state.config.ui.has_direct_login() {
+    let direct_login = !state.browser.methods().is_empty();
+    let session = if direct_login {
         match super::browser_login::current_session(&state, &headers).await {
             Ok(session) => session,
             Err(error) => return super::browser_login::unavailable(error),
@@ -65,24 +66,30 @@ async fn login(State(state): State<AppState>, headers: axum::http::HeaderMap) ->
     } else {
         None
     };
-    if state.config.ui.has_direct_login()
-        && !(state.config.ui.basic.is_some() && state.config.ui.ecmwf_api_key.is_some())
-        && state.config.ui.sign_in_actions.is_empty()
+    if state.browser.methods().len() == 1
+        && state.config.ui.sso.is_empty()
         && session.is_some()
         && !oauth_pending
     {
         return secure_response(Redirect::to("/login/account").into_response(), true);
     }
-    let mut config = if state.config.ui.has_direct_login() {
+    let mut config = if direct_login {
         super::browser_login::private_ui(&state)
     } else {
         state.config.ui.clone()
     };
     if oauth_pending {
-        config.sign_in_actions.clear();
+        config.sso.clear();
     }
-    let mut response = secure_response(Html(render_login(&config)).into_response(), false);
-    if state.config.ui.has_direct_login() {
+    let methods: Vec<(usize, &str)> = state
+        .browser
+        .methods()
+        .iter()
+        .map(|method| (method.flow.method, method.label.as_str()))
+        .collect();
+    let mut response =
+        secure_response(Html(render_login(&config, &methods)).into_response(), false);
+    if direct_login {
         response.headers_mut().insert(
             header::CONTENT_SECURITY_POLICY,
             DIALOG_POLICY.parse().expect("static dialog policy"),
@@ -153,8 +160,10 @@ async fn aviso_logo() -> Response {
     response
 }
 
-fn render_login(config: &UiConfig) -> String {
-    let available = !config.sign_in_actions.is_empty() || config.has_direct_login();
+/// `methods` holds `(index, label)` pairs in chooser order; labels are escaped.
+fn render_login(config: &UiConfig, methods: &[(usize, &str)]) -> String {
+    let direct_login = !methods.is_empty();
+    let available = !config.sso.is_empty() || direct_login;
     render_page_with_dialog(
         config,
         html! {
@@ -185,19 +194,16 @@ fn render_login(config: &UiConfig) -> String {
                 "Use direct identity verification or a configured browser sign-in flow."
                 }
                 div class="login-actions" {
-                    @if config.basic.is_some() {
-                        a class="login-action" href="/login/basic" data-login-dialog="basic" { "Username and password" }
+                    @for (index, label) in methods {
+                        a class="login-action" href=(super::browser_login::method_path(*index)) data-login-dialog="method" { (label) }
                     }
-                    @if config.ecmwf_api_key.is_some() {
-                        a class="login-action" href="/login/ecmwf-api-key" data-login-dialog="api-key" { "ECMWF API key" }
-                    }
-                    @for action in &config.sign_in_actions {
+                    @for action in &config.sso {
                         a class="login-action" href=(action.start_url.as_str()) { (&action.label) }
                     }
                 }
             }
         },
-        config.has_direct_login(),
+        direct_login,
     )
 }
 

@@ -55,19 +55,27 @@ services: []
 #[tokio::test]
 async fn oauth_fails_closed_before_browser_initialization() {
     let mut config = base_config(0, false, 0);
-    config.ui = serde_json::from_value(serde_json::json!({
-        "enabled": true, "basic": {"provider_name": "missing"}
-    }))
-    .unwrap();
+    config.ui = serde_json::from_value(serde_json::json!({"enabled": true})).unwrap();
+    config.providers.push(
+        serde_json::from_value(serde_json::json!({
+            "type": "plain", "name": "browser", "realm": "local", "users": [],
+            "browser": {"label": "Password"}
+        }))
+        .unwrap(),
+    );
     config.oauth.enabled = true;
     let error = startup::build_app(Arc::new(config)).await.err().unwrap();
     assert!(error.to_string().contains("oauth.issuer is required"));
 
     let mut config = base_config(0, false, 0);
-    config.ui = serde_json::from_value(serde_json::json!({
-        "enabled": true, "basic": {"provider_name": "missing"}
-    }))
-    .unwrap();
+    config.ui = serde_json::from_value(serde_json::json!({"enabled": true})).unwrap();
+    config.providers.push(
+        serde_json::from_value(serde_json::json!({
+            "type": "plain", "name": "browser", "realm": "local", "users": [],
+            "browser": {"label": "Password"}
+        }))
+        .unwrap(),
+    );
     config.oauth.enabled = true;
     config.oauth.issuer = Some("https://login.example.org".into());
     let error = startup::build_app(Arc::new(config)).await.err().unwrap();

@@ -34,6 +34,8 @@ providers:
     name: ECMWF API Provider
     realm: ecmwf
     uri: https://api.ecmwf.int/v1
+    browser:
+      label: ECMWF API key
 augmenters:
   - type: plain
     name: MCP access
@@ -44,8 +46,6 @@ ui:
   enabled: true
   branding:
     application_name: MCP sign-in
-  ecmwf_api_key:
-    provider_name: ECMWF API Provider
   browser_session:
     public_origin: https://auth.example.org
     backend:
@@ -74,9 +74,11 @@ oauth:
           required_roles: [reader]
 ```
 
-For Basic, configure your existing selected Basic-capable provider and add
-`ui.basic: {provider_name: YOUR_PROVIDER_NAME}`. Both direct methods may coexist;
-submitted fields cannot select another provider or realm. OAuth uses fresh verification
+OAuth login uses the same browser methods as `/login`: every `plain` or
+`ecmwf-api` provider with a `browser: {label: ...}` block, and at least one is
+required when OAuth is enabled. Providers without `browser` stay API-only. See
+[Choosing browser methods](ui.md#choosing-browser-methods). Several methods may
+coexist; submitted fields cannot select another provider or realm. OAuth uses fresh verification
 and **strict** augmentation, never a cached best-effort browser session.
 
 For shared replicas, replace the browser backend with:
@@ -102,7 +104,7 @@ automatic fallback are not implemented. Backend durability depends on its config
 | `GET /.well-known/oauth-authorization-server` | RFC 8414 metadata with literal issuer, authorization/token endpoints, JWKS URI, code grant, public-client `none` authentication and S256 |
 | `GET /oauth/jwks` | Public RSA JWKs only: `kty`, `alg`, `use`, `kid`, `n`, `e` |
 | `GET /oauth/authorize` | Strict bounded authorization query; reserves a client-partition slot, resumes an exact matching active request, or shows a 409 conflict for a different request |
-| `GET /login/basic`, `/login/ecmwf-api-key` | Existing modal/native forms capture the current OAuth transaction ID in a server-rendered hidden field |
+| `GET /login/method/{n}` | Browser method modal/native forms capture the current OAuth transaction ID in a server-rendered hidden field |
 | `POST` to the selected login form | Single trusted Origin, one-use flow CSRF, exact hidden-ID/cookie match and pending lookup before fresh strict verification; promotes authenticated state and redirects to fixed `/oauth/continue` |
 | `GET /oauth/continue` | Always a local consent page, not an automatic callback redirect; refresh rotates the challenge |
 | `POST /oauth/consent` | Explicit approve/deny with Origin, transaction binding and consent CSRF; atomic code issuance or denial, then 303 to the registered callback |

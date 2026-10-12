@@ -180,6 +180,22 @@
         }
       ]
     },
+    "ProviderBrowserConfig": {
+      "description": "Offers a `plain` or `ecmwf-api` provider as a direct browser sign-in method.",
+      "type": "object",
+      "properties": {
+        "label": {
+          "description": "Chooser button text, trimmed, 1-64 characters, no control characters.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "label"
+      ]
+    },
     "EcmwfApiProviderConfig": {
       "description": "The config needed for the ECMWF API provider (who-am-i endpoint).",
       "type": "object",
@@ -192,6 +208,17 @@
         },
         "name": {
           "type": "string"
+        },
+        "browser": {
+          "description": "Offers this provider as a direct browser sign-in method.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderBrowserConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -354,6 +381,17 @@
           "items": {
             "$ref": "#/$defs/PlainUserEntry"
           }
+        },
+        "browser": {
+          "description": "Offers this provider as a direct browser sign-in method.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderBrowserConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -705,7 +743,7 @@
       }
     },
     "UiConfig": {
-      "description": "Controls branding, trusted browser sign-in links, and optional direct login.",
+      "description": "Controls branding, trusted SSO links, and the shared direct-login session.\n\nDirect browser login methods are declared by `browser` blocks on `plain`\nand `ecmwf-api` providers.",
       "type": "object",
       "properties": {
         "enabled": {
@@ -721,32 +759,12 @@
             "description": null
           }
         },
-        "sign_in_actions": {
+        "sso": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/BrowserSignInAction"
           },
           "default": []
-        },
-        "ecmwf_api_key": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DirectLoginConfig"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "basic": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DirectLoginConfig"
-            },
-            {
-              "type": "null"
-            }
-          ]
         },
         "browser_session": {
           "anyOf": [
@@ -758,7 +776,8 @@
             }
           ]
         }
-      }
+      },
+      "additionalProperties": false
     },
     "BrandingConfig": {
       "description": "Application-owned branding; all text is rendered as escaped plain text.",
@@ -814,19 +833,6 @@
       "required": [
         "label",
         "start_url"
-      ]
-    },
-    "DirectLoginConfig": {
-      "description": "Direct browser login selects one configured provider, never a submitted URL.",
-      "type": "object",
-      "properties": {
-        "provider_name": {
-          "type": "string"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "provider_name"
       ]
     },
     "BrowserSessionConfig": {
@@ -1305,7 +1311,7 @@
               "title": null,
               "description": null
             },
-            "sign_in_actions": []
+            "sso": []
           }
         },
         "oauth": {

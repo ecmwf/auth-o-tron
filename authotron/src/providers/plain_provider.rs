@@ -24,6 +24,9 @@ pub struct PlainAuthConfig {
     pub realm: String,
     /// A list of username/password pairs.
     pub users: Vec<PlainUserEntry>,
+    /// Offers this provider as a direct browser sign-in method.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<crate::config::ui::ProviderBrowserConfig>,
 }
 
 /// Represents a single user entry (username + password).
@@ -140,6 +143,7 @@ mod tests {
 
     fn create_test_config() -> PlainAuthConfig {
         PlainAuthConfig {
+            browser: None,
             name: "TestPlain".to_string(),
             realm: "test".to_string(),
             users: vec![
@@ -169,6 +173,7 @@ mod tests {
 
     fn create_special_chars_config() -> PlainAuthConfig {
         PlainAuthConfig {
+            browser: None,
             name: "TestPlain".to_string(),
             realm: "test".to_string(),
             users: vec![PlainUserEntry {
@@ -181,6 +186,7 @@ mod tests {
 
     fn create_unicode_config() -> PlainAuthConfig {
         PlainAuthConfig {
+            browser: None,
             name: "TestPlain".to_string(),
             realm: "test".to_string(),
             users: vec![PlainUserEntry {
@@ -193,6 +199,7 @@ mod tests {
 
     fn create_empty_users_config() -> PlainAuthConfig {
         PlainAuthConfig {
+            browser: None,
             name: "TestPlain".to_string(),
             realm: "test".to_string(),
             users: vec![],

@@ -37,6 +37,9 @@ pub struct EcmwfApiProviderConfig {
     pub uri: String,
     pub realm: String,
     pub name: String,
+    /// Offers this provider as a direct browser sign-in method.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser: Option<crate::config::ui::ProviderBrowserConfig>,
 }
 
 /// A provider that calls the ECMWF who-am-i endpoint to validate a token.
@@ -238,6 +241,7 @@ mod tests {
             uri,
             realm: REALM.to_string(),
             name: "mock-ecmwf".to_string(),
+            browser: None,
         })
     }
 

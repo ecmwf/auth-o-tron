@@ -32,7 +32,7 @@ pub fn create_app_router(state: AppState) -> Router {
     Router::new()
         .merge(homepage::routes())
         .merge(login::routes(&state.config.ui))
-        .merge(browser_login::routes(&state.config.ui))
+        .merge(browser_login::routes(&state))
         .merge(oauth::routes(state.oauth.is_some()))
         .merge(auth::routes())
         .merge(whoami::routes())

@@ -84,6 +84,8 @@ end
 if op == 'form' then
   local ttl, cap, limit, window = tonumber(ARGV[5]), tonumber(ARGV[6]), tonumber(ARGV[7]), tonumber(ARGV[8])
   if not ttl or ttl <= 0 or not cap or cap <= 0 or not limit or limit <= 0 or not window or window <= 0 then return redis.error_reply('invalid arguments') end
+  -- Flow tag is `<kind>:<index>`: valid `basic:0`, `key:15`; invalid `Basic:0`, `basic:100`.
+  if string.len(ARGV[4]) > 8 or not string.match(ARGV[4], '^%l+:%d%d?$') then return redis.error_reply('invalid arguments') end
   prune(forms)
   if redis.call('ZCARD', forms) >= cap then return {'capacity'} end
   if not quota(prefix .. ':form-quota', limit, window) then return {'limited'} end

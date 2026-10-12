@@ -32,12 +32,24 @@ pub async fn build_app(
     crate::oauth::runtime::OAuthRuntime::validate(&config)?;
     let mut browser = crate::browser::BrowserLoginState::new(&config)?;
     let oauth = crate::oauth::runtime::OAuthRuntime::initialize(&config).await?;
-    browser
-        .initialize(config.ui.enabled && config.ui.has_direct_login())
-        .await?;
+    let direct_login = config.ui.enabled && !browser.methods().is_empty();
+    browser.initialize(direct_login).await?;
     let browser = Arc::new(browser);
-    if config.ui.enabled && config.ui.has_direct_login() {
+    if direct_login {
         browser.start_cleanup_task();
+        let methods: Vec<String> = browser
+            .methods()
+            .iter()
+            .map(|m| {
+                format!(
+                    "{}={}:{:?}",
+                    m.flow.method,
+                    m.flow.kind.provider_type(),
+                    m.label
+                )
+            })
+            .collect();
+        info!(methods = %methods.join(", "), "browser login methods");
     }
     let store = create_store(&config.store).await;
     let auth_config = config.auth.clone();

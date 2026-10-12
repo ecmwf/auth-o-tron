@@ -43,6 +43,7 @@ impl VerifiedOAuthIdentity {
 /// Callers must enforce Origin/CSRF and the bound OAuth transaction before invoking this.
 /// Uses fresh credentials, never existing sessions; no cookie, consent, code or grant is created.
 pub async fn verify_identity(
+    method: usize,
     credentials: BrowserCredentials<'_>,
     browser: &BrowserLoginState,
     auth: &Auth,
@@ -51,7 +52,7 @@ pub async fn verify_identity(
     let deadline = tokio::time::Instant::now() + browser.verification_timeout();
     let result = tokio::time::timeout_at(deadline, async {
         let user = browser
-            .verify_identity_strict(credentials, auth, metrics, projection)
+            .verify_identity_strict(method, credentials, auth, metrics, projection)
             .await
             .map_err(|error| match error {
                 BrowserVerifyError::Rejected => AuthenticationError::Rejected,
@@ -184,9 +185,9 @@ mod tests {
     ) -> (BrowserLoginState, Auth, Metrics, Arc<AtomicUsize>) {
         let config: ConfigV2 = serde_json::from_value(serde_json::json!({
             "store": {"enabled": false}, "services": [], "augmenters": [],
-            "providers": [{"type": "plain", "name": "basic", "realm": "local", "users": [{"username": username, "password": PASSWORD, "roles": ["base"]}]}, {"type": "ecmwf-api", "name": "api", "realm": "local", "uri": uri}],
+            "providers": [{"type": "plain", "name": "basic", "realm": "local", "users": [{"username": username, "password": PASSWORD, "roles": ["base"]}], "browser": {"label": "Password"}}, {"type": "ecmwf-api", "name": "api", "realm": "local", "uri": uri, "browser": {"label": "API key"}}],
             "server": {"port": 0}, "jwt": {"iss": "fixture", "exp": 300, "secret": "fixture-only"}, "logging": {"level": "warn", "format": "console"},
-            "ui": {"basic": {"provider_name": "basic"}, "ecmwf_api_key": {"provider_name": "api"}, "browser_session": {"public_origin": "https://login.example.org", "backend": {"type": "memory"}, "max_inflight_logins": 1, "verification_timeout_seconds": 1}}
+            "ui": {"browser_session": {"public_origin": "https://login.example.org", "backend": {"type": "memory"}, "max_inflight_logins": 1, "verification_timeout_seconds": 1}}
         })).unwrap();
         let browser = BrowserLoginState::new(&config).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
@@ -227,19 +228,20 @@ mod tests {
             .await;
         let (browser, auth, metrics, calls) = fixture(&server.url(), "alice", true, false);
         assert_eq!(
-            verify_identity(basic("alice"), &browser, &auth, &metrics)
+            verify_identity(0, basic("alice"), &browser, &auth, &metrics)
                 .await
                 .err(),
             Some(AuthenticationError::Rejected)
         );
         let legacy = browser
-            .verify_identity(basic("alice"), &auth, &metrics)
+            .verify_identity(0, basic("alice"), &auth, &metrics)
             .await
             .unwrap();
         assert_eq!(legacy.roles, ["base", "derived"]);
         assert!(!legacy.attributes.is_empty());
         assert_eq!(
             verify_identity(
+                1,
                 BrowserCredentials::ApiKey("fixture-key"),
                 &browser,
                 &auth,
@@ -251,7 +253,12 @@ mod tests {
         );
         assert!(
             browser
-                .verify_identity(BrowserCredentials::ApiKey("fixture-key"), &auth, &metrics)
+                .verify_identity(
+                    1,
+                    BrowserCredentials::ApiKey("fixture-key"),
+                    &auth,
+                    &metrics
+                )
                 .await
                 .is_ok()
         );
@@ -273,16 +280,16 @@ mod tests {
             .create_async()
             .await;
         let (browser, auth, metrics, calls) = fixture(&server.url(), "alice", false, false);
-        for credentials in [
-            basic("alice"),
-            BrowserCredentials::ApiKey("fixture-key"),
-            BrowserCredentials::ApiKey("fixture-key"),
+        for (method, credentials) in [
+            (0, basic("alice")),
+            (1, BrowserCredentials::ApiKey("fixture-key")),
+            (1, BrowserCredentials::ApiKey("fixture-key")),
         ] {
             let before = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_millis();
-            let proof = verify_identity(credentials, &browser, &auth, &metrics)
+            let proof = verify_identity(method, credentials, &browser, &auth, &metrics)
                 .await
                 .unwrap();
             assert_eq!(proof.as_user().username, "alice");
@@ -295,6 +302,7 @@ mod tests {
         idle(&metrics);
         assert_eq!(
             verify_identity(
+                0,
                 BrowserCredentials::Basic {
                     username: "alice",
                     password: "wrong"
@@ -312,12 +320,12 @@ mod tests {
         let (browser, auth, metrics, _) = fixture(&server.url(), &name, false, false);
         assert!(
             browser
-                .verify_identity(basic(&name), &auth, &metrics)
+                .verify_identity(0, basic(&name), &auth, &metrics)
                 .await
                 .is_ok()
         );
         assert_eq!(
-            verify_identity(basic(&name), &browser, &auth, &metrics)
+            verify_identity(0, basic(&name), &browser, &auth, &metrics)
                 .await
                 .err(),
             Some(AuthenticationError::Rejected)
@@ -328,13 +336,19 @@ mod tests {
         let (browser, mut auth, metrics, calls) =
             fixture("http://127.0.0.1:1", "alice", false, true);
         assert_eq!(
-            verify_identity(basic("alice"), &browser, &auth, &metrics)
+            verify_identity(0, basic("alice"), &browser, &auth, &metrics)
                 .await
                 .err(),
             Some(AuthenticationError::Timeout)
         );
         idle(&metrics);
-        let mut pending = Box::pin(verify_identity(basic("alice"), &browser, &auth, &metrics));
+        let mut pending = Box::pin(verify_identity(
+            0,
+            basic("alice"),
+            &browser,
+            &auth,
+            &metrics,
+        ));
         tokio::select! { _ = &mut pending => panic!("stalled augmentation completed"), _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {} }
         assert!(
             metrics
@@ -343,7 +357,7 @@ mod tests {
                 .contains("authotron_browser_logins_inflight 1")
         );
         assert_eq!(
-            verify_identity(basic("alice"), &browser, &auth, &metrics)
+            verify_identity(0, basic("alice"), &browser, &auth, &metrics)
                 .await
                 .err(),
             Some(AuthenticationError::Limited)
@@ -352,7 +366,7 @@ mod tests {
         idle(&metrics);
         auth.augmenters.clear();
         assert!(
-            verify_identity(basic("alice"), &browser, &auth, &metrics)
+            verify_identity(0, basic("alice"), &browser, &auth, &metrics)
                 .await
                 .is_ok()
         );

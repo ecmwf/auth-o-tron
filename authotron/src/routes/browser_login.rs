@@ -11,15 +11,16 @@
 use super::login::{render_page, secure_response};
 use crate::{
     browser::{
-        BrowserCredentials, BrowserSession, BrowserVerifyError, DISPLAY_ATTRIBUTES, LoginFlow,
+        BrowserCredentials, BrowserMethod, BrowserSession, BrowserVerifyError, DISPLAY_ATTRIBUTES,
+        LoginFlow,
     },
-    config::UiConfig,
+    config::{BrowserMethodKind, UiConfig},
     metrics::{BrowserAttemptGuard, BrowserOutcome},
     state::AppState,
 };
 use axum::{
     Form, Router,
-    extract::{DefaultBodyLimit, State, rejection::FormRejection},
+    extract::{DefaultBodyLimit, Path, State, rejection::FormRejection},
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
     routing::get,
@@ -63,20 +64,37 @@ fn private_response(response: Response) -> Response {
     response
 }
 
-pub fn routes(config: &UiConfig) -> Router<AppState> {
-    if !config.enabled || !config.has_direct_login() {
+pub fn routes(state: &AppState) -> Router<AppState> {
+    if !state.config.ui.enabled || state.browser.methods().is_empty() {
         return Router::new();
     }
-    let mut router = Router::new();
-    if config.ecmwf_api_key.is_some() {
-        router = router.route("/login/ecmwf-api-key", get(key_form).post(submit_key));
-    }
-    if config.basic.is_some() {
-        router = router.route("/login/basic", get(basic_form).post(submit_basic));
-    }
-    router
+    Router::new()
+        .route("/login/method/{index}", get(method_form).post(submit))
         .route("/login/account", get(account))
         .layer(DefaultBodyLimit::max(8 * 1024))
+}
+
+pub(super) fn method_path(index: usize) -> String {
+    format!("/login/method/{index}")
+}
+
+/// Resolves a `/login/method/{index}` segment to a configured method.
+/// Valid: `0`, `7`, `15`. Invalid: `01`, `+1`, `-0`, `1a`, `016`, or an index
+/// with no configured method.
+fn resolve_method<'a>(state: &'a AppState, raw: &str) -> Option<&'a BrowserMethod> {
+    let canonical = raw == "0"
+        || (!raw.is_empty()
+            && raw.len() <= 2
+            && !raw.starts_with('0')
+            && raw.bytes().all(|c| c.is_ascii_digit()));
+    if !canonical {
+        return None;
+    }
+    state.browser.method(raw.parse().ok()?)
+}
+
+fn not_found() -> Response {
+    private_response(StatusCode::NOT_FOUND.into_response())
 }
 
 /// Valid: `__Host-authotron_session=opaque`. Invalid: duplicate session cookies.
@@ -140,10 +158,11 @@ pub(super) fn unavailable(error: BrowserVerifyError) -> Response {
 async fn form_response(
     state: &AppState,
     headers: &HeaderMap,
-    flow: LoginFlow,
+    method: &BrowserMethod,
     status: StatusCode,
     error: bool,
 ) -> Response {
+    let flow = method.flow;
     let oauth_transaction = match super::oauth::form_transaction(state, headers).await {
         Ok(transaction) => transaction,
         Err(status) => return super::oauth::local(status),
@@ -155,19 +174,21 @@ async fn form_response(
         Ok(form) => form,
         Err(error) => return unavailable(error),
     };
+    let api_key = flow.kind == BrowserMethodKind::ApiKey;
+    let label = method.label.as_str();
     let page = private_page(
         state,
         html! {
-            h2 id="login-card-title" { @if flow == LoginFlow::ApiKey { "ECMWF API key" } @else { "Username and password" } }
+            h2 id="login-card-title" { (label) }
             @if error { p class="login-card-message" role="alert" { (flow_error(flow)) } }
             p class="login-card-detail" {
                 @if oauth_transaction.is_some() { "Verify your identity to review this authorization request." }
                 @else { "Verify your identity for a short-lived Auth-O-Tron browser session." }
             }
-            form class="key-form" method="post" action=(if flow == LoginFlow::ApiKey { "/login/ecmwf-api-key" } else { "/login/basic" }) {
+            form class="key-form" method="post" action=(method_path(flow.method)) {
                 input type="hidden" name="csrf" value=(csrf);
                 @if let Some(id) = &oauth_transaction { input type="hidden" name="oauth_transaction" value=(id); }
-                @if flow == LoginFlow::ApiKey {
+                @if api_key {
                     label for="api-key" { "ECMWF API key" }
                     input class="login-input" id="api-key" type="password" name="api_key" autocomplete="off" maxlength="512" required;
                 } @else {
@@ -195,47 +216,44 @@ async fn form_response(
 }
 
 fn flow_error(flow: LoginFlow) -> &'static str {
-    if flow == LoginFlow::ApiKey {
+    if flow.kind == BrowserMethodKind::ApiKey {
         ERROR
     } else {
         "Credentials invalid or could not be verified"
     }
 }
 
-async fn key_form(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn method_form(
+    State(state): State<AppState>,
+    Path(index): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(method) = resolve_method(&state, &index) else {
+        return not_found();
+    };
     if let Some(response) = super::oauth::login_entry_recovery(&state, &headers).await {
         return response;
     }
-    form_response(&state, &headers, LoginFlow::ApiKey, StatusCode::OK, false).await
+    form_response(&state, &headers, method, StatusCode::OK, false).await
 }
 
-async fn basic_form(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Some(response) = super::oauth::login_entry_recovery(&state, &headers).await {
-        return response;
-    }
-    form_response(&state, &headers, LoginFlow::Basic, StatusCode::OK, false).await
-}
-
-// `csrf` is the opaque token from `BrowserLoginState::form_with_nonce`.
-// Valid: api_key=public-fixture&csrf=<64hex>.<64hex>. Invalid: duplicate csrf or unknown field.
+// `csrf` is the opaque token from `BrowserLoginState::form_with_nonce`; the
+// credential fields must match the method type.
+// Valid (ecmwf-api): api_key=public-fixture&csrf=<64hex>.<64hex>.
+// Valid (plain): username=alice&password=public-fixture&csrf=<64hex>.<64hex>.
+// Invalid: duplicate csrf, an unknown field such as roles, or api_key posted
+// to a plain method.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct KeyForm {
+struct MethodForm {
     #[serde(default)]
     oauth_transaction: Option<String>,
-    api_key: String,
-    csrf: String,
-}
-
-// Valid: username=alice&password=public-fixture&csrf=<64hex>.<64hex>.
-// Invalid: duplicate csrf or unknown field such as roles.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BasicForm {
     #[serde(default)]
-    oauth_transaction: Option<String>,
-    username: String,
-    password: String,
+    api_key: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
     csrf: String,
 }
 
@@ -246,52 +264,49 @@ struct Submission {
     secret: String,
 }
 
-async fn submit_key(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    payload: Result<Form<KeyForm>, FormRejection>,
-) -> Response {
-    submit(
-        state,
-        headers,
-        payload.map(|Form(p)| Submission {
-            oauth_transaction: p.oauth_transaction,
-            csrf: p.csrf,
-            username: String::new(),
-            secret: p.api_key,
-        }),
-        LoginFlow::ApiKey,
-    )
-    .await
+impl MethodForm {
+    fn submission(self, kind: BrowserMethodKind) -> Option<Submission> {
+        let (username, secret) = match (kind, self.api_key, self.username, self.password) {
+            (BrowserMethodKind::ApiKey, Some(key), None, None) => (String::new(), key),
+            (BrowserMethodKind::Basic, None, Some(username), Some(password)) => {
+                (username, password)
+            }
+            _ => return None,
+        };
+        Some(Submission {
+            oauth_transaction: self.oauth_transaction,
+            csrf: self.csrf,
+            username,
+            secret,
+        })
+    }
 }
 
-async fn submit_basic(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    payload: Result<Form<BasicForm>, FormRejection>,
-) -> Response {
-    submit(
-        state,
-        headers,
-        payload.map(|Form(p)| Submission {
-            oauth_transaction: p.oauth_transaction,
-            csrf: p.csrf,
-            username: p.username,
-            secret: p.password,
-        }),
-        LoginFlow::Basic,
-    )
-    .await
+/// Body errors are reported without the extractor diagnostic, which can echo values.
+enum PayloadError {
+    TooLarge,
+    Malformed,
 }
 
 async fn submit(
-    state: AppState,
+    State(state): State<AppState>,
+    Path(index): Path<String>,
     headers: HeaderMap,
-    payload: Result<Submission, FormRejection>,
-    flow: LoginFlow,
+    payload: Result<Form<MethodForm>, FormRejection>,
 ) -> Response {
+    let Some(method) = resolve_method(&state, &index) else {
+        return not_found();
+    };
+    let flow = method.flow;
+    let payload = match payload {
+        Ok(Form(form)) => form.submission(flow.kind).ok_or(PayloadError::Malformed),
+        Err(error) if error.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            Err(PayloadError::TooLarge)
+        }
+        Err(_) => Err(PayloadError::Malformed),
+    };
     let mut attempt = state.metrics.browser_attempt_guard(flow);
-    let response = submit_inner(state, headers, payload, flow, &mut attempt).await;
+    let response = submit_inner(&state, headers, payload, method, &mut attempt).await;
     if let Some(outcome) = response.extensions().get::<BrowserOutcome>() {
         attempt.outcome = *outcome;
     }
@@ -310,12 +325,13 @@ fn error_outcome(error: &BrowserVerifyError) -> BrowserOutcome {
 }
 
 async fn submit_inner(
-    state: AppState,
+    state: &AppState,
     headers: HeaderMap,
-    payload: Result<Submission, FormRejection>,
-    flow: LoginFlow,
+    payload: Result<Submission, PayloadError>,
+    method: &BrowserMethod,
     attempt: &mut BrowserAttemptGuard,
 ) -> Response {
+    let flow = method.flow;
     let mut origins = headers.get_all(header::ORIGIN).iter();
     let origin_valid = origins.next().and_then(|o| o.to_str().ok())
         == state.browser.origin.as_deref()
@@ -328,14 +344,12 @@ async fn submit_inner(
         Ok(form) => form,
         Err(error) => {
             attempt.outcome = BrowserOutcome::Malformed;
-            // The extractor diagnostic can contain submitted values; never render it.
-            let status = if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
-                StatusCode::PAYLOAD_TOO_LARGE
-            } else {
-                StatusCode::BAD_REQUEST
+            let status = match error {
+                PayloadError::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+                PayloadError::Malformed => StatusCode::BAD_REQUEST,
             };
             // Unparseable input proves neither transaction ownership nor CSRF knowledge.
-            return form_response(&state, &headers, flow, status, true).await;
+            return form_response(state, &headers, method, status, true).await;
         }
     };
     let oauth_context =
@@ -360,11 +374,11 @@ async fn submit_inner(
     };
     if !valid_transaction {
         attempt.outcome = BrowserOutcome::Csrf;
-        return form_response(&state, &headers, flow, StatusCode::FORBIDDEN, true).await;
+        return form_response(state, &headers, method, StatusCode::FORBIDDEN, true).await;
     }
-    let credentials = match flow {
-        LoginFlow::ApiKey => BrowserCredentials::ApiKey(&payload.secret),
-        LoginFlow::Basic => {
+    let credentials = match flow.kind {
+        BrowserMethodKind::ApiKey => BrowserCredentials::ApiKey(&payload.secret),
+        BrowserMethodKind::Basic => {
             // Preserve UTF-8 and password whitespace exactly; ':' cannot delimit a username.
             BrowserCredentials::Basic {
                 username: &payload.username,
@@ -393,6 +407,7 @@ async fn submit_inner(
             }
         };
         let identity = match crate::oauth::authentication::verify_identity(
+            flow.method,
             credentials,
             &state.browser,
             &state.auth,
@@ -411,7 +426,7 @@ async fn submit_inner(
                 };
                 return match error {
                     Rejected | Timeout => {
-                        form_response(&state, &headers, flow, StatusCode::UNAUTHORIZED, true).await
+                        form_response(state, &headers, method, StatusCode::UNAUTHORIZED, true).await
                     }
                     Limited => super::oauth::local(StatusCode::TOO_MANY_REQUESTS),
                     Unavailable => super::oauth::local(StatusCode::SERVICE_UNAVAILABLE),
@@ -448,13 +463,13 @@ async fn submit_inner(
     }
     let user = match state
         .browser
-        .verify_identity(credentials, &state.auth, &state.metrics)
+        .verify_identity(flow.method, credentials, &state.auth, &state.metrics)
         .await
     {
         Ok(user) => user,
         Err(error @ (BrowserVerifyError::Rejected | BrowserVerifyError::Timeout)) => {
             attempt.outcome = error_outcome(&error);
-            return form_response(&state, &headers, flow, StatusCode::UNAUTHORIZED, true).await;
+            return form_response(state, &headers, method, StatusCode::UNAUTHORIZED, true).await;
         }
         Err(BrowserVerifyError::Limited) => {
             attempt.outcome = BrowserOutcome::Limited;

@@ -28,7 +28,9 @@ use subtle::ConstantTimeEq;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 mod valkey;
-use crate::config::{BrowserBackendConfig, BrowserSessionConfig};
+use crate::config::{
+    BrowserBackendConfig, BrowserMethodKind, BrowserMethodProvider, BrowserSessionConfig,
+};
 
 const CAPACITY: usize = 1024;
 const FORM_LIMIT: usize = 120;
@@ -136,25 +138,50 @@ fn browser_identity(user: &User) -> Result<User, BrowserVerifyError> {
     ))
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum LoginFlow {
-    ApiKey,
-    Basic,
+/// A form transaction binds both the browser method index and its credential
+/// type, so a form issued for one method cannot be consumed by another.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LoginFlow {
+    pub method: usize,
+    pub kind: BrowserMethodKind,
 }
 
 impl LoginFlow {
+    #[cfg(test)]
+    pub fn basic(method: usize) -> Self {
+        Self {
+            method,
+            kind: BrowserMethodKind::Basic,
+        }
+    }
+    #[cfg(test)]
+    pub fn api_key(method: usize) -> Self {
+        Self {
+            method,
+            kind: BrowserMethodKind::ApiKey,
+        }
+    }
+    /// Metric labels stay fixed per credential type; method indices are not exported.
     pub(crate) fn metric_label(self) -> &'static str {
-        match self {
-            Self::ApiKey => "ecmwf-api-key",
-            Self::Basic => "basic",
-        }
+        self.kind.metric_label()
     }
-    fn tag(self) -> &'static str {
-        match self {
-            Self::ApiKey => "api-key",
-            Self::Basic => "basic",
-        }
+    /// Stored transaction tag `<kind>:<index>`, at most 8 bytes for index < 100.
+    /// Valid: `basic:0`, `key:15`. Invalid: `api-key:0`, `basic:01`.
+    fn tag(self) -> String {
+        format!("{}:{}", self.kind.tag_prefix(), self.method)
     }
+}
+
+enum MethodVerifier {
+    Plain(PlainAuthProvider),
+    EcmwfApi(EcmwfApiProvider),
+}
+
+/// One direct browser method, verified only by its own provider instance.
+pub struct BrowserMethod {
+    pub label: String,
+    pub flow: LoginFlow,
+    verifier: MethodVerifier,
 }
 
 pub(crate) fn valid_id(value: &str) -> bool {
@@ -230,8 +257,7 @@ pub struct BrowserLoginState {
     entries: Mutex<Entries>,
     pub origin: Option<String>,
     pub ttl: u64,
-    provider: Option<EcmwfApiProvider>,
-    basic_provider: Option<PlainAuthProvider>,
+    methods: Vec<BrowserMethod>,
     client: reqwest::Client,
     inflight: Semaphore,
     settings: Option<BrowserSessionConfig>,
@@ -253,8 +279,27 @@ impl Entries {
 impl BrowserLoginState {
     /// Validate before constructing clients or any application store.
     pub fn new(config: &ConfigV2) -> Result<Self, Box<dyn std::error::Error>> {
-        let selected = config.ui.validate_browser_login(&config.providers)?;
-        let basic = config.ui.validate_basic_login(&config.providers)?;
+        let methods = config
+            .ui
+            .validate_browser_login(&config.providers)?
+            .into_iter()
+            .enumerate()
+            .map(|(index, method)| BrowserMethod {
+                label: method.label.to_owned(),
+                flow: LoginFlow {
+                    method: index,
+                    kind: method.kind(),
+                },
+                verifier: match method.provider {
+                    BrowserMethodProvider::Plain(c) => {
+                        MethodVerifier::Plain(PlainAuthProvider::new(c))
+                    }
+                    BrowserMethodProvider::EcmwfApi(c) => {
+                        MethodVerifier::EcmwfApi(EcmwfApiProvider::new(c))
+                    }
+                },
+            })
+            .collect();
         let settings = config.ui.browser_session.as_ref();
         let origin = settings.map(|s| s.origin()).transpose()?;
         let client = reqwest::Client::builder()
@@ -269,8 +314,7 @@ impl BrowserLoginState {
             entries: Mutex::new(Entries::default()),
             origin,
             ttl: settings.map_or(300, |s| s.session_ttl_seconds),
-            provider: selected.map(EcmwfApiProvider::new),
-            basic_provider: basic.map(PlainAuthProvider::new),
+            methods,
             client,
             inflight: Semaphore::new(settings.map_or(MAX_INFLIGHT, |s| {
                 if matches!(s.backend, BrowserBackendConfig::Memory {}) {
@@ -285,6 +329,15 @@ impl BrowserLoginState {
             settings: settings.map(|s| (**s).clone()),
             valkey: None,
         })
+    }
+
+    /// Direct browser methods in chooser order.
+    pub fn methods(&self) -> &[BrowserMethod] {
+        &self.methods
+    }
+
+    pub fn method(&self, index: usize) -> Option<&BrowserMethod> {
+        self.methods.get(index)
     }
 
     pub async fn initialize(&mut self, enabled: bool) -> Result<(), &'static str> {
@@ -358,7 +411,7 @@ impl BrowserLoginState {
                     "form".into(),
                     sid.clone(),
                     stored_csrf,
-                    flow.tag().into(),
+                    flow.tag(),
                     (s.transaction_ttl_seconds * 1000).to_string(),
                     s.max_forms.to_string(),
                     s.max_forms_per_window.to_string(),
@@ -419,7 +472,7 @@ impl BrowserLoginState {
         }
         if let Some(backend) = self.shared()? {
             Ok(backend
-                .call(&["consume".into(), sid.into(), csrf.into(), flow.tag().into()])
+                .call(&["consume".into(), sid.into(), csrf.into(), flow.tag()])
                 .await?
                 .first()
                 .map(String::as_str)
@@ -548,7 +601,7 @@ impl BrowserLoginState {
 
     #[cfg(test)]
     fn create_form(&self) -> Option<(String, String)> {
-        self.create_form_for(LoginFlow::ApiKey)
+        self.create_form_for(LoginFlow::api_key(0))
     }
 
     #[cfg(test)]
@@ -583,7 +636,8 @@ impl BrowserLoginState {
     /// Removal under one lock makes replay and concurrent submission one-use.
     #[cfg(test)]
     fn consume_form(&self, sid: &str, csrf: &str) -> bool {
-        self.consume_form_for(sid, csrf, LoginFlow::ApiKey).unwrap()
+        self.consume_form_for(sid, csrf, LoginFlow::api_key(0))
+            .unwrap()
     }
 
     fn consume_form_for(
@@ -699,7 +753,7 @@ impl BrowserLoginState {
 
     #[cfg(test)]
     async fn verify(&self, key: &str) -> Result<User, BrowserVerifyError> {
-        self.admitted(self.verify_key(key)).await
+        self.admitted(self.verify_key(0, key)).await
     }
 
     pub(crate) fn verification_timeout(&self) -> Duration {
@@ -712,27 +766,30 @@ impl BrowserLoginState {
 
     pub async fn verify_identity(
         &self,
+        method: usize,
         credentials: BrowserCredentials<'_>,
         auth: &Auth,
         metrics: &Metrics,
     ) -> Result<User, BrowserVerifyError> {
-        self.verify_identity_with(credentials, auth, metrics, false, browser_identity)
+        self.verify_identity_with(method, credentials, auth, metrics, false, browser_identity)
             .await
     }
 
     pub(crate) async fn verify_identity_strict(
         &self,
+        method: usize,
         credentials: BrowserCredentials<'_>,
         auth: &Auth,
         metrics: &Metrics,
         projection: fn(&User) -> Result<User, BrowserVerifyError>,
     ) -> Result<User, BrowserVerifyError> {
-        self.verify_identity_with(credentials, auth, metrics, true, projection)
+        self.verify_identity_with(method, credentials, auth, metrics, true, projection)
             .await
     }
 
     async fn verify_identity_with(
         &self,
+        method: usize,
         credentials: BrowserCredentials<'_>,
         auth: &Auth,
         metrics: &Metrics,
@@ -744,7 +801,7 @@ impl BrowserLoginState {
                 let user = match credentials {
                     BrowserCredentials::ApiKey(key) => {
                         let key = validated_key(key).ok_or(BrowserVerifyError::Rejected)?;
-                        self.verify_key(key).await?
+                        self.verify_key(method, key).await?
                     }
                     BrowserCredentials::Basic { username, password } => {
                         if username.is_empty()
@@ -757,9 +814,12 @@ impl BrowserLoginState {
                             return Err(BrowserVerifyError::Rejected);
                         }
                         let encoded = STANDARD.encode(format!("{username}:{password}"));
-                        self.basic_provider
-                            .as_ref()
-                            .ok_or(BrowserVerifyError::Rejected)?
+                        let Some(MethodVerifier::Plain(provider)) =
+                            self.methods.get(method).map(|m| &m.verifier)
+                        else {
+                            return Err(BrowserVerifyError::Rejected);
+                        };
+                        provider
                             .authenticate(&encoded)
                             .await
                             .map_err(|_| BrowserVerifyError::Rejected)?
@@ -781,11 +841,13 @@ impl BrowserLoginState {
         .await
     }
 
-    async fn verify_key(&self, key: &str) -> Result<User, BrowserVerifyError> {
-        let user = self
-            .provider
-            .as_ref()
-            .ok_or(BrowserVerifyError::Rejected)?
+    async fn verify_key(&self, method: usize, key: &str) -> Result<User, BrowserVerifyError> {
+        let Some(MethodVerifier::EcmwfApi(provider)) =
+            self.methods.get(method).map(|m| &m.verifier)
+        else {
+            return Err(BrowserVerifyError::Rejected);
+        };
+        let user = provider
             .authenticate_uncached(&self.client, key)
             .await
             .map_err(|_| BrowserVerifyError::Rejected)?;
@@ -1037,7 +1099,7 @@ mod tests {
         for _ in 0..10 {
             assert!(state.memory_session(&opaque_id()).unwrap().is_none());
             assert!(matches!(
-                state.form(LoginFlow::Basic).await,
+                state.form(LoginFlow::basic(0)).await,
                 Err(BrowserVerifyError::Limited)
             ));
         }
@@ -1056,14 +1118,14 @@ mod tests {
     async fn memory_capacity_reclaims_expired_forms_without_pruning_sessions() {
         let mut state = state();
         state.settings.as_mut().unwrap().max_forms = 1;
-        let (expired, _) = state.form(LoginFlow::Basic).await.unwrap();
+        let (expired, _) = state.form(LoginFlow::basic(0)).await.unwrap();
         let session = state.create_session(maximum_identity(), None).unwrap();
         {
             let mut entries = state.entries.lock().unwrap();
             entries.forms.get_mut(&expired).unwrap().expires = Instant::now();
             entries.sessions.get_mut(&session).unwrap().expires = Instant::now();
         }
-        let (fresh, csrf) = state.form(LoginFlow::Basic).await.unwrap();
+        let (fresh, csrf) = state.form(LoginFlow::basic(0)).await.unwrap();
         assert!(
             state
                 .entries
@@ -1075,7 +1137,7 @@ mod tests {
         assert!(!state.entries.lock().unwrap().forms.contains_key(&expired));
         assert!(
             state
-                .consume(&fresh, &csrf, LoginFlow::Basic)
+                .consume(&fresh, &csrf, LoginFlow::basic(0))
                 .await
                 .unwrap()
         );
@@ -1183,8 +1245,7 @@ mod tests {
             entries: Mutex::new(Entries::default()),
             origin: Some("https://login.example.test".into()),
             ttl: 300,
-            provider: None,
-            basic_provider: None,
+            methods: Vec::new(),
             client: reqwest::Client::new(),
             inflight: Semaphore::new(MAX_INFLIGHT),
             settings: Some(serde_json::from_value(serde_json::json!({"public_origin": "https://login.example.test", "backend": {"type": "memory"}})).unwrap()),
@@ -1195,10 +1256,10 @@ mod tests {
     fn configured_state(uri: &str) -> BrowserLoginState {
         let config: ConfigV2 = serde_json::from_value(serde_json::json!({
             "store": {"enabled": false}, "services": [], "augmenters": [],
-            "providers": [{"type": "ecmwf-api", "name": "public-provider", "realm": "ecmwf", "uri": uri}],
+            "providers": [{"type": "ecmwf-api", "name": "public-provider", "realm": "ecmwf", "uri": uri, "browser": {"label": "ECMWF API key"}}],
             "server": {"port": 0}, "jwt": {"iss": "public-test", "exp": 300, "secret": "public-test-only-secret"},
             "logging": {"level": "warn", "format": "console"},
-            "ui": {"enabled": true, "ecmwf_api_key": {"provider_name": "public-provider"}, "browser_session": {"public_origin": "https://login.example.test", "backend": {"type": "memory"}}}
+            "ui": {"enabled": true, "browser_session": {"public_origin": "https://login.example.test", "backend": {"type": "memory"}}}
         })).unwrap();
         BrowserLoginState::new(&config).unwrap()
     }
@@ -1245,6 +1306,33 @@ mod tests {
         assert!(!state.consume_form(&sid, &csrf));
     }
 
+    #[tokio::test]
+    async fn transactions_bind_method_index_and_type_without_burning_on_mismatch() {
+        let state = state();
+        let (sid, csrf) = state.form(LoginFlow::basic(1)).await.unwrap();
+        for other in [
+            LoginFlow::basic(0),
+            LoginFlow::basic(2),
+            LoginFlow::api_key(1),
+        ] {
+            assert!(!state.consume(&sid, &csrf, other).await.unwrap());
+        }
+        assert!(
+            state
+                .consume(&sid, &csrf, LoginFlow::basic(1))
+                .await
+                .unwrap()
+        );
+        for (flow, tag) in [
+            (LoginFlow::basic(0), "basic:0"),
+            (LoginFlow::basic(15), "basic:15"),
+            (LoginFlow::api_key(15), "key:15"),
+        ] {
+            assert_eq!(flow.tag(), tag);
+            assert!(flow.tag().len() <= 8);
+        }
+    }
+
     #[test]
     fn sessions_expire_rotate_and_do_not_refresh() {
         let state = state();
@@ -1275,7 +1363,7 @@ mod tests {
                 FormTransaction {
                     csrf: opaque_id(),
                     expires: Instant::now() + Duration::from_secs(FORM_TTL),
-                    flow: LoginFlow::ApiKey,
+                    flow: LoginFlow::api_key(0),
                 },
             );
         }
@@ -1325,11 +1413,16 @@ mod tests {
             .create_async()
             .await;
         let mut state = state();
-        state.provider = Some(EcmwfApiProvider::new(&EcmwfApiProviderConfig {
-            uri: server.url(),
-            realm: "ecmwf".into(),
-            name: "public-provider".into(),
-        }));
+        state.methods.push(BrowserMethod {
+            label: "ECMWF API key".into(),
+            flow: LoginFlow::api_key(0),
+            verifier: MethodVerifier::EcmwfApi(EcmwfApiProvider::new(&EcmwfApiProviderConfig {
+                uri: server.url(),
+                realm: "ecmwf".into(),
+                name: "public-provider".into(),
+                browser: None,
+            })),
+        });
         let permits = state
             .inflight
             .try_acquire_many(MAX_INFLIGHT as u32)
@@ -1524,10 +1617,10 @@ mod tests {
         use tower::ServiceExt;
         let config: ConfigV2 = serde_json::from_value(serde_json::json!({
             "store": {"enabled": false}, "services": [], "augmenters": [],
-            "providers": [{"type": "ecmwf-api", "name": "public-provider", "realm": "ecmwf", "uri": "http://127.0.0.1:1"}],
+            "providers": [{"type": "ecmwf-api", "name": "public-provider", "realm": "ecmwf", "uri": "http://127.0.0.1:1", "browser": {"label": "ECMWF API key"}}],
             "server": {"port": 0}, "jwt": {"iss": "public-test", "exp": 300, "secret": "public-test-only-secret"},
             "logging": {"level": "warn", "format": "console"},
-            "ui": {"enabled": true, "ecmwf_api_key": {"provider_name": "public-provider"}, "browser_session": {"public_origin": "https://login.example.test", "backend": {"type": "memory"}}}
+            "ui": {"enabled": true, "browser_session": {"public_origin": "https://login.example.test", "backend": {"type": "memory"}}}
         })).unwrap();
         let (app, state) = crate::startup::build_app(Arc::new(config)).await.unwrap();
         let (sid, csrf) = state.browser.create_form().unwrap();
@@ -1543,7 +1636,7 @@ mod tests {
         let response = app
             .clone()
             .oneshot(
-                Request::post("/login/ecmwf-api-key")
+                Request::post("/login/method/0")
                     .header("origin", "https://login.example.test")
                     .header("cookie", format!("__Host-authotron_form={sid}"))
                     .header("content-type", "application/x-www-form-urlencoded")

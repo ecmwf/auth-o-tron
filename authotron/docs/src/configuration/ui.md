@@ -1,9 +1,9 @@
 # Login UI
 
 The login UI is an optional branded browser entry page, disabled by default.
-Without sign-in actions or direct login it remains a **branding preview**. With
-actions it links to application-owned browser login flows. Optional direct
-Basic and ECMWF API-key login verify credentials on Auth-O-Tron and establish a
+Without SSO links or browser-enabled providers it remains a **branding preview**.
+SSO links navigate to application-owned browser login flows. Browser-enabled
+`plain` and `ecmwf-api` providers verify credentials on Auth-O-Tron and establish a
 short-lived augmented identity-view session. These paths do not make this page an OAuth
 authorization server or issue authorization codes.
 
@@ -18,10 +18,67 @@ The `ui` section is supported only by ConfigV2 (`version: "2.0.0"`). Migrating a
 | `ui.branding.logo_url` | optional string | `null` | Validated HTTPS absolute URL or root-relative path |
 | `ui.branding.title` | optional string | `null` | Page title; when null or blank, renders `Sign in to {application_name}` |
 | `ui.branding.description` | optional string | `null` | Description; omitted when null or blank |
-| `ui.sign_in_actions` | array | `[]` | Operator-configured browser login links; empty and no direct login keeps preview behavior |
-| `ui.ecmwf_api_key` | optional object | omitted | Enable independent, direct ECMWF API-key browser login |
-| `ui.basic` | optional object | omitted | Enable direct username/password login through one named `plain` provider |
-| `ui.browser_session` | optional object | omitted | Required for either direct flow; shared HTTPS public origin and session TTL |
+| `ui.sso` | array | `[]` | Operator-configured SSO navigation links (`label`, `start_url`); not providers |
+| `ui.browser_session` | optional object | omitted | Required when any provider has a `browser` block; shared HTTPS public origin, session TTL and backend |
+
+Direct browser login methods are configured on providers, not under `ui`; see
+[Choosing browser methods](#choosing-browser-methods). The `ui` section rejects
+unknown fields, so configurations containing unsupported keys fail to load.
+
+## Choosing Browser Methods
+
+A `plain` or `ecmwf-api` provider becomes a browser login method when it has a
+`browser` block with a `label`. Without that block the provider is **API-only**:
+it still authenticates `/authenticate` and other API requests but is not offered
+on `/login`. The same browser-enabled set is used for OAuth authorization login.
+
+```yaml
+providers:
+  - type: plain
+    name: Local users
+    realm: local
+    users:
+      - username: alice
+        password: replace-this-example-password
+        roles: [reader]
+    browser:
+      label: Staff login
+  - type: ecmwf-api
+    name: ECMWF API Provider
+    realm: ecmwf
+    uri: https://api.ecmwf.int/v1
+    browser:
+      label: ECMWF API key
+  - type: plain
+    name: Service accounts # API-only: no browser block
+    realm: services
+    users: []
+ui:
+  enabled: true
+  sso:
+    - label: Continue with SSO
+      start_url: https://app.example.org/oauth2/start?rd=%2Faccount
+  browser_session:
+    public_origin: https://auth.example.org
+    backend:
+      type: memory
+```
+
+Rules, checked at startup:
+
+- `browser` accepts only `label`. The label is trimmed and must be 1–64
+  characters without control characters. It is the chooser entry and form heading.
+- A non-null `browser` block on any other provider type rejects the
+  configuration. `browser: null` is the same as omitting it (API-only).
+- Labels are unique case-insensitively; at most 16 browser methods.
+- Any browser method requires `ui.browser_session` with an explicit `backend`.
+- Enabled OAuth requires at least one browser method.
+
+Each method is served at `/login/method/{n}`, where `n` is its 0-based index
+among browser-enabled providers in `providers` order (API-only providers are not
+counted). The chooser lists methods in provider order by label, followed by SSO
+links. Startup logs the configured methods at INFO level. Reordering providers
+or adding/removing a `browser` block changes method indexes.
 
 Omitting `ui` or `branding` uses these defaults. Application name, title, and description are escaped plain text, not HTML. The footer is fixed: [Powered by Auth-O-Tron](https://github.com/ecmwf/auth-o-tron).
 
@@ -48,9 +105,9 @@ URL validation occurs during configuration loading; the generated JSON schema
 describes URLs as strings and does not enforce the URL restrictions itself.
 Arbitrary mounted-logo assets and configurable colors are not implemented.
 
-## Browser Sign-In Actions
+## SSO Links
 
-Each action has a nonblank `label` and a validated `start_url` with the same
+Each `ui.sso` entry has a nonblank `label` and a validated `start_url` with the same
 HTTPS/root-relative restrictions as logo URLs. The destination must be an
 application-owned endpoint that starts an approved login flow, not a token
 endpoint or an arbitrary request-supplied callback. For example:
@@ -58,7 +115,7 @@ endpoint or an arbitrary request-supplied callback. For example:
 ```yaml
 ui:
   enabled: true
-  sign_in_actions:
+  sso:
     - label: Continue with demo SSO
       start_url: https://aviso-browser.example.org/oauth2/start?rd=%2Faccount
 ```
@@ -72,16 +129,16 @@ callback, and the client must enforce state, nonce, PKCE, issuer/audience checks
 and safe post-login destinations. These links are not an OAuth authorization
 server or a substitute for that protocol.
 
-The schema describes action labels as strings; the runtime also rejects blank
-labels and unknown action fields. Schema validation alone does not enforce all
+The schema describes SSO labels as strings; the runtime also rejects blank
+labels and unknown SSO fields. Schema validation alone does not enforce all
 URL and label checks.
 
 ## Same-Page Direct Login
 
 When direct login is configured, its chooser links open an accessible native
 dialog on `/login`. The selected form is fetched only when opened, obtaining a
-fresh cookie-bound, flow-specific CSRF transaction. Basic and API-key forms do
-not share a pre-generated token. Configured SSO links remain ordinary navigation.
+fresh cookie-bound CSRF transaction bound to that method. Forms for different
+methods do not share a pre-generated token. Configured SSO links remain ordinary navigation.
 
 Loading, invalid credentials and retry states stay inside the dialog. Credentials
 are cleared after dispatch and on close; closing is inhibited during a POST.
@@ -123,12 +180,12 @@ Open `http://127.0.0.1:8080/login`. No local user configuration is required.
 
 ## Browser Application Callbacks
 
-The opt-in [OAuth authorization server](oauth.md) now provides the preregistered
-public-client code/S256 flow through these Basic/API-key forms and explicit consent.
+The opt-in [OAuth authorization server](oauth.md) provides the preregistered
+public-client code/S256 flow through the browser method forms and explicit consent.
 When OAuth is disabled, standalone browser verification and the preview retain their
 existing behavior. OAuth requests are transaction-bound and do not reuse browser sessions.
 
-Branding and sign-in links do not register an authentication client or callback.
+Branding and SSO links do not register an authentication client or callback.
 The browser sign-in flow must register an exact callback URI for each application
 client, such as the Aviso backend's `/auth/callback`, and use authorization codes
 with state and PKCE checks rather than redirecting with access tokens. External
@@ -137,7 +194,7 @@ callback is reached.
 
 ## Direct ECMWF API-Key Login
 
-This path is independent of Keycloak, OIDC clients and browser sign-in links:
+This path is independent of Keycloak, OIDC clients and SSO links:
 
 ```yaml
 providers:
@@ -145,10 +202,10 @@ providers:
     name: ECMWF API Provider
     realm: ecmwf
     uri: https://api.ecmwf.int/v1
+    browser:
+      label: ECMWF API key
 ui:
   enabled: true
-  ecmwf_api_key:
-    provider_name: ECMWF API Provider
   browser_session:
     public_origin: https://auth.example.org
     session_ttl_seconds: 300
@@ -156,12 +213,12 @@ ui:
       type: memory
 ```
 
-The provider name must uniquely select an `ecmwf-api` provider. Public origin
+Public origin
 must be an absolute HTTPS origin without credentials, path, query or fragment.
 Session TTL defaults to 300 seconds and must be between 60 and 86,400 seconds.
 Configuration is checked before creating stores or browser network state.
 
-**ECMWF API key** opens `GET /login/ecmwf-api-key`. Submission requires a
+The method's chooser entry opens `GET /login/method/{n}` with an `api_key` form. Submission requires a
 same-origin POST with the host-only form-nonce cookie and one-use CSRF token;
 transactions expire after `transaction_ttl_seconds` (default five minutes). The response redirects only to the fixed
 `/login/account` identity view, not an arbitrary application callback.
@@ -219,8 +276,6 @@ For shared deployments:
 ```yaml
 ui:
   enabled: true
-  basic:
-    provider_name: Local users
   browser_session:
     public_origin: https://auth.example.org
     session_ttl_seconds: 300
@@ -231,6 +286,8 @@ ui:
       connect_timeout_ms: 2000
       operation_timeout_ms: 1000
 ```
+
+Browser methods are still enabled by provider `browser` blocks as described above.
 
 Supply the required password using the existing environment override
 `AOT_UI__BROWSER_SESSION__BACKEND__PASSWORD` from a secret. Do not log the source
@@ -342,13 +399,12 @@ cargo test -p authotron disposable_valkey -- --ignored --test-threads=1
 It requires Docker and `valkey/valkey:8`; it never uses an operator's server or
 local configuration. Ordinary workspace tests are self-contained without Docker.
 
-## Direct Basic Login and Shared Sessions
+## Direct Username/Password Login and Shared Sessions
 
-Basic login is independent of API-key login and configured SSO links. It is
-opt-in and selects exactly one explicitly named `plain` provider, not every
-Basic provider or every provider in its realm. Duplicate names across provider
-types, missing names, wrong types, invalid origins and TTLs fail startup before
-stores are created. The existing CLI/API Basic authentication behavior is unchanged.
+Each browser-enabled `plain` provider is its own method, independent of other
+methods and SSO links. Only providers with a `browser` block are offered; other
+providers in the same realm stay API-only. Invalid `browser` blocks, origins and
+TTLs fail startup before stores are created. The existing CLI/API Basic authentication behavior is unchanged.
 
 Example configuration fragment (synthetic credentials; configure the other
 required ConfigV2 settings normally):
@@ -363,10 +419,14 @@ providers:
       - username: alice
         password: replace-this-example-password
         roles: [reader]
+    browser:
+      label: Staff login
   - type: ecmwf-api
     name: ECMWF API Provider
     realm: ecmwf
     uri: https://api.ecmwf.int/v1
+    browser:
+      label: ECMWF API key
 augmenters:
   - type: plain
     name: Local access
@@ -380,26 +440,19 @@ ui:
     session_ttl_seconds: 300
     backend:
       type: memory
-  basic:
-    provider_name: Local users
-  ecmwf_api_key:
-    provider_name: ECMWF API Provider
-  sign_in_actions:
+  sso:
     - label: Continue with SSO
       start_url: https://app.example.org/oauth2/start?rd=%2Faccount
 ```
 
 `browser_session` contains the shared origin, lifetimes, backend and limits for
-both flows. **Migration from the
-API-key preview:** move those two fields out of `ui.ecmwf_api_key` into
-`ui.browser_session`; the per-flow objects now accept only `provider_name`.
-Old per-flow origin/TTL fields are rejected rather than silently ignored. The
-older chooser configurations must be migrated before running against this source.
-Direct configurations must also explicitly select `backend: {type: memory}` for
-single-replica development or supply the Valkey backend settings above. UI remains
-disabled by default; the lifetime default remains 300 seconds (range 60–86400).
+all browser methods. Configurations with browser methods must explicitly select
+`backend: {type: memory}` for single-replica development or supply the Valkey
+backend settings above. UI is disabled by default; the session lifetime default
+is 300 seconds (range 60–86400).
 
-`GET /login/basic` displays a form; credentials are accepted only by form POST.
+For a `plain` method, `GET /login/method/{n}` displays a username/password form;
+credentials are accepted only by form POST.
 Usernames are nonempty, at most 256 UTF-8 bytes, and cannot contain a colon or
 control characters. Passwords are nonempty and at most 1,024 UTF-8 bytes, with
 Unicode and whitespace preserved exactly. Requests are capped at 8 KiB.
@@ -409,22 +462,25 @@ submitted roles, attributes, realm, provider and duplicate fields are rejected.
 Errors are generic, and browser routes never send a `WWW-Authenticate` challenge
 that could trigger the browser's HTTP Basic dialog.
 
-Both flows share the same bounded transaction/session stores, cookies, quotas
+All methods share the same bounded transaction/session stores, cookies, quotas
 and configurable admission limit (default eight). Each form has an independent
 transaction ID and challenge, carried together in the opaque `csrf` field. The
 `__Host-authotron_form` cookie is a stable form nonce, not the current form's
 transaction ID. Opening another form with that nonce, or completing one form,
 does not invalidate outstanding forms. Malformed or mismatched submissions cannot
 consume another form's transaction. CSRF tokens are cookie-bound, single-use,
-expire after the configured transaction TTL, and are also bound to the selected flow; an API-key
-form token cannot submit Basic login or vice versa. Each POST requires exactly
+expire after the configured transaction TTL, and are also bound to the method
+index and provider type. Submitting a form to a different method returns 403 without
+consuming the form; a field set that does not match the method's provider type returns 400. Each POST requires exactly
 one Origin header matching the configured normalized HTTPS origin. Forwarded
 headers and submitted fields never choose the origin or destination.
 
 This preserves multiple forms once the browser has a form nonce. Concurrent first
 visits without a cookie (also after cookie expiry) can still race to establish
 different nonces; the losing form fails closed and must be reopened. The composite
-CSRF format rejects forms issued by earlier versions. When upgrading, drain
+CSRF format rejects forms issued by earlier versions; Valkey form records carry a
+method-bound `flow` value (`basic:<n>` or `key:<n>`), and forms issued by earlier
+versions are rejected after upgrade. When upgrading, drain
 earlier-version replicas and ask users to load a fresh form; identity sessions
 remain readable, but forms are not compatible across that version boundary.
 
@@ -445,7 +501,7 @@ verified-email claims. Do not put sensitive data in these display fields.
 
 ### Browser Identity Bounds
 
-After augmentation, both direct flows keep only UID (`username`), realm, roles,
+After augmentation, all browser methods keep only UID (`username`), realm, roles,
 and the three allowlisted display attributes. All other attributes and all
 scopes are **discarded**, not retained in browser sessions. Limits are UTF-8
 bytes, inclusive:
@@ -480,11 +536,11 @@ see [LDAP limits](augmenters.md#ldap-result-and-cache-limits). These are
 application-data limits, not an end-to-end hard memory guarantee for the LDAP
 transport decoder, its internal queues, or trusted configuration.
 
-The chooser stays visible when both direct flows or an SSO action are configured,
-even when already signed in. With just one direct flow and no SSO actions,
+The chooser stays visible when more than one browser method or any SSO link is
+configured, even when already signed in. With exactly one method and no SSO links,
 `/login` redirects a signed-in browser to the account view. Successful sign-in
 rotates only the submitting browser's previous session; other sessions remain
-independent. Neither direct route mints a JWT, treats the cookie as API bearer
+independent. No browser method route mints a JWT, treats the cookie as API bearer
 authentication, or signs the user into a different-origin application.
 
 Credential/account pages make only same-origin image requests, falling back to
@@ -498,7 +554,7 @@ different-origin Aviso application. Application session/callback handoff is a
 separate, registered-client integration; no generic JWT redirect is implied.
 
 The page does not issue codes or act on request `redirect_uri`/`return_to`
-parameters. Selecting a configured action navigates to the client that starts
+parameters. Selecting a configured SSO link navigates to the client that starts
 authorization and owns its callback. The isolated browser SSO demo under
 `authotron/examples/browser-sso` uses Keycloak, OAuth2-proxy and ephemeral Valkey
 sessions; it does not use Auth-O-Tron's token store or connect to real Aviso data.
