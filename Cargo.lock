@@ -137,6 +137,7 @@ dependencies = [
  "figment",
  "futures",
  "http",
+ "ipnet",
  "jsonwebtoken",
  "ldap3",
  "libc",

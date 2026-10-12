@@ -36,6 +36,7 @@ pub struct OAuthConfig {
     /// cap revokes that user's oldest family.
     #[schemars(range(min = 1, max = 1000))]
     pub max_refresh_token_families_per_user: usize,
+    pub endpoint_rate_limit: OAuthEndpointRateLimit,
     #[schemars(length(max = 64))]
     pub clients: Vec<OAuthClient>,
     #[schemars(length(max = 64))]
@@ -56,6 +57,7 @@ impl Default for OAuthConfig {
             max_authentication_age_seconds: 300,
             authentication_clock_skew_seconds: 30,
             max_refresh_token_families_per_user: 50,
+            endpoint_rate_limit: OAuthEndpointRateLimit::default(),
             clients: Vec::new(),
             resources: Vec::new(),
             signing: None,
@@ -98,6 +100,7 @@ impl OAuthConfig {
         if !(1..=1000).contains(&self.max_refresh_token_families_per_user) {
             return Err("oauth.max_refresh_token_families_per_user must be between 1 and 1000");
         }
+        self.endpoint_rate_limit.validate()?;
         if self.clients.len() > 64 {
             return Err("oauth.clients must contain at most 64 clients");
         }
@@ -109,6 +112,67 @@ impl OAuthConfig {
             }
         }
         self.validate_resources()
+    }
+}
+
+/// Per-replica fixed-window limits for `/oauth/token` and `/oauth/revoke`, keyed by
+/// client IP (IPv6 by /64). The client IP is the TCP peer unless that peer is in
+/// `trusted_proxies`; then it is the right-most `X-Forwarded-For` entry outside them.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct OAuthEndpointRateLimit {
+    #[schemars(range(min = 1, max = 3600))]
+    pub window_seconds: u64,
+    #[schemars(range(min = 1, max = 100000))]
+    pub token_requests_per_window: u32,
+    #[schemars(range(min = 1, max = 100000))]
+    pub revoke_requests_per_window: u32,
+    /// Client windows tracked across both endpoints; once full, untracked IPs are rejected.
+    #[schemars(range(min = 1, max = 1000000))]
+    pub max_tracked_clients: usize,
+    /// CIDRs of reverse proxies whose `X-Forwarded-For` is trusted, e.g. `10.0.0.0/8`.
+    #[schemars(length(max = 64))]
+    pub trusted_proxies: Vec<String>,
+}
+
+impl Default for OAuthEndpointRateLimit {
+    fn default() -> Self {
+        Self {
+            window_seconds: 60,
+            token_requests_per_window: 60,
+            revoke_requests_per_window: 30,
+            max_tracked_clients: 10_000,
+            trusted_proxies: Vec::new(),
+        }
+    }
+}
+
+impl OAuthEndpointRateLimit {
+    fn validate(&self) -> Result<(), &'static str> {
+        if !(1..=3600).contains(&self.window_seconds) {
+            return Err("oauth.endpoint_rate_limit.window_seconds must be between 1 and 3600");
+        }
+        if !(1..=100000).contains(&self.token_requests_per_window)
+            || !(1..=100000).contains(&self.revoke_requests_per_window)
+        {
+            return Err("oauth.endpoint_rate_limit request limits must be between 1 and 100000");
+        }
+        if !(1..=1_000_000).contains(&self.max_tracked_clients) {
+            return Err(
+                "oauth.endpoint_rate_limit.max_tracked_clients must be between 1 and 1000000",
+            );
+        }
+        if self.trusted_proxies.len() > 64
+            || self
+                .trusted_proxies
+                .iter()
+                .any(|cidr| cidr.parse::<ipnet::IpNet>().is_err())
+        {
+            return Err(
+                "oauth.endpoint_rate_limit.trusted_proxies must hold at most 64 CIDRs such as 10.0.0.0/8",
+            );
+        }
+        Ok(())
     }
 }
 
@@ -442,6 +506,55 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn endpoint_rate_limit_defaults_bounds_and_proxies() {
+        let defaults = OAuthConfig::default().endpoint_rate_limit;
+        assert_eq!(
+            (
+                defaults.window_seconds,
+                defaults.token_requests_per_window,
+                defaults.revoke_requests_per_window,
+                defaults.max_tracked_clients,
+            ),
+            (60, 60, 30, 10_000)
+        );
+        assert!(defaults.trusted_proxies.is_empty());
+        let schema = serde_json::to_value(schemars::schema_for!(OAuthEndpointRateLimit)).unwrap();
+        assert_eq!(schema["additionalProperties"], false);
+        for (field, min, max) in [
+            ("window_seconds", 1, 3600),
+            ("token_requests_per_window", 1, 100000),
+            ("revoke_requests_per_window", 1, 100000),
+            ("max_tracked_clients", 1, 1_000_000),
+        ] {
+            assert_eq!(schema["properties"][field]["minimum"], min);
+            assert_eq!(schema["properties"][field]["maximum"], max);
+            for value in [min - 1, min, max, max + 1] {
+                let config = serde_json::from_value::<OAuthConfig>(
+                    json!({"endpoint_rate_limit": {field: value}}),
+                )
+                .unwrap();
+                assert_eq!(config.validate().is_ok(), (min..=max).contains(&value));
+            }
+        }
+        for (proxies, valid) in [
+            (json!(["10.0.0.0/8", "fd00::/8", "192.168.1.7/32"]), true),
+            (json!(["10.0.0.1"]), false),
+            (json!(["10.0.0.0/33"]), false),
+            (json!(["proxy.example.org"]), false),
+        ] {
+            let config = serde_json::from_value::<OAuthConfig>(
+                json!({"endpoint_rate_limit": {"trusted_proxies": proxies}}),
+            )
+            .unwrap();
+            assert_eq!(config.validate().is_ok(), valid, "{proxies}");
+        }
+        assert!(
+            serde_json::from_value::<OAuthConfig>(json!({"endpoint_rate_limit": {"limit": 1}}))
+                .is_err()
+        );
     }
 
     #[test]
