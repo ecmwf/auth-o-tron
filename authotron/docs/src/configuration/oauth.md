@@ -102,7 +102,7 @@ automatic fallback are not implemented. Backend durability depends on its config
 
 | Route | Contract |
 | --- | --- |
-| `GET /.well-known/oauth-authorization-server` | RFC 8414 metadata with literal issuer, authorization/token endpoints, JWKS URI, code grant, public-client `none` authentication and S256 |
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 metadata with literal issuer, authorization/token endpoints, JWKS URI, code grant, public-client `none` authentication, S256 and `scopes_supported` (sorted unique union of all configured resource scope names) |
 | `GET /oauth/jwks` | Public RSA JWKs only: `kty`, `alg`, `use`, `kid`, `n`, `e` |
 | `GET /oauth/authorize` | Strict bounded authorization query; reserves a client-partition slot, resumes an exact matching active request, or shows a 409 conflict for a different request |
 | `GET /login/method/{id}` | Browser method modal/native forms capture the current OAuth transaction ID in a server-rendered hidden field |
@@ -130,6 +130,12 @@ and a fresh client-generated `state` value:
 ```text
 https://auth.example.org/oauth/authorize?client_id=mcp-desktop&redirect_uri=http%3A%2F%2F127.0.0.1%3A49152%2Fcallback&response_type=code&resource=https%3A%2F%2Fmcp.example.org%2Fmcp&scope=mcp%3Aread&state=CLIENT_STATE&code_challenge=CHALLENGE&code_challenge_method=S256
 ```
+
+`scope` may be omitted (RFC 6749 §3.3): the server then requests every scope the client
+is bound to for that resource (`clients[].resources[].scopes`). Clients such as Codex CLI
+rely on this. The defaulted scopes are recorded in the transaction exactly as if they had
+been requested explicitly, so role policy, the consent page and the token `scope` claim all
+use them. A present but empty or unknown `scope` is still rejected with `invalid_scope`.
 
 The client must verify the callback `state` and exact `iss`, then exchange its code:
 

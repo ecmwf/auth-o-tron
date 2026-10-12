@@ -251,6 +251,44 @@ mod tests {
         }
     }
     #[test]
+    fn defaulted_scope_is_stored_explicitly_and_revalidated_as_explicit_request() {
+        let (mut config, _) = fixture();
+        let query = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs([
+                ("client_id", "desktop"),
+                ("redirect_uri", CALLBACK),
+                ("response_type", "code"),
+                ("resource", RESOURCE),
+                (
+                    "code_challenge",
+                    "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+                ),
+                ("code_challenge_method", "S256"),
+            ])
+            .finish();
+        let request = validate_authorization_request(&config, query.as_bytes()).unwrap();
+        assert_eq!(request.scopes(), &["read", "open"]);
+        let record = AuthorizationTransaction::new(request, [7; 32], 2000).unwrap();
+        let bytes = record.encode().unwrap();
+        let mut dto: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(dto["scopes"], json!(["read", "open"]));
+        let restored = AuthorizationTransaction::decode(&bytes, &config, 1).unwrap();
+        assert_eq!(restored.request().scopes(), &["read", "open"]);
+        // An empty stored scope list reconstructs `scope=` and is rejected, never re-defaulted.
+        dto["scopes"] = json!([]);
+        let empty = serde_json::to_vec(&dto).unwrap();
+        assert_eq!(
+            AuthorizationTransaction::decode(&empty, &config, 1).err(),
+            Some(RecordError::InvalidRecord)
+        );
+        // Narrowing the binding invalidates the stored effective scopes instead of re-defaulting.
+        config.clients[0].resources[0].scopes = vec!["read".into()];
+        assert_eq!(
+            AuthorizationTransaction::decode(&bytes, &config, 1).err(),
+            Some(RecordError::InvalidRecord)
+        );
+    }
+    #[test]
     fn round_trip_known_fields_binding_and_exact_expiry_boundary() {
         let (config, record) = fixture();
         let bytes = record.encode().unwrap();

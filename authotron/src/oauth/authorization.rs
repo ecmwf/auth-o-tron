@@ -192,10 +192,14 @@ pub fn validate_authorization_request(
         .iter()
         .find(|r| r.resource == resource)
         .ok_or(InvalidTarget)?;
-    let scopes = required("scope")?
-        .split(' ')
-        .map(String::from)
-        .collect::<Vec<_>>();
+    // RFC 6749 §3.3: an absent `scope` defaults to every scope the client is bound to for
+    // this resource. A present but empty or malformed `scope` remains `invalid_scope`.
+    // Example: no `scope` with binding `["read", "write"]` yields `read write`;
+    // `scope=` (empty) is rejected.
+    let scopes = match parameters.get("scope") {
+        Some(scope) => scope.split(' ').map(String::from).collect::<Vec<_>>(),
+        None => binding.scopes.clone(),
+    };
     let mut seen = HashSet::new();
     if !(1..=32).contains(&scopes.len())
         || scopes.iter().any(|s| {
@@ -341,10 +345,15 @@ mod tests {
                 Some(InvalidRequest)
             );
         }
-        for index in 0..parameters().len() {
+        for (index, (key, _)) in parameters().into_iter().enumerate() {
             let mut params = parameters();
             params.remove(index);
-            assert!(parse(&cfg, query(&params).as_bytes()).is_err());
+            // An absent `scope` selects the server default instead of failing.
+            assert_eq!(
+                parse(&cfg, query(&params).as_bytes()).is_err(),
+                key != "scope",
+                "{key}"
+            );
         }
         for raw in [
             b"state=%ZZ".as_slice(),
@@ -358,6 +367,27 @@ mod tests {
         let raw = format!("{}&{}", query(&parameters()), "unknown=x&".repeat(32));
         assert_eq!(parse(&cfg, raw.as_bytes()).err(), Some(InvalidRequest));
         assert!(parse(&OAuthConfig::default(), query(&parameters()).as_bytes()).is_err());
+    }
+    #[test]
+    fn absent_scope_defaults_to_client_binding_but_empty_or_unknown_scope_fails() {
+        let mut cfg = config();
+        cfg.clients[0].resources[0].scopes = vec!["write".into(), "read".into()];
+        let mut params = parameters();
+        params.retain(|(key, _)| *key != "scope");
+        let request = parse(&cfg, query(&params).as_bytes()).unwrap();
+        assert_eq!(request.scopes(), &["write", "read"]);
+        for value in ["", " ", "admin", "read admin"] {
+            let mut params = parameters();
+            set(&mut params, "scope", value.into());
+            assert_eq!(
+                parse(&cfg, query(&params).as_bytes()).err(),
+                Some(InvalidScope),
+                "{value:?}"
+            );
+        }
+        // `scope` without `=` decodes to an empty value and is not treated as absent.
+        let raw = format!("{}&scope", query(&params));
+        assert_eq!(parse(&cfg, raw.as_bytes()).err(), Some(InvalidScope));
     }
     #[test]
     fn registry_scope_and_s256_restrictions() {

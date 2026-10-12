@@ -681,6 +681,109 @@ async fn metadata_scopes_supported_is_sorted_unique_union_of_resource_scopes() {
     );
 }
 #[tokio::test]
+async fn codex_style_request_without_scope_defaults_to_client_bound_scopes() {
+    let (_key, mut config) = fixture("http://127.0.0.1:9");
+    let mut write = config.oauth.resources[0].scopes[0].clone();
+    write.name = "write".into();
+    write.required_roles.clear();
+    config.oauth.resources[0].scopes.push(write);
+    config.oauth.clients[0].resources[0]
+        .scopes
+        .push("write".into());
+    let (app, _) = startup::build_app(Arc::new(config)).await.unwrap();
+    // Exact parameter set sent by Codex CLI: no `scope`, loopback callback on an arbitrary port.
+    let callback = "http://127.0.0.1:51234/callback?installation=test";
+    let query = encoded(&[
+        ("response_type", "code"),
+        ("client_id", "desktop"),
+        ("state", "codex-state"),
+        (
+            "code_challenge",
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        ),
+        ("code_challenge_method", "S256"),
+        ("redirect_uri", callback),
+        ("resource", RESOURCE),
+    ]);
+    let mut jar = Jar::default();
+    let response = get(&app, &format!("/oauth/authorize?{query}"), &jar).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()[header::LOCATION], "/login");
+    jar.update(&response);
+    for empty in ["scope=", "scope"] {
+        let response = get(
+            &app,
+            &format!("/oauth/authorize?{query}&{empty}"),
+            &Jar::default(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{empty}");
+        assert!(response.headers().get(header::LOCATION).is_none());
+    }
+    let response = get(&app, "/login/method/password", &jar).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    jar.update(&response);
+    let html = text(response).await;
+    let (csrf, tx) = (hidden(&html, "csrf"), hidden(&html, "oauth_transaction"));
+    let fields = [
+        ("csrf", csrf.as_str()),
+        ("oauth_transaction", tx.as_str()),
+        ("username", "alice"),
+        ("password", "päss:秘密"),
+    ];
+    let response = send(
+        &app,
+        post("/login/method/password", &jar, &fields, Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    jar.update(&response);
+    let response = get(&app, "/oauth/continue", &jar).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = text(response).await;
+    assert!(html.contains("read") && html.contains("write"));
+    let (csrf, tx) = (hidden(&html, "csrf"), hidden(&html, "oauth_transaction"));
+    let response = send(
+        &app,
+        post(
+            "/oauth/consent",
+            &jar,
+            &[
+                ("csrf", &csrf),
+                ("oauth_transaction", &tx),
+                ("decision", "approve"),
+            ],
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = url::Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+    assert_eq!(location.port(), Some(51234));
+    let params: HashMap<_, _> = location.query_pairs().into_owned().collect();
+    assert_eq!(params["state"], "codex-state");
+    let fields = [
+        ("grant_type", "authorization_code"),
+        ("client_id", "desktop"),
+        ("code", params["code"].as_str()),
+        ("redirect_uri", callback),
+        ("resource", RESOURCE),
+        ("code_verifier", VERIFIER),
+    ];
+    let response = send(&app, post("/oauth/token", &Jar::default(), &fields, None)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let token: Value = serde_json::from_str(&text(response).await).unwrap();
+    assert_eq!(token["scope"], "read write");
+    let jwt = token["access_token"].as_str().unwrap();
+    let payload = jwt.split('.').nth(1).unwrap();
+    let claims: Value = serde_json::from_slice(
+        &base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, payload)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(claims["scope"], "read write");
+}
+#[tokio::test]
 async fn invalid_authorization_and_stale_login_forms_never_verify_or_redirect() {
     let mut mock = mockito::Server::new_async().await;
     let request = mock.mock("GET", "/who-am-i").expect(0).create_async().await;
