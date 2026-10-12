@@ -11,7 +11,7 @@
 use axum::{
     Router,
     extract::State,
-    http::header,
+    http::{StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
     routing::get,
 };
@@ -45,6 +45,12 @@ pub fn routes(config: &UiConfig) -> Router<AppState> {
     Router::new()
         .route("/login", get(login))
         .route("/login/", get(login_slash))
+        // Matchit prefers static and parameter routes, so this only catches
+        // otherwise-unmatched paths such as `/login/nope` (not `/login/method/0`).
+        .route(
+            "/login/{*rest}",
+            get(super::browser_login::login_fallback).fallback(|| async { StatusCode::NOT_FOUND }),
+        )
         .route("/static/login.css", get(stylesheet))
         .route("/static/login.js", get(script))
         .route("/static/aviso-logo.png", get(aviso_logo))

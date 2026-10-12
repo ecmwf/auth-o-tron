@@ -95,8 +95,25 @@ fn resolve_method<'a>(state: &'a AppState, raw: &str) -> Option<&'a BrowserMetho
     state.browser.method(raw.parse().ok()?)
 }
 
+/// Bare private 404 for non-navigational requests (e.g. form POSTs).
 fn not_found() -> Response {
     private_response(StatusCode::NOT_FOUND.into_response())
+}
+
+/// Branded private 404 for GET/HEAD navigation to unknown `/login/...` paths.
+pub(super) fn not_found_page(state: &AppState) -> Response {
+    let card = html! {
+        h2 id="login-card-title" { "Page not found" }
+        p class="login-card-detail" { "This sign-in page does not exist or is no longer available." }
+        p { a href="/login" { "Back to sign in" } }
+    };
+    private_response((StatusCode::NOT_FOUND, Html(private_page(state, card))).into_response())
+}
+
+/// Fallback for unmatched paths below `/login/` while the UI is enabled.
+/// GET/HEAD render the branded page; other methods get the bare 404.
+pub(super) async fn login_fallback(State(state): State<AppState>) -> Response {
+    not_found_page(&state)
 }
 
 /// Valid: `__Host-authotron_session=opaque`. Invalid: duplicate session cookies.
@@ -233,7 +250,7 @@ async fn method_slash(State(state): State<AppState>, Path(index): Path<String>) 
             &method_path(method.flow.method),
             true,
         )),
-        None => not_found(),
+        None => not_found_page(&state),
     }
 }
 
@@ -247,7 +264,7 @@ async fn method_form(
     headers: HeaderMap,
 ) -> Response {
     let Some(method) = resolve_method(&state, &index) else {
-        return not_found();
+        return not_found_page(&state);
     };
     if let Some(response) = super::oauth::login_entry_recovery(&state, &headers).await {
         return response;

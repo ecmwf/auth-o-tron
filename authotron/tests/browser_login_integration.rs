@@ -1977,3 +1977,99 @@ async fn trailing_slash_subpages_redirect_to_canonical_paths() {
         }
     }
 }
+
+#[tokio::test]
+async fn unknown_login_paths_render_branded_not_found_page() {
+    let (app, _) = startup::build_app(Arc::new(config("http://127.0.0.1:1", true)))
+        .await
+        .unwrap();
+    for path in [
+        "/login/method/9",
+        "/login/method/01",
+        "/login/method/9/",
+        "/login/basic",
+        "/login/nope",
+        "/login/nope/deeper",
+    ] {
+        for method in ["GET", "HEAD"] {
+            let response = request(
+                app.clone(),
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+            let headers = response.headers();
+            assert_eq!(headers[header::CACHE_CONTROL], "no-store", "{path}");
+            assert_eq!(headers[header::REFERRER_POLICY], "strict-origin", "{path}");
+            assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY", "{path}");
+            assert_eq!(
+                headers[header::CONTENT_SECURITY_POLICY],
+                "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+                "{path}"
+            );
+            assert!(!headers.contains_key(header::SET_COOKIE), "{path}");
+            if method == "GET" {
+                let html = text(response).await;
+                assert!(html.contains("Page not found"), "{path}");
+                assert!(html.contains("href=\"/login\""), "{path}");
+                assert!(html.contains("Back to sign in"), "{path}");
+                assert!(html.contains("Public &lt;Application&gt;"), "{path}");
+            }
+        }
+    }
+
+    // POST to unknown paths stays a plain 404; existing routes keep 405.
+    for path in ["/login/nope", "/login/method/9"] {
+        let response = request(
+            app.clone(),
+            Request::post(path).body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        assert!(!text(response).await.contains("Page not found"), "{path}");
+    }
+    let response = request(
+        app.clone(),
+        Request::post("/login/").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    for (path, location) in [
+        ("/login/", "/login"),
+        ("/login/account/", "/login/account"),
+        ("/login/method/0/", "/login/method/0"),
+    ] {
+        let response = get(app.clone(), path).await;
+        assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT, "{path}");
+        assert_eq!(response.headers()[header::LOCATION], location);
+    }
+    assert_eq!(
+        get(app.clone(), "/login/method/0").await.status(),
+        StatusCode::OK
+    );
+
+    // Outside /login the generic empty 404 is unchanged.
+    let response = get(app, "/nope").await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(text(response).await.is_empty());
+
+    // With the UI disabled, nothing under /login is registered.
+    let (app, _) = startup::build_app(Arc::new(config("http://127.0.0.1:1", false)))
+        .await
+        .unwrap();
+    for path in ["/login/nope", "/login/method/9"] {
+        let response = get(app.clone(), path).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        assert!(
+            !response
+                .headers()
+                .contains_key(header::CONTENT_SECURITY_POLICY)
+        );
+        assert!(text(response).await.is_empty(), "{path}");
+    }
+}

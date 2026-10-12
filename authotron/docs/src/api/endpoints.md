@@ -127,6 +127,8 @@ itself is not an application callback, and an existing browser session never pro
 OAuth authentication. `GET`/`HEAD` on `/login/`, `/login/account/` and
 `/login/method/{n}/` (configured methods only) answer `308 Permanent Redirect` to the
 relative canonical path without the query string; other methods are not redirected.
+While the UI is enabled, `GET`/`HEAD` on any other unknown path under `/login/` (including
+unconfigured method indexes) returns `404` with a branded "Page not found" page linking back to `/login`.
 
 | Aspect | Details |
 |--------|---------|
