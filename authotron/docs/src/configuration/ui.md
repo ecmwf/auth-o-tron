@@ -68,7 +68,10 @@ ui:
 
 Rules, checked at startup:
 
-- `browser` accepts exactly `id` (required) and `label` (required).
+- `browser` accepts `id` (required), `label` (required) and
+  `refresh_max_lifetime_seconds` (optional, 300–34560000). The last one caps the
+  lifetime of OAuth refresh tokens obtained by signing in with this method. See
+  [Refresh tokens](oauth.md#refresh-tokens).
 - `id` is the stable method identifier used in the method URL, form flow tags
   and the `method` metric label. It must match `^[a-z0-9][a-z0-9-]{0,31}$`
   (1–32 bytes: lowercase ASCII letters, digits and hyphens, not starting with a

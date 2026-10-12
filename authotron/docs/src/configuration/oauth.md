@@ -395,6 +395,26 @@ than `absolute_ttl_seconds` after login. A refresh moves the idle deadline but n
 absolute one. Lowering `absolute_ttl_seconds` also shortens existing families. Raising
 it does not extend them.
 
+**Per-method cap.** A family records the browser method (`browser.id`) used to sign
+in. That method's optional `refresh_max_lifetime_seconds` further caps the absolute
+lifetime: the family ends at the earlier of the client's and the method's limit.
+Like the client limit, lowering or adding a cap shortens existing families at their
+next refresh. A shorter cap for a weaker credential, such as an API key, limits how
+long that login stays usable:
+
+```yaml
+providers:
+  - type: ecmwf-api
+    # ...
+    browser:
+      id: ecmwf-api-key
+      label: ECMWF API key
+      refresh_max_lifetime_seconds: 2592000 # 30 days
+```
+
+If the method is removed or its `id` changes, its families are revoked at their next
+refresh.
+
 **Refresh grant.** `POST /oauth/token` with `grant_type=refresh_token`,
 `refresh_token` and `client_id` (the client the family was issued to). Two optional
 parameters are accepted:
@@ -404,7 +424,10 @@ parameters are accepted:
 
 On every refresh the server:
 
-1. Checks that the client still exists and still has refresh tokens enabled.
+1. Checks that the client still exists and still has refresh tokens enabled, that the
+   login method is still configured, and that the absolute lifetime has not passed.
+   For `plain` (password) methods, it also checks that the user is still listed in
+   the provider's `users`.
 2. Re-runs **strict** augmentation, starting from the stored provider roles. Roles
    that the augmenters no longer grant are dropped.
 3. Re-evaluates the current client/resource/scope policy.
@@ -415,7 +438,7 @@ which replaces the presented one. Responses are `Cache-Control: no-store`. Error
 | Condition | Response |
 | --- | --- |
 | Unknown, expired, rotated or revoked token; token issued to another client; user no longer meets policy | 400 `invalid_grant` |
-| Client no longer enabled, or absolute lifetime shortened past now | 400 `invalid_grant`, family revoked |
+| Client no longer enabled; login method removed; password user removed; absolute lifetime shortened past now | 400 `invalid_grant`, family revoked |
 | `scope` not a unique subset of the granted scopes | 400 `invalid_scope` |
 | `resource` differs from the family | 400 `invalid_target` (RFC 8707) |
 | Unknown `client_id` | 400 `invalid_client` |
@@ -447,10 +470,12 @@ their `exp`.
 
 **Caveats.**
 
-- Provider-side revocation is not observed on refresh, because refresh has no user
-  credentials. Examples are a disabled API key or a removed password user. Only
-  augmenter-derived roles and current policy are re-evaluated. Bound this window with
-  `absolute_ttl_seconds`, or revoke families explicitly.
+- Refresh has no user credentials. A password user removed from a `plain` provider
+  is detected because the user list is local. Changing that user's password is not
+  detected. For `ecmwf-api` methods, a disabled or rotated API key is not detected
+  either. Only augmenter-derived roles and current policy are re-evaluated. Limit
+  this window with `absolute_ttl_seconds` or the method's
+  `refresh_max_lifetime_seconds`, or revoke families explicitly.
 - With the Memory backend, families are per process. A refresh token works only on the
   replica that issued it and is lost on restart. Multi-replica deployments need Valkey.
 - Metrics: `authotron_oauth_refresh_tokens_total{event}` with `issued`, `rotated`,
