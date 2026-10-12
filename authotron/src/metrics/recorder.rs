@@ -169,6 +169,32 @@ pub struct Metrics {
     browser_inflight: IntGauge,
     browser_attempts: IntCounterVec,
     browser_duration: HistogramVec,
+    oauth_refresh_tokens: IntCounterVec,
+}
+
+/// Bounded `event` label values for refresh-token lifecycle counters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefreshTokenEvent {
+    Issued,
+    Rotated,
+    ReuseDetected,
+    FamilyRevoked,
+}
+impl RefreshTokenEvent {
+    const ALL: [Self; 4] = [
+        Self::Issued,
+        Self::Rotated,
+        Self::ReuseDetected,
+        Self::FamilyRevoked,
+    ];
+    fn label(self) -> &'static str {
+        match self {
+            Self::Issued => "issued",
+            Self::Rotated => "rotated",
+            Self::ReuseDetected => "reuse_detected",
+            Self::FamilyRevoked => "family_revoked",
+        }
+    }
 }
 
 impl Metrics {
@@ -325,6 +351,16 @@ impl Metrics {
             registry.clone()
         )
         .expect("register browser duration");
+        let oauth_refresh_tokens = register_int_counter_vec_with_registry!(
+            "authotron_oauth_refresh_tokens_total",
+            "OAuth refresh-token lifecycle events",
+            &["event"],
+            registry.clone()
+        )
+        .expect("register OAuth refresh-token events");
+        for event in RefreshTokenEvent::ALL {
+            oauth_refresh_tokens.with_label_values(&[event.label()]);
+        }
         Metrics {
             registry,
             auth_requests_total,
@@ -339,7 +375,14 @@ impl Metrics {
             browser_inflight,
             browser_attempts,
             browser_duration,
+            oauth_refresh_tokens,
         }
+    }
+
+    pub fn record_refresh_token(&self, event: RefreshTokenEvent) {
+        self.oauth_refresh_tokens
+            .with_label_values(&[event.label()])
+            .inc();
     }
 
     pub fn browser_inflight_guard(&self) -> HttpInFlightGuard {
@@ -532,6 +575,26 @@ mod tests {
     fn render_is_fallible_and_succeeds() {
         let metrics = Metrics::new();
         assert!(metrics.render().is_ok());
+    }
+
+    #[test]
+    fn refresh_token_events_start_at_zero_and_count() {
+        let metrics = Metrics::new();
+        metrics.record_refresh_token(RefreshTokenEvent::ReuseDetected);
+        let output = metrics.render().unwrap();
+        for (event, value) in [
+            ("issued", 0),
+            ("rotated", 0),
+            ("reuse_detected", 1),
+            ("family_revoked", 0),
+        ] {
+            assert!(
+                output.contains(&format!(
+                    "authotron_oauth_refresh_tokens_total{{event=\"{event}\"}} {value}"
+                )),
+                "{event}"
+            );
+        }
     }
 
     #[test]

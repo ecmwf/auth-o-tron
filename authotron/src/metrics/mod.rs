@@ -12,4 +12,6 @@
 
 mod recorder;
 
-pub use recorder::{BrowserAttemptGuard, BrowserOutcome, Metrics, MetricsRecorder};
+pub use recorder::{
+    BrowserAttemptGuard, BrowserOutcome, Metrics, MetricsRecorder, RefreshTokenEvent,
+};
