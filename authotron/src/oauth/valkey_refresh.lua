@@ -1,0 +1,89 @@
+-- Atomic refresh-token family operations on one primary. KEYS[1] is the presented or
+-- issued token key; family and per-user index keys derive from the fixed prefix.
+local token = KEYS[1]
+local op, prefix, now, grace = ARGV[1], ARGV[2], tonumber(ARGV[3]), tonumber(ARGV[4])
+local function integer(n) return n and n > 0 and n <= 253402300799999 and n % 1 == 0 end
+local function decimal(n) return string.format('%.0f', n) end
+if not integer(now) or not integer(grace) then return {'unavailable'} end
+local function family_key(id) return prefix .. 'family:' .. id end
+local function index_key(user) return prefix .. 'user:' .. user end
+local function revoke(id)
+    local key = family_key(id)
+    local user = redis.call('HGET', key, 'user')
+    redis.call('DEL', key)
+    if user then redis.call('ZREM', index_key(user), id) end
+end
+local function live(key)
+    if redis.call('TYPE', key).ok ~= 'hash' then return nil end
+    local idle, absolute = tonumber(redis.call('HGET', key, 'idle')), tonumber(redis.call('HGET', key, 'absolute'))
+    if not integer(idle) or not integer(absolute) then return nil end
+    return now < idle and now < absolute
+end
+
+if op == 'issue' then
+    local id, user, hash, grant = ARGV[5], ARGV[6], ARGV[7], ARGV[8]
+    local absolute, idle, cap, client = tonumber(ARGV[9]), tonumber(ARGV[10]), tonumber(ARGV[11]), ARGV[12]
+    if not integer(absolute) or not integer(idle) or not integer(cap) or idle > absolute then return {'unavailable'} end
+    if redis.call('EXISTS', token) == 1 then return {'unavailable'} end
+    local index = index_key(user)
+    for _, member in ipairs(redis.call('ZRANGE', index, 0, -1)) do
+        if not live(family_key(member)) then revoke(member) end
+    end
+    local excess = redis.call('ZCARD', index) + 1 - cap
+    if excess > 0 then
+        for _, member in ipairs(redis.call('ZRANGE', index, 0, excess - 1)) do revoke(member) end
+    end
+    local key = family_key(id)
+    redis.call('HSET', key, 'grant', grant, 'client', client, 'user', user, 'created', decimal(now), 'absolute', decimal(absolute),
+        'idle', decimal(idle), 'current', hash, 'previous', '', 'rotated', '0')
+    redis.call('PEXPIREAT', key, decimal(idle))
+    redis.call('SET', token, id, 'PXAT', decimal(absolute))
+    redis.call('ZADD', index, now, id)
+    if redis.call('PEXPIRETIME', index) < absolute then redis.call('PEXPIREAT', index, decimal(absolute)) end
+    return {'ok'}
+end
+
+local id = redis.call('GET', token)
+if op == 'revoke' then
+    if not id then return {'missing'} end
+    local key = family_key(id)
+    if redis.call('TYPE', key).ok ~= 'hash' then return {'missing'} end
+    if redis.call('HGET', key, 'client') ~= ARGV[5] then return {'missing'} end
+    revoke(id)
+    return {'ok'}
+end
+if op == 'revoke_family' then
+    revoke(ARGV[5])
+    return {'ok'}
+end
+if not id then return {'missing'} end
+local key = family_key(id)
+local state = live(key)
+if state == nil then return {'missing'} end
+if not state then revoke(id) return {'missing'} end
+local hash = ARGV[5]
+local current = redis.call('HGET', key, 'current')
+
+if op == 'lookup' then
+    if current == hash then
+        return {'current', id, redis.call('HGET', key, 'grant'), redis.call('HGET', key, 'created'), redis.call('HGET', key, 'absolute')}
+    end
+    local rotated = tonumber(redis.call('HGET', key, 'rotated'))
+    if redis.call('HGET', key, 'previous') == hash and rotated and now < rotated + grace then return {'grace'} end
+    local client = redis.call('HGET', key, 'client')
+    revoke(id)
+    return {'reused', client}
+end
+if op == 'rotate' then
+    local next_hash, next_token, idle, ceiling = ARGV[6], KEYS[2], tonumber(ARGV[7]), tonumber(ARGV[8])
+    if not integer(idle) or not integer(ceiling) or idle > ceiling then return {'unavailable'} end
+    if id ~= ARGV[9] or current ~= hash or now >= ceiling then return {'stale'} end
+    if redis.call('EXISTS', next_token) == 1 then return {'unavailable'} end
+    local absolute = math.min(tonumber(redis.call('HGET', key, 'absolute')), ceiling)
+    redis.call('HSET', key, 'current', next_hash, 'previous', hash, 'rotated', decimal(now),
+        'idle', decimal(idle), 'absolute', decimal(absolute))
+    redis.call('PEXPIREAT', key, decimal(idle))
+    redis.call('SET', next_token, id, 'PXAT', decimal(absolute))
+    return {'rotated'}
+end
+return {'unavailable'}
