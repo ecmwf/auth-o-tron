@@ -108,11 +108,11 @@ pub fn decode_jwt(token: &str, secret: &[u8]) -> Result<User, AuthError> {
 ///
 /// Non-EmailKey headers are returned unchanged.
 pub fn convert_email_key(auth_header: &str) -> String {
-    if auth_header.starts_with("EmailKey ") {
-        if let Some(colon_pos) = auth_header.find(':') {
-            let part_after_colon = &auth_header[colon_pos + 1..];
-            return format!("Bearer {}", part_after_colon);
-        }
+    if auth_header.starts_with("EmailKey ")
+        && let Some(colon_pos) = auth_header.find(':')
+    {
+        let part_after_colon = &auth_header[colon_pos + 1..];
+        return format!("Bearer {}", part_after_colon);
     }
     auth_header.to_string()
 }
