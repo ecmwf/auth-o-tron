@@ -219,9 +219,9 @@ They return 404 when disabled. See [Login UI](../configuration/ui.md).
 
 | Endpoint | Request / response |
 |----------|--------------------|
-| `GET /login/basic` | Escaped username/password form with browser-binding cookie and independent transaction/challenge in `csrf`; never consumes query credentials |
+| `GET /login/basic` | Escaped username/password form with form-nonce cookie and independent transaction/challenge in `csrf`; never consumes query credentials |
 | `POST /login/basic` | URL-encoded `username`, `password`, `csrf` only; username ≤256 UTF-8 bytes, password ≤1,024 UTF-8 bytes; Unicode/whitespace password preserved |
-| `GET /login/ecmwf-api-key` | API-key form with the same stable browser-binding cookie and its own opaque `csrf` value |
+| `GET /login/ecmwf-api-key` | API-key form with the same stable form-nonce cookie and its own opaque `csrf` value |
 | `POST /login/ecmwf-api-key` | URL-encoded `api_key`, `csrf` only; key ≤512 bytes |
 | `GET /login/account` | Session-only augmented identity, escaped roles, and allowlisted `ecmwf-email`, `email`, `display_name`; no session →303 `/login` |
 

@@ -215,6 +215,8 @@
     link.addEventListener("click", (event) => {
       if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
       event.preventDefault();
+      // A form GET left running by a closed dialog may still set the form-nonce
+      // cookie; overlapping loads would race on it and invalidate one form.
       if (inFlight || dialog.open) return;
       endpoint = selected;
       opener = link;
@@ -234,7 +236,6 @@
     endpoint = null;
     opener?.focus();
     opener = null;
-    // Let a pending GET settle before opening another dialog.
   });
   window.addEventListener("pagehide", () => {
     if (!posting) controller?.abort();

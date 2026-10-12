@@ -162,7 +162,7 @@ Session TTL defaults to 300 seconds and must be between 60 and 86,400 seconds.
 Configuration is checked before creating stores or browser network state.
 
 **ECMWF API key** opens `GET /login/ecmwf-api-key`. Submission requires a
-same-origin POST with the host-only browser-binding cookie and one-use CSRF token;
+same-origin POST with the host-only form-nonce cookie and one-use CSRF token;
 transactions expire after `transaction_ttl_seconds` (default five minutes). The response redirects only to the fixed
 `/login/account` identity view, not an arbitrary application callback.
 
@@ -412,8 +412,8 @@ that could trigger the browser's HTTP Basic dialog.
 Both flows share the same bounded transaction/session stores, cookies, quotas
 and configurable admission limit (default eight). Each form has an independent
 transaction ID and challenge, carried together in the opaque `csrf` field. The
-`__Host-authotron_form` cookie is a stable browser binding, not the current form's
-transaction ID. Opening another form with that binding, or completing one form,
+`__Host-authotron_form` cookie is a stable form nonce, not the current form's
+transaction ID. Opening another form with that nonce, or completing one form,
 does not invalidate outstanding forms. Malformed or mismatched submissions cannot
 consume another form's transaction. CSRF tokens are cookie-bound, single-use,
 expire after the configured transaction TTL, and are also bound to the selected flow; an API-key
@@ -421,12 +421,12 @@ form token cannot submit Basic login or vice versa. Each POST requires exactly
 one Origin header matching the configured normalized HTTPS origin. Forwarded
 headers and submitted fields never choose the origin or destination.
 
-This preserves multiple forms once the browser has a binding. Concurrent first
+This preserves multiple forms once the browser has a form nonce. Concurrent first
 visits without a cookie (also after cookie expiry) can still race to establish
-different bindings; the losing form fails closed and must be reopened. The new
-composite CSRF format intentionally rejects old forms. Drain old-version replicas
-when upgrading and ask users to load a fresh form; existing identity sessions
-remain readable, but old/new form endpoints are not rollout-compatible.
+different nonces; the losing form fails closed and must be reopened. The composite
+CSRF format rejects forms issued by earlier versions. When upgrading, drain
+earlier-version replicas and ask users to load a fresh form; identity sessions
+remain readable, but forms are not compatible across that version boundary.
 
 After **each successful direct verification**, Auth-O-Tron invokes the existing
 `Auth::check_augmenters` pipeline: matching-realm ordinary augmenters run in

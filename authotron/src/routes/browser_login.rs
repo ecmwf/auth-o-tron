@@ -148,10 +148,10 @@ async fn form_response(
         Ok(transaction) => transaction,
         Err(status) => return super::oauth::local(status),
     };
-    let binding = cookie_value(headers, FORM_COOKIE)
+    let form_nonce = cookie_value(headers, FORM_COOKIE)
         .filter(|value| crate::browser::valid_id(value))
         .unwrap_or_else(crate::browser::opaque_id);
-    let (sid, csrf) = match state.browser.form_with_binding(flow, Some(&binding)).await {
+    let csrf = match state.browser.form_with_nonce(flow, &form_nonce).await {
         Ok(form) => form,
         Err(error) => return unavailable(error),
     };
@@ -165,7 +165,7 @@ async fn form_response(
                 @else { "Verify your identity for a short-lived Auth-O-Tron browser session." }
             }
             form class="key-form" method="post" action=(if flow == LoginFlow::ApiKey { "/login/ecmwf-api-key" } else { "/login/basic" }) {
-                input type="hidden" name="csrf" value=(format!("{sid}.{csrf}"));
+                input type="hidden" name="csrf" value=(csrf);
                 @if let Some(id) = &oauth_transaction { input type="hidden" name="oauth_transaction" value=(id); }
                 @if flow == LoginFlow::ApiKey {
                     label for="api-key" { "ECMWF API key" }
@@ -188,7 +188,7 @@ async fn form_response(
     set_cookie(
         &mut response,
         FORM_COOKIE,
-        binding,
+        form_nonce,
         state.browser.transaction_ttl(),
     );
     response
@@ -216,8 +216,8 @@ async fn basic_form(State(state): State<AppState>, headers: HeaderMap) -> Respon
     form_response(&state, &headers, LoginFlow::Basic, StatusCode::OK, false).await
 }
 
-// CSRF syntax: <64 hex transaction ID>.<64 hex challenge>; e.g. two 64-digit
-// hex strings separated by '.', never a bare transaction ID or duplicate field.
+// `csrf` is the opaque token from `BrowserLoginState::form_with_nonce`.
+// Valid: api_key=public-fixture&csrf=<64hex>.<64hex>. Invalid: duplicate csrf or unknown field.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KeyForm {
@@ -227,8 +227,8 @@ struct KeyForm {
     csrf: String,
 }
 
-// Valid fields: username=alice&password=public-fixture&csrf=<transaction>.<challenge>
-// (each CSRF component is 64 hex digits). Invalid: submitted roles or duplicate csrf.
+// Valid: username=alice&password=public-fixture&csrf=<64hex>.<64hex>.
+// Invalid: duplicate csrf or unknown field such as roles.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BasicForm {
@@ -346,10 +346,10 @@ async fn submit_inner(
                 return super::oauth::local(status);
             }
         };
-    let valid_transaction = if let Some(binding) = cookie_value(&headers, FORM_COOKIE) {
+    let valid_transaction = if let Some(form_nonce) = cookie_value(&headers, FORM_COOKIE) {
         match state
             .browser
-            .consume_bound(&payload.csrf, &binding, flow)
+            .consume_with_nonce(&payload.csrf, &form_nonce, flow)
             .await
         {
             Ok(valid) => valid,

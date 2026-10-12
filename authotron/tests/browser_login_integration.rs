@@ -205,7 +205,7 @@ async fn shared_cookie_jar_preserves_tabs_and_rejects_cross_browser_without_burn
 }
 
 #[tokio::test]
-async fn concurrent_first_forms_without_binding_fail_closed_and_allow_retry() {
+async fn concurrent_first_forms_without_form_nonce_fail_closed_and_allow_retry() {
     let (app, _) = startup::build_app(Arc::new(combined_config("http://127.0.0.1:1")))
         .await
         .unwrap();

@@ -322,18 +322,31 @@ impl BrowserLoginState {
         Duration::from_secs(self.settings.as_ref().map_or(60, |s| s.rate_window_seconds))
     }
 
+    /// Unbound transaction for backend unit tests; production forms always carry a nonce.
+    #[cfg(test)]
     pub async fn form(&self, flow: LoginFlow) -> Result<(String, String), BrowserVerifyError> {
-        self.form_with_binding(flow, None).await
+        self.create_transaction(flow, None).await
     }
 
-    pub(crate) async fn form_with_binding(
+    /// Creates a transaction tied to the form-nonce cookie and returns the combined
+    /// CSRF token in the format parsed by [`split_form_token`].
+    pub(crate) async fn form_with_nonce(
         &self,
         flow: LoginFlow,
-        binding: Option<&str>,
+        form_nonce: &str,
+    ) -> Result<String, BrowserVerifyError> {
+        let (sid, challenge) = self.create_transaction(flow, Some(form_nonce)).await?;
+        Ok(format!("{sid}.{challenge}"))
+    }
+
+    async fn create_transaction(
+        &self,
+        flow: LoginFlow,
+        form_nonce: Option<&str>,
     ) -> Result<(String, String), BrowserVerifyError> {
         let csrf = opaque_id();
         let stored_csrf =
-            binding.map_or_else(|| csrf.clone(), |binding| bound_csrf(binding, &csrf));
+            form_nonce.map_or_else(|| csrf.clone(), |form_nonce| nonce_csrf(form_nonce, &csrf));
         if let Some(backend) = self.shared()? {
             let s = self
                 .settings
@@ -393,7 +406,9 @@ impl BrowserLoginState {
         }
     }
 
-    pub async fn consume(
+    /// Compares the stored challenge directly; production callers go through
+    /// [`Self::consume_with_nonce`].
+    async fn consume(
         &self,
         sid: &str,
         csrf: &str,
@@ -414,21 +429,22 @@ impl BrowserLoginState {
         }
     }
 
-    pub(crate) async fn consume_bound(
+    pub(crate) async fn consume_with_nonce(
         &self,
         token: &str,
-        binding: &str,
+        form_nonce: &str,
         flow: LoginFlow,
     ) -> Result<bool, BrowserVerifyError> {
-        let Some((sid, csrf)) = token.split_once('.') else {
+        let Some((sid, csrf)) = split_form_token(token) else {
             return Ok(false);
         };
-        if !valid_id(binding) || !valid_id(sid) || !valid_id(csrf) {
+        if !valid_id(form_nonce) {
             return Ok(false);
         }
-        self.consume(sid, &bound_csrf(binding, csrf), flow).await
+        self.consume(sid, &nonce_csrf(form_nonce, csrf), flow).await
     }
 
+    #[cfg(test)]
     pub async fn discard(&self, sid: &str) -> Result<(), BrowserVerifyError> {
         if !valid_id(sid) {
             return Ok(());
@@ -597,7 +613,7 @@ impl BrowserLoginState {
         Ok(matches)
     }
 
-    /// Explicit cancellation for callers that already established transaction ownership.
+    #[cfg(test)]
     fn discard_form(&self, sid: &str) -> Result<(), BrowserVerifyError> {
         self.entries
             .lock()
@@ -870,11 +886,18 @@ impl BrowserLoginState {
     }
 }
 
-fn bound_csrf(binding: &str, csrf: &str) -> String {
+/// Splits a form CSRF token `<sid>.<challenge>`, both 64 lowercase hex digits.
+/// Valid: `<64hex>.<64hex>`. Invalid: `<64hex>`, `<64hex>.`, `<64hex>.<64hex>.x`.
+fn split_form_token(token: &str) -> Option<(&str, &str)> {
+    let (sid, challenge) = token.split_once('.')?;
+    (valid_id(sid) && valid_id(challenge)).then_some((sid, challenge))
+}
+
+fn nonce_csrf(form_nonce: &str, csrf: &str) -> String {
     // Both components are fixed-length opaque hex IDs; the domain separates this digest.
     format!(
         "{:x}",
-        Sha256::digest(format!("browser-form:{binding}:{csrf}"))
+        Sha256::digest(format!("browser-form:{form_nonce}:{csrf}"))
     )
 }
 
@@ -902,6 +925,7 @@ async fn complete_verification(
 ) -> Result<User, BrowserVerifyError> {
     let result = within_deadline(deadline, operation).await;
     let released = within_deadline(deadline, cleanup).await;
+    // An elapsed deadline overrides even a Rejected result.
     if tokio::time::Instant::now() >= deadline {
         return Err(BrowserVerifyError::Timeout);
     }

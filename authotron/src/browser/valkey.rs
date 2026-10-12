@@ -272,51 +272,51 @@ mod tests {
         b.discard(&f1).await.unwrap();
         a.discard(&f2).await.unwrap();
 
-        let binding = opaque_id();
-        let (first_id, first_challenge) = a
-            .form_with_binding(LoginFlow::Basic, Some(&binding))
+        let form_nonce = opaque_id();
+        let first = a
+            .form_with_nonce(LoginFlow::Basic, &form_nonce)
             .await
             .unwrap();
-        let (second_id, second_challenge) = b
-            .form_with_binding(LoginFlow::Basic, Some(&binding))
+        let second = b
+            .form_with_nonce(LoginFlow::Basic, &form_nonce)
             .await
             .unwrap();
-        let first = format!("{first_id}.{first_challenge}");
-        let second = format!("{second_id}.{second_challenge}");
+        let (first_id, _) = first.split_once('.').unwrap();
+        let (_, second_challenge) = second.split_once('.').unwrap();
         for invalid in [
-            first_id.clone(),
+            first_id.to_owned(),
             format!("{first_id}."),
             format!("{first_id}.{second_challenge}"),
             format!("{first}.extra"),
         ] {
             assert!(
-                !b.consume_bound(&invalid, &binding, LoginFlow::Basic)
+                !b.consume_with_nonce(&invalid, &form_nonce, LoginFlow::Basic)
                     .await
                     .unwrap()
             );
         }
         assert!(
-            !b.consume_bound(&first, &opaque_id(), LoginFlow::Basic)
+            !b.consume_with_nonce(&first, &opaque_id(), LoginFlow::Basic)
                 .await
                 .unwrap()
         );
         assert!(
-            !b.consume_bound(&first, &binding, LoginFlow::ApiKey)
+            !b.consume_with_nonce(&first, &form_nonce, LoginFlow::ApiKey)
                 .await
                 .unwrap()
         );
         let (left, right) = tokio::join!(
-            a.consume_bound(&first, &binding, LoginFlow::Basic),
-            b.consume_bound(&first, &binding, LoginFlow::Basic)
+            a.consume_with_nonce(&first, &form_nonce, LoginFlow::Basic),
+            b.consume_with_nonce(&first, &form_nonce, LoginFlow::Basic)
         );
         assert_ne!(left.unwrap(), right.unwrap());
         assert!(
-            a.consume_bound(&second, &binding, LoginFlow::Basic)
+            a.consume_with_nonce(&second, &form_nonce, LoginFlow::Basic)
                 .await
                 .unwrap()
         );
         assert!(
-            !b.consume_bound(&second, &binding, LoginFlow::Basic)
+            !b.consume_with_nonce(&second, &form_nonce, LoginFlow::Basic)
                 .await
                 .unwrap()
         );
@@ -836,10 +836,10 @@ mod tests {
         use tower::ServiceExt;
         // ACL denies an index write after verification; preflight prevents a
         // session record from being created without its capacity index.
-        let acl_binding = opaque_id();
-        let (acl_sid, acl_csrf) = app_state
+        let acl_form_nonce = opaque_id();
+        let acl_token = app_state
             .browser
-            .form_with_binding(LoginFlow::Basic, Some(&acl_binding))
+            .form_with_nonce(LoginFlow::Basic, &acl_form_nonce)
             .await
             .unwrap();
         let _: String = command(backend, "ACL", &["SETUSER", "default", "-zadd"]).await;
@@ -870,10 +870,10 @@ mod tests {
             .oneshot(
                 Request::post("/login/basic")
                     .header("origin", "https://login.example.test")
-                    .header("cookie", format!("__Host-authotron_form={acl_binding}"))
+                    .header("cookie", format!("__Host-authotron_form={acl_form_nonce}"))
                     .header("content-type", "application/x-www-form-urlencoded")
                     .body(Body::from(format!(
-                        "username=alice&password=public-fixture&csrf={acl_sid}.{acl_csrf}"
+                        "username=alice&password=public-fixture&csrf={acl_token}"
                     )))
                     .unwrap(),
             )
