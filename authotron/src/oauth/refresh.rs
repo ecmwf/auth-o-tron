@@ -19,6 +19,9 @@ use sha2::{Digest, Sha256};
 /// A rotated token presented again within this window after its successor was issued
 /// is rejected without revoking the family, tolerating concurrent or retried refreshes.
 pub const REUSE_GRACE_MS: u64 = 30_000;
+/// Rotated hashes a family keeps for reuse detection, newest first; older ones are
+/// forgotten and, if replayed, are merely unknown (`invalid_grant`, family kept).
+pub const MAX_ROTATED_HASHES: usize = 32;
 pub(super) const MAX_REFRESH_GRANT_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

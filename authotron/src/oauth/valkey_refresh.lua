@@ -1,5 +1,7 @@
 -- Atomic refresh-token family operations on one primary. KEYS[1] is the presented or
--- issued token key; family and per-user index keys derive from the fixed prefix.
+-- issued token key; family, per-user index and other token keys derive from the fixed
+-- prefix. A token key expires at the family idle deadline when it was issued or
+-- rotated, and a family keeps at most ARGV[10] rotated hashes ("history", oldest first).
 local token = KEYS[1]
 local op, prefix, now, grace = ARGV[1], ARGV[2], tonumber(ARGV[3]), tonumber(ARGV[4])
 local function integer(n) return n and n > 0 and n <= 253402300799999 and n % 1 == 0 end
@@ -7,8 +9,19 @@ local function decimal(n) return string.format('%.0f', n) end
 if not integer(now) or not integer(grace) then return {'unavailable'} end
 local function family_key(id) return prefix .. 'family:' .. id end
 local function index_key(user) return prefix .. 'user:' .. user end
+local function token_key(hash) return prefix .. 'token:' .. hash end
+local function history(key)
+    local hashes = {}
+    for hash in string.gmatch(redis.call('HGET', key, 'history') or '', '%S+') do hashes[#hashes + 1] = hash end
+    return hashes
+end
 local function revoke(id)
     local key = family_key(id)
+    if redis.call('TYPE', key).ok == 'hash' then
+        local current = redis.call('HGET', key, 'current')
+        if current then redis.call('DEL', token_key(current)) end
+        for _, hash in ipairs(history(key)) do redis.call('DEL', token_key(hash)) end
+    end
     local user = redis.call('HGET', key, 'user')
     redis.call('DEL', key)
     if user then redis.call('ZREM', index_key(user), id) end
@@ -35,9 +48,9 @@ if op == 'issue' then
     end
     local key = family_key(id)
     redis.call('HSET', key, 'grant', grant, 'client', client, 'user', user, 'created', decimal(now), 'absolute', decimal(absolute),
-        'idle', decimal(idle), 'current', hash, 'previous', '', 'rotated', '0')
+        'idle', decimal(idle), 'current', hash, 'previous', '', 'rotated', '0', 'history', '')
     redis.call('PEXPIREAT', key, decimal(idle))
-    redis.call('SET', token, id, 'PXAT', decimal(absolute))
+    redis.call('SET', token, id, 'PXAT', decimal(idle))
     redis.call('ZADD', index, now, id)
     if redis.call('PEXPIRETIME', index) < absolute then redis.call('PEXPIREAT', index, decimal(absolute)) end
     return {'ok'}
@@ -76,14 +89,19 @@ if op == 'lookup' then
 end
 if op == 'rotate' then
     local next_hash, next_token, idle, ceiling = ARGV[6], KEYS[2], tonumber(ARGV[7]), tonumber(ARGV[8])
-    if not integer(idle) or not integer(ceiling) or idle > ceiling then return {'unavailable'} end
+    local keep = tonumber(ARGV[10])
+    if not integer(idle) or not integer(ceiling) or idle > ceiling or not integer(keep) then return {'unavailable'} end
     if id ~= ARGV[9] or current ~= hash or now >= ceiling then return {'stale'} end
     if redis.call('EXISTS', next_token) == 1 then return {'unavailable'} end
     local absolute = math.min(tonumber(redis.call('HGET', key, 'absolute')), ceiling)
+    local hashes = history(key)
+    hashes[#hashes + 1] = hash
+    while #hashes > keep do redis.call('DEL', token_key(table.remove(hashes, 1))) end
     redis.call('HSET', key, 'current', next_hash, 'previous', hash, 'rotated', decimal(now),
-        'idle', decimal(idle), 'absolute', decimal(absolute))
+        'idle', decimal(idle), 'absolute', decimal(absolute), 'history', table.concat(hashes, ' '))
     redis.call('PEXPIREAT', key, decimal(idle))
-    redis.call('SET', next_token, id, 'PXAT', decimal(absolute))
+    redis.call('PEXPIREAT', token, decimal(idle))
+    redis.call('SET', next_token, id, 'PXAT', decimal(idle))
     return {'rotated'}
 end
 return {'unavailable'}

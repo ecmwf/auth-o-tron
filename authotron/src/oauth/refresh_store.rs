@@ -9,11 +9,14 @@
 //! Process-local refresh-token families for single-replica deployments.
 
 use super::refresh::{
-    Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant, RefreshStoreError, Rotated, deadline,
-    initial_expiry, random_id,
+    MAX_ROTATED_HASHES, Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant, RefreshStoreError,
+    Rotated, deadline, initial_expiry, random_id,
 };
 use crate::config::RefreshTokenPolicy;
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Mutex,
+};
 
 struct Family {
     grant: RefreshGrant,
@@ -23,6 +26,8 @@ struct Family {
     idle_ms: u64,
     current: [u8; 32],
     previous: Option<([u8; 32], u64)>,
+    /// Recently rotated hashes, oldest first, at most [`MAX_ROTATED_HASHES`].
+    rotated: VecDeque<[u8; 32]>,
 }
 impl Family {
     fn live(&self, now_ms: u64) -> bool {
@@ -33,15 +38,17 @@ impl Family {
 #[derive(Default)]
 struct Inner {
     families: HashMap<String, Family>,
-    /// Every hash ever issued for a live family, kept until the family's absolute
-    /// expiry so rotated tokens remain recognisable for reuse detection.
-    tokens: HashMap<[u8; 32], String>,
+    /// Current and recently rotated hashes with the family they belong to. Each entry
+    /// expires at the family's idle deadline when it was issued or rotated: a family
+    /// unused for that long has expired, so older hashes need not be recognised.
+    tokens: HashMap<[u8; 32], (String, u64)>,
 }
 impl Inner {
     fn prune(&mut self, now_ms: u64) {
         self.families.retain(|_, family| family.live(now_ms));
         let families = &self.families;
-        self.tokens.retain(|_, id| families.contains_key(id));
+        self.tokens
+            .retain(|_, (id, expires)| now_ms < *expires && families.contains_key(id));
     }
 }
 
@@ -90,7 +97,9 @@ impl MemoryRefreshStore {
         for (_, id) in owned.into_iter().take(excess) {
             inner.families.remove(&id);
         }
-        inner.tokens.insert(token_hash, family_id.clone());
+        inner
+            .tokens
+            .insert(token_hash, (family_id.clone(), idle_ms));
         inner.families.insert(
             family_id,
             Family {
@@ -101,6 +110,7 @@ impl MemoryRefreshStore {
                 idle_ms,
                 current: token_hash,
                 previous: None,
+                rotated: VecDeque::new(),
             },
         );
         inner.prune(now_ms);
@@ -113,9 +123,13 @@ impl MemoryRefreshStore {
         now_ms: u64,
     ) -> Result<Presented, RefreshStoreError> {
         let mut inner = self.lock()?;
-        let Some(id) = inner.tokens.get(token_hash).cloned() else {
+        let Some((id, expires)) = inner.tokens.get(token_hash).cloned() else {
             return Ok(Presented::Missing);
         };
+        if now_ms >= expires {
+            inner.tokens.remove(token_hash);
+            return Ok(Presented::Missing);
+        }
         let Some(family) = inner.families.get(&id) else {
             return Ok(Presented::Missing);
         };
@@ -166,7 +180,15 @@ impl MemoryRefreshStore {
         family.current = next;
         family.idle_ms = idle_ms;
         family.absolute_ms = family.absolute_ms.min(ceiling);
-        inner.tokens.insert(next, family_id.into());
+        family.rotated.push_back(*presented);
+        let forgotten = (family.rotated.len() > MAX_ROTATED_HASHES)
+            .then(|| family.rotated.pop_front())
+            .flatten();
+        if let Some(forgotten) = forgotten {
+            inner.tokens.remove(&forgotten);
+        }
+        inner.tokens.insert(*presented, (family_id.into(), idle_ms));
+        inner.tokens.insert(next, (family_id.into(), idle_ms));
         Ok(Rotated::Rotated)
     }
     pub async fn revoke_family(&self, family_id: &str) -> Result<(), RefreshStoreError> {
@@ -180,7 +202,7 @@ impl MemoryRefreshStore {
         client_id: &str,
     ) -> Result<bool, RefreshStoreError> {
         let mut inner = self.lock()?;
-        let Some(id) = inner.tokens.get(token_hash).cloned() else {
+        let Some((id, _)) = inner.tokens.get(token_hash).cloned() else {
             return Ok(false);
         };
         if inner
@@ -281,6 +303,54 @@ mod tests {
         ));
         assert!(matches!(
             store.lookup(&[3; 32], NOW).await.unwrap(),
+            Presented::Missing
+        ));
+    }
+
+    #[tokio::test]
+    async fn rotated_hashes_are_bounded_and_expire_at_their_idle_deadline() {
+        let store = MemoryRefreshStore::new(50);
+        store
+            .issue(&grant(), [0; 32], NOW, &policy())
+            .await
+            .unwrap();
+        let id = current(store.lookup(&[0; 32], NOW).await.unwrap()).family_id;
+        let ceiling = NOW + 3_600_000;
+        let hash = |step: usize| [step as u8; 32];
+        let rotations = MAX_ROTATED_HASHES + 2;
+        for step in 0..rotations {
+            let at = NOW + step as u64 * 1_000;
+            let rotated = store
+                .rotate(&id, &hash(step), hash(step + 1), at, 600, ceiling)
+                .await
+                .unwrap();
+            assert_eq!(rotated, Rotated::Rotated);
+        }
+        let last = NOW + (rotations as u64 - 1) * 1_000;
+        {
+            let inner = store.lock().unwrap();
+            assert_eq!(inner.tokens.len(), MAX_ROTATED_HASHES + 1);
+            assert!(!inner.tokens.contains_key(&hash(1)));
+            assert_eq!(inner.tokens[&hash(2)].1, NOW + 2_000 + 600_000);
+        }
+        // Forgotten ancestors are unknown and leave the family alone.
+        assert!(matches!(
+            store.lookup(&hash(0), last).await.unwrap(),
+            Presented::Missing
+        ));
+        current(store.lookup(&hash(rotations), last).await.unwrap());
+        // A retained ancestor past its own idle deadline is unknown as well.
+        assert!(matches!(
+            store.lookup(&hash(2), NOW + 602_000).await.unwrap(),
+            Presented::Missing
+        ));
+        current(store.lookup(&hash(rotations), NOW + 602_000).await.unwrap());
+        assert!(matches!(
+            store.lookup(&hash(3), last).await.unwrap(),
+            Presented::Reused { .. }
+        ));
+        assert!(matches!(
+            store.lookup(&hash(rotations), last).await.unwrap(),
             Presented::Missing
         ));
     }

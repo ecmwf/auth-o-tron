@@ -9,8 +9,8 @@
 //! Shared refresh-token families in Valkey; every mutation is one atomic Lua script.
 
 use super::refresh::{
-    Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant, RefreshStoreError, Rotated, deadline,
-    initial_expiry, random_id,
+    MAX_ROTATED_HASHES, Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant, RefreshStoreError,
+    Rotated, deadline, initial_expiry, random_id,
 };
 use crate::{
     config::{RefreshTokenPolicy, ui::BrowserBackendConfig},
@@ -49,7 +49,7 @@ impl ValkeyRefreshStore {
             .map_err(|_| RefreshStoreError::Unavailable)?;
         Ok(Self {
             connection,
-            prefix: format!("{key_prefix}:oauth:refresh-tokens:v1:"),
+            prefix: format!("{key_prefix}:oauth:refresh-tokens:v2:"),
             max_per_user,
         })
     }
@@ -171,6 +171,7 @@ impl ValkeyRefreshStore {
                     idle.to_string().as_bytes(),
                     ceiling.to_string().as_bytes(),
                     family_id.as_bytes(),
+                    MAX_ROTATED_HASHES.to_string().as_bytes(),
                 ],
             )
             .await?;
@@ -314,6 +315,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ttl as u64, now + 600_001);
+        for token in [[1; 32], [2; 32]] {
+            let ttl: i64 = a
+                .connection
+                .query(redis::cmd("PEXPIRETIME").arg(a.token_key(&token)))
+                .await
+                .unwrap();
+            assert_eq!(ttl as u64, now + 600_001);
+        }
         assert_eq!(
             a.rotate(&id, &[1; 32], [3; 32], now + 2, 600, ceiling)
                 .await
@@ -362,5 +371,53 @@ mod tests {
             a.lookup(&[8; 32], now + 600_000).await.unwrap(),
             Presented::Missing
         ));
+
+        let mut bounded = grant();
+        bounded.username = "bounded".into();
+        let hash = |step: usize| [100 + step as u8; 32];
+        a.issue(&bounded, hash(0), now, &policy()).await.unwrap();
+        let id = family(a.lookup(&hash(0), now).await.unwrap()).family_id;
+        let rotations = MAX_ROTATED_HASHES + 2;
+        for step in 0..rotations {
+            let rotated = b
+                .rotate(&id, &hash(step), hash(step + 1), now, 600, ceiling)
+                .await
+                .unwrap();
+            assert_eq!(rotated, Rotated::Rotated);
+        }
+        for (step, exists) in [(0, false), (1, false), (2, true), (rotations, true)] {
+            let found: bool = a
+                .connection
+                .query(redis::cmd("EXISTS").arg(a.token_key(&hash(step))))
+                .await
+                .unwrap();
+            assert_eq!(found, exists, "token {step}");
+        }
+        let history: String = a
+            .connection
+            .query(
+                redis::cmd("HGET")
+                    .arg(format!("{}family:{id}", a.prefix))
+                    .arg("history"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(history.split(' ').count(), MAX_ROTATED_HASHES);
+        assert!(matches!(
+            a.lookup(&hash(0), now).await.unwrap(),
+            Presented::Missing
+        ));
+        assert!(matches!(
+            a.lookup(&hash(2), now).await.unwrap(),
+            Presented::Reused { .. }
+        ));
+        for step in [2, rotations] {
+            let found: bool = a
+                .connection
+                .query(redis::cmd("EXISTS").arg(a.token_key(&hash(step))))
+                .await
+                .unwrap();
+            assert!(!found, "revocation removes token {step}");
+        }
     }
 }
