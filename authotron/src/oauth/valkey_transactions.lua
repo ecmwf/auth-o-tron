@@ -22,13 +22,40 @@ if (it ~= 'none' and it ~= 'zset') or (kt ~= 'none' and kt ~= 'hash') then retur
 if redis.call('ZCARD', index) > 100000 then return {'unavailable'} end
 local score = tonumber(redis.call('ZSCORE', index, key))
 if op == 'create' then
+    local client_index, budget = KEYS[3], tonumber(ARGV[12])
+    if not client_index or not budget or budget < 1 or budget > 100000 or budget % 1 ~= 0 then return {'unavailable'} end
+    local ct = kind(client_index)
+    if ct ~= 'none' and ct ~= 'zset' then return {'unavailable'} end
+    if redis.call('ZCARD', client_index) > 100000 then return {'unavailable'} end
     local ttl, cap, expiry, payload = tonumber(ARGV[3]), tonumber(ARGV[4]), tonumber(ARGV[5]), ARGV[6]
     if not ttl or ttl < 30000 or ttl > 900000 or ttl % 1 ~= 0 or not cap or cap < 1 or cap > 100000 or cap % 1 ~= 0
         or not integer(expiry) or expiry <= now or expiry > now + ttl or #payload < 1 or #payload > pending_limit then return {'unavailable'} end
     if kt ~= 'none' or score then return {'collision'} end
+    -- Client indexes disappear without another request, including after a client
+    -- is removed from policy. Original member deadlines bound retention; a new
+    -- shorter-lived reservation must not expire another member's budget early.
+    local index_expiry = expiry
+    local latest = redis.call('ZRANGE', client_index, -1, -1, 'WITHSCORES')
+    if #latest > 0 then
+        local latest_expiry = tonumber(latest[2])
+        if not integer(latest_expiry) or latest_expiry > now + 900000 then return {'unavailable'} end
+        index_expiry = math.max(index_expiry, latest_expiry)
+    end
     if not writable('pending', expiry, payload) or not redis.acl_check_cmd('ZREMRANGEBYSCORE', index, '-inf', decimal(now)) then return {'unavailable'} end
+    if not redis.acl_check_cmd('ZADD', client_index, decimal(expiry), key)
+        or not redis.acl_check_cmd('ZREM', client_index, key)
+        or not redis.acl_check_cmd('PEXPIREAT', client_index, decimal(index_expiry)) then return {'unavailable'} end
     redis.call('ZREMRANGEBYSCORE', index, '-inf', decimal(now))
+    -- Global membership is authoritative after consume/issue; promotions can shorten
+    -- expiry. Prune this bounded client partition before reserving its next slot.
+    for _, member in ipairs(redis.call('ZRANGE', client_index, 0, -1)) do
+        local deadline = tonumber(redis.call('ZSCORE', index, member))
+        if not deadline or deadline <= now then redis.call('ZREM', client_index, member) end
+    end
+    if redis.call('ZCARD', client_index) >= budget then return {'limited'} end
     if redis.call('ZCARD', index) >= cap then return {'limited'} end
+    redis.call('ZADD', client_index, decimal(expiry), key)
+    redis.call('PEXPIREAT', client_index, decimal(index_expiry))
     write('pending', expiry, payload)
     return {'ok'}
 end

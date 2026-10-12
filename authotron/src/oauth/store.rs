@@ -82,6 +82,7 @@ enum StoredKind {
     ConsentReady,
 }
 struct Stored {
+    client: String,
     kind: StoredKind,
     bytes: Vec<u8>,
     expires_at_ms: u64,
@@ -120,8 +121,24 @@ fn now_ms() -> Result<u64, StoreError> {
         .map_err(|_| StoreError::Unavailable)
 }
 
+/// Non-borrowable shares sum to the global bound. Public client IDs are budget
+/// partitions, not authenticated caller identities; edge abuse controls remain necessary.
+pub(super) fn client_budget(config: &OAuthConfig, client: &str) -> Result<usize, StoreError> {
+    let count = config.clients.len();
+    if count == 0 || config.max_authorization_transactions < count {
+        return Err(StoreError::Configuration);
+    }
+    let position = config
+        .clients
+        .iter()
+        .position(|entry| entry.client_id == client)
+        .ok_or(StoreError::Configuration)?;
+    Ok(config.max_authorization_transactions / count
+        + usize::from(position < config.max_authorization_transactions % count))
+}
+
 impl MemoryTransactionStore {
-    /// Explicit opt-in for development: no default/fallback, startup hook or background task.
+    /// Explicit development backend, initialized by the enabled OAuth runtime.
     pub fn new(config: Arc<OAuthConfig>) -> Result<Self, StoreError> {
         config.validate().map_err(|_| StoreError::Configuration)?;
         if config
@@ -184,6 +201,7 @@ impl MemoryTransactionStore {
     ) -> Result<AuthenticatedAuthorization, StoreError> {
         self.authenticated_at(id, browser_hash, now_ms, false)
     }
+    #[cfg(test)]
     pub async fn consume_authenticated(
         &self,
         id: &TransactionId,
@@ -213,12 +231,16 @@ impl MemoryTransactionStore {
             return Err(StoreError::Missing);
         }
         let session = ConsentSession::decode(&stored.bytes, id, &self.config, binding, now)
-            .map_err(|_| StoreError::Unavailable)?;
+            .map_err(|error| match error {
+                ConsentError::Binding => StoreError::Missing,
+                _ => StoreError::Unavailable,
+            })?;
         if session.expires_at_ms() > stored.expires_at_ms {
             return Err(StoreError::Unavailable);
         }
         Ok(session.into_context())
     }
+    #[cfg(test)]
     pub async fn decide_consent(
         &self,
         id: &TransactionId,
@@ -369,19 +391,28 @@ impl MemoryTransactionStore {
                     .ok_or(StoreError::Unavailable)?,
             )
             .ok_or(StoreError::Unavailable)?;
+        let client = request.client_id().to_owned();
+        let budget = client_budget(&self.config, &client)?;
+        entries.retain(|_, record| record.expires_at_ms > now);
+        if entries.len() >= self.config.max_authorization_transactions
+            || entries
+                .values()
+                .filter(|entry| entry.client == client)
+                .count()
+                >= budget
+        {
+            return Err(StoreError::Limited);
+        }
         let record = AuthorizationTransaction::new(request, binding, expiry)
             .map_err(|_| StoreError::Unavailable)?;
         let bytes = record.encode().map_err(|_| StoreError::Unavailable)?;
         AuthorizationTransaction::decode(&bytes, &self.config, now)
             .map_err(|_| StoreError::Unavailable)?;
-        entries.retain(|_, record| record.expires_at_ms > now);
-        if entries.len() >= self.config.max_authorization_transactions {
-            return Err(StoreError::Limited);
-        }
         for _ in 0..4 {
             let id = TransactionId::generate()?;
             if let Entry::Vacant(slot) = entries.entry(id.hash()) {
                 slot.insert(Stored {
+                    client,
                     kind: StoredKind::Pending,
                     bytes,
                     expires_at_ms: expiry,
@@ -463,6 +494,7 @@ impl MemoryTransactionStore {
         }
         // All checks precede replacement; the hashed key and capacity slot remain unchanged.
         *stored = Stored {
+            client: stored.client.clone(),
             kind: StoredKind::Authenticated,
             bytes,
             expires_at_ms: checked.expires_at_ms(),
@@ -474,7 +506,7 @@ impl MemoryTransactionStore {
         id: &TransactionId,
         binding: &[u8; 32],
         clock: impl FnOnce() -> Result<u64, StoreError>,
-        consume: bool,
+        _consume: bool,
     ) -> Result<AuthenticatedAuthorization, StoreError> {
         let mut entries = self.entries.lock().map_err(|_| StoreError::Unavailable)?;
         let now = clock()?;
@@ -495,7 +527,8 @@ impl MemoryTransactionStore {
         if !context.matches_source(&key) || context.expires_at_ms() > stored.expires_at_ms {
             return Err(StoreError::Unavailable);
         }
-        if consume {
+        #[cfg(test)]
+        if _consume {
             entries.remove(&key);
         }
         Ok(context)
@@ -547,12 +580,14 @@ impl MemoryTransactionStore {
         .map_err(|_| StoreError::Unavailable)?;
         let bytes = session.encode().map_err(|_| StoreError::Unavailable)?;
         *stored = Stored {
+            client: stored.client.clone(),
             kind: StoredKind::ConsentReady,
             bytes,
             expires_at_ms: session.expires_at_ms().min(stored.expires_at_ms),
         };
         Ok(token)
     }
+    #[cfg(test)]
     fn decide_consent_at(
         &self,
         id: &TransactionId,
@@ -608,6 +643,52 @@ pub(super) mod tests {
     fn at(now: u64) -> impl FnOnce() -> Result<u64, StoreError> {
         move || Ok(now)
     }
+    #[test]
+    fn client_shares_are_nonzero_bounded_and_reclaimed_on_consume_or_expiry() {
+        let mut cfg = (*config()).clone();
+        let mut other = cfg.clients[0].clone();
+        other.client_id = "other".into();
+        cfg.clients.push(other);
+        assert_eq!(
+            client_budget(&cfg, "desktop"),
+            Err(StoreError::Configuration)
+        );
+        for cap in [2, 3, 4, 5, 1024] {
+            cfg.max_authorization_transactions = cap;
+            let first = client_budget(&cfg, "desktop").unwrap();
+            let second = client_budget(&cfg, "other").unwrap();
+            assert!(first > 0 && second > 0);
+            assert_eq!(first + second, cap);
+        }
+        cfg.max_authorization_transactions = 2;
+        let store = MemoryTransactionStore::new(Arc::new(cfg)).unwrap();
+        let created = store
+            .create_at(request(&store.config), [7; 32], at(1000))
+            .unwrap();
+        assert_eq!(
+            store
+                .create_at(request(&store.config), [8; 32], at(1000))
+                .err(),
+            Some(StoreError::Limited)
+        );
+        store
+            .access_at(&created.id, &[7; 32], at(1001), true)
+            .unwrap();
+        let created = store
+            .create_at(request(&store.config), [8; 32], at(1001))
+            .unwrap();
+        assert_eq!(
+            store
+                .access_at(&created.id, &[8; 32], at(created.expires_at_ms), false)
+                .err(),
+            Some(StoreError::Missing)
+        );
+        assert!(
+            store
+                .create_at(request(&store.config), [9; 32], at(created.expires_at_ms))
+                .is_ok()
+        );
+    }
     fn code_store(cap: usize) -> MemoryTransactionStore {
         let mut cfg = (*config()).clone();
         cfg.authorization_transaction_ttl_seconds = 300;
@@ -640,6 +721,27 @@ pub(super) mod tests {
             panic!("issued code required")
         };
         code
+    }
+    #[tokio::test]
+    async fn consent_lookup_binding_mismatch_is_missing_but_corruption_is_unavailable() {
+        let store = code_store(1);
+        let (id, _, _) = ready(&store).await;
+        assert_eq!(
+            store.consent_context(&id, &[8; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        assert!(store.consent_context(&id, &[7; 32]).await.is_ok());
+        store
+            .entries
+            .lock()
+            .unwrap()
+            .get_mut(&id.hash())
+            .unwrap()
+            .bytes = b"{}".to_vec();
+        assert_eq!(
+            store.consent_context(&id, &[7; 32]).await.err(),
+            Some(StoreError::Unavailable)
+        );
     }
     const REDEMPTION: (&str, &str, &str, &str) = (
         "desktop",
@@ -1281,6 +1383,7 @@ pub(super) mod tests {
             let mut entries = store.entries.lock().unwrap();
             let original = &entries[&a.id.hash()];
             let copied = Stored {
+                client: original.client.clone(),
                 kind: StoredKind::Authenticated,
                 bytes: original.bytes.clone(),
                 expires_at_ms: original.expires_at_ms,

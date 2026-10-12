@@ -22,6 +22,7 @@ pub(super) const MAX_CONSENT_SESSION_BYTES: usize = 96 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsentError {
+    Binding,
     InvalidToken,
     InvalidDecision,
     InvalidContext,
@@ -194,7 +195,10 @@ impl ConsentSession {
         }
         let context =
             AuthenticatedAuthorization::decode(&bytes, config, browser_hash, server_now_ms)
-                .map_err(|_| InvalidContext)?;
+                .map_err(|error| match error {
+                    super::context::ContextError::Binding => Binding,
+                    _ => InvalidContext,
+                })?;
         if !context.matches_source(&source_id.hash()) {
             return Err(InvalidContext);
         }
@@ -439,7 +443,7 @@ mod tests {
         );
         assert_eq!(
             ConsentSession::decode(&bytes, &id, &config, &[8; 32], now).err(),
-            Some(InvalidContext)
+            Some(Binding)
         );
         assert_eq!(
             ConsentSession::decode(

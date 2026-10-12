@@ -28,6 +28,7 @@ use crate::{
     utils::valkey::{ConnectionError, ValkeyConnection},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 pub struct ValkeyTransactionStore {
@@ -38,11 +39,15 @@ pub struct ValkeyTransactionStore {
 }
 #[derive(Clone, Copy)]
 enum Operation {
-    Create,
+    Create {
+        client: [u8; 32],
+        budget: usize,
+    },
     Read,
     Consume,
     Promote,
     ReadAuthenticated,
+    #[cfg(test)]
     ConsumeAuthenticated,
     ReadForConsent,
     PrepareConsent,
@@ -81,7 +86,7 @@ impl ValkeyTransactionStore {
         Ok(Self {
             config,
             connection,
-            prefix: format!("{key_prefix}:oauth:authorization-transactions:v3:"),
+            prefix: format!("{key_prefix}:oauth:authorization-transactions:v4:"),
             code_prefix: format!("{key_prefix}:oauth:authorization-codes:v1:"),
         })
     }
@@ -320,13 +325,14 @@ impl ValkeyTransactionStore {
         transition_guard: Option<(u64, &[u8])>,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
         let (tag, kind, limit) = match op {
-            Operation::Create => ("create", "pending", MAX_TRANSACTION_BYTES),
+            Operation::Create { .. } => ("create", "pending", MAX_TRANSACTION_BYTES),
             Operation::Read => ("read", "pending", MAX_TRANSACTION_BYTES),
             Operation::Consume => ("consume", "pending", MAX_TRANSACTION_BYTES),
             Operation::Promote => ("promote", "pending", MAX_AUTHENTICATED_CONTEXT_BYTES),
             Operation::ReadAuthenticated => {
                 ("read", "authenticated", MAX_AUTHENTICATED_CONTEXT_BYTES)
             }
+            #[cfg(test)]
             Operation::ConsumeAuthenticated => {
                 ("consume", "authenticated", MAX_AUTHENTICATED_CONTEXT_BYTES)
             }
@@ -347,12 +353,23 @@ impl ValkeyTransactionStore {
         if payload.len() > limit || guard_payload.len() > guard_limit {
             return Err(StoreError::Unavailable);
         }
+        let mut keys = self.keys(id).to_vec();
+        let budget = if let Operation::Create { client, budget } = op {
+            keys.push(format!(
+                "{}client:{}",
+                self.prefix,
+                URL_SAFE_NO_PAD.encode(client)
+            ));
+            budget
+        } else {
+            0
+        };
         self.connection
             .query(
                 redis::cmd("EVAL")
                     .arg(include_str!("valkey_transactions.lua"))
-                    .arg(2)
-                    .arg(&self.keys(id))
+                    .arg(keys.len())
+                    .arg(keys)
                     .arg(tag)
                     .arg(MAX_TRANSACTION_BYTES)
                     .arg(self.config.authorization_transaction_ttl_seconds * 1000)
@@ -363,7 +380,8 @@ impl ValkeyTransactionStore {
                     .arg(MAX_AUTHENTICATED_CONTEXT_BYTES)
                     .arg(guard_deadline)
                     .arg(guard_payload)
-                    .arg(MAX_CONSENT_SESSION_BYTES),
+                    .arg(MAX_CONSENT_SESSION_BYTES)
+                    .arg(budget),
             )
             .await
             .map_err(|_| StoreError::Unavailable)
@@ -373,16 +391,9 @@ impl ValkeyTransactionStore {
         request: ValidatedAuthorizationRequest,
         browser_hash: [u8; 32],
     ) -> Result<CreatedTransaction, StoreError> {
-        let (seconds, micros): (u64, u64) = self
-            .connection
-            .query(&redis::cmd("TIME"))
-            .await
-            .map_err(|_| StoreError::Unavailable)?;
-        let now = seconds
-            .checked_mul(1000)
-            .and_then(|ms| ms.checked_add(micros / 1000))
-            .filter(|now| micros < 1000000 && valid_time(*now))
-            .ok_or(StoreError::Unavailable)?;
+        let budget = super::store::client_budget(&self.config, request.client_id())?;
+        let client = Sha256::digest(request.client_id().as_bytes()).into();
+        let now = self.server_now_ms().await?;
         let expiry = now
             .checked_add(self.config.authorization_transaction_ttl_seconds * 1000)
             .ok_or(StoreError::Unavailable)?;
@@ -394,7 +405,13 @@ impl ValkeyTransactionStore {
         for _ in 0..4 {
             let id = TransactionId::generate()?;
             match self
-                .call(Operation::Create, &id, expiry, &bytes, None)
+                .call(
+                    Operation::Create { client, budget },
+                    &id,
+                    expiry,
+                    &bytes,
+                    None,
+                )
                 .await?
                 .as_slice()
             {
@@ -433,13 +450,15 @@ impl ValkeyTransactionStore {
         op: Operation,
     ) -> Result<(u64, u64, Vec<u8>, Vec<u8>), StoreError> {
         let reply = self.call(op, id, 0, &[], None).await?;
-        match reply.as_slice() {
-            [status, now, expiry, bytes, kind] if status == b"ok" => {
-                Ok((number(now)?, number(expiry)?, bytes.clone(), kind.clone()))
-            }
-            [status] if status == b"missing" => Err(StoreError::Missing),
-            _ => Err(StoreError::Unavailable),
+        if reply.len() == 1 && reply[0] == b"missing" {
+            return Err(StoreError::Missing);
         }
+        let [status, now, expiry, bytes, kind]: [Vec<u8>; 5] =
+            reply.try_into().map_err(|_| StoreError::Unavailable)?;
+        if status != b"ok" {
+            return Err(StoreError::Unavailable);
+        }
+        Ok((number(&now)?, number(&expiry)?, bytes, kind))
     }
     pub async fn lookup(
         &self,
@@ -542,6 +561,7 @@ impl ValkeyTransactionStore {
             .await
             .map(|(context, _, _)| context)
     }
+    #[cfg(test)]
     pub async fn consume_authenticated(
         &self,
         id: &TransactionId,
@@ -629,8 +649,13 @@ impl ValkeyTransactionStore {
         binding: &[u8; 32],
     ) -> Result<AuthenticatedAuthorization, StoreError> {
         let (now, expiry, bytes, _) = self.raw_read(id, Operation::ReadConsent).await?;
-        let session = ConsentSession::decode(&bytes, id, &self.config, binding, now)
-            .map_err(|_| StoreError::Unavailable)?;
+        let session =
+            ConsentSession::decode(&bytes, id, &self.config, binding, now).map_err(|error| {
+                match error {
+                    ConsentError::Binding => StoreError::Missing,
+                    _ => StoreError::Unavailable,
+                }
+            })?;
         if session.expires_at_ms() > expiry {
             return Err(StoreError::Unavailable);
         }
@@ -677,6 +702,7 @@ impl ValkeyTransactionStore {
             })?;
         Ok((outcome, expiry, bytes, effective, now))
     }
+    #[cfg(test)]
     pub async fn decide_consent(
         &self,
         id: &TransactionId,
@@ -740,6 +766,44 @@ mod tests {
     ) -> T {
         store.connection.query(command).await.unwrap()
     }
+    // Exact fixture-owned state, including absolute expiry: denied mutations
+    // must neither leak a new key nor change an existing payload or deadline.
+    async fn transaction_snapshot(
+        store: &ValkeyTransactionStore,
+    ) -> std::collections::BTreeMap<String, (Vec<u8>, i64)> {
+        let mut keys: Vec<String> =
+            command(store, redis::cmd("KEYS").arg(format!("{}*", store.prefix))).await;
+        let codes: Vec<String> = command(
+            store,
+            redis::cmd("KEYS").arg(format!("{}*", store.code_prefix)),
+        )
+        .await;
+        keys.extend(codes);
+        let mut snapshot = std::collections::BTreeMap::new();
+        for key in keys {
+            let bytes: Vec<u8> = command(store, redis::cmd("DUMP").arg(&key)).await;
+            let expiry: i64 = command(store, redis::cmd("PEXPIRETIME").arg(&key)).await;
+            snapshot.insert(key, (bytes, expiry));
+        }
+        snapshot
+    }
+    async fn assert_only_expiring_client_indexes(store: &ValkeyTransactionStore) {
+        for (key, (_, expiry)) in transaction_snapshot(store).await {
+            assert!(
+                key.starts_with(&format!("{}client:", store.prefix)),
+                "unexpected retained key: {key}"
+            );
+            let now = store.server_now_ms().await.unwrap() as i64;
+            assert!(
+                expiry > now && expiry <= now + 900000,
+                "unbounded client index lifetime"
+            );
+            let kind: String = command(store, redis::cmd("TYPE").arg(&key)).await;
+            assert_eq!(kind, "zset");
+            let size: usize = command(store, redis::cmd("ZCARD").arg(&key)).await;
+            assert!(size > 0 && size <= store.config.max_authorization_transactions);
+        }
+    }
     async fn code_source(store: &ValkeyTransactionStore) -> (CreatedTransaction, ConsentToken) {
         let (_, _, identity) = super::super::context::tests::fixture().await;
         let callback = &store.config.clients[0].redirect_uris[0];
@@ -779,6 +843,200 @@ mod tests {
             panic!("issued code required")
         };
         code
+    }
+    async fn admission_reclamation_cases(backend: &BrowserBackendConfig) {
+        let mut backend = backend.clone();
+        if let BrowserBackendConfig::Valkey { key_prefix, .. } = &mut backend {
+            key_prefix.push_str(":admission");
+        }
+        let mut cfg = (*config()).clone();
+        let mut other = cfg.clients[0].clone();
+        other.client_id = "other".into();
+        cfg.clients.push(other);
+        cfg.max_authorization_transactions = 3;
+        let cfg = Arc::new(cfg);
+        let a = ValkeyTransactionStore::new(cfg.clone(), &backend)
+            .await
+            .unwrap();
+        let b = ValkeyTransactionStore::new(cfg.clone(), &backend)
+            .await
+            .unwrap();
+        let other_request = || {
+            super::super::authorization::validate_authorization_request(&cfg,
+            b"client_id=other&redirect_uri=https://app.example.org/cb&response_type=code&resource=https://mcp.example.org/mcp&scope=read&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256").unwrap()
+        };
+        // Both replicas race at the boundary: desktop gets exactly two slots and
+        // other gets exactly one, independent of which client's calls run first.
+        let results = tokio::join!(
+            a.create(request(&cfg), [7; 32]),
+            b.create(request(&cfg), [7; 32]),
+            a.create(request(&cfg), [7; 32]),
+            b.create(request(&cfg), [7; 32]),
+            a.create(other_request(), [7; 32]),
+            b.create(other_request(), [7; 32])
+        );
+        let desktop = [results.0, results.1, results.2, results.3];
+        let other = [results.4, results.5];
+        assert_eq!(desktop.iter().filter(|result| result.is_ok()).count(), 2);
+        assert_eq!(other.iter().filter(|result| result.is_ok()).count(), 1);
+        for result in desktop.into_iter().chain(other) {
+            match result {
+                Ok(created) => {
+                    b.consume(&created.id, &[7; 32]).await.unwrap();
+                }
+                Err(error) => assert_eq!(error, StoreError::Limited),
+            }
+        }
+        let _other = a.create(other_request(), [7; 32]).await.unwrap();
+        let (denied, denied_csrf) = code_source(&a).await;
+        let (approved, approved_csrf) = code_source(&b).await;
+        assert_eq!(
+            a.create(request(&cfg), [7; 32]).await.err(),
+            Some(StoreError::Limited)
+        );
+
+        // Lookup distinguishes browser mismatch from corrupted trusted state.
+        assert_eq!(
+            b.consent_context(&approved.id, &[8; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
+        let key = &a.keys(&approved.id)[1];
+        let original: Vec<u8> = command(&a, redis::cmd("HGET").arg(key).arg("payload")).await;
+        let _: usize = command(
+            &a,
+            redis::cmd("HSET")
+                .arg(key)
+                .arg("payload")
+                .arg(b"{}".as_slice()),
+        )
+        .await;
+        assert_eq!(
+            b.consent_context(&approved.id, &[7; 32]).await.err(),
+            Some(StoreError::Unavailable)
+        );
+        let _: usize = command(&a, redis::cmd("HSET").arg(key).arg("payload").arg(original)).await;
+
+        assert!(matches!(
+            b.issue_code(&denied.id, &[7; 32], denied_csrf.as_secret_str(), "deny")
+                .await
+                .unwrap(),
+            CodeIssueOutcome::Denied
+        ));
+        let _replacement = code_source(&a).await;
+        assert_eq!(
+            a.create(request(&cfg), [7; 32]).await.err(),
+            Some(StoreError::Limited)
+        );
+        assert!(matches!(
+            a.issue_code(
+                &approved.id,
+                &[7; 32],
+                approved_csrf.as_secret_str(),
+                "approve"
+            )
+            .await
+            .unwrap(),
+            CodeIssueOutcome::Issued(_)
+        ));
+
+        // Issue removes the global source membership; the client index must
+        // reclaim it before admitting this deliberately short-lived fixture.
+        let now = b.server_now_ms().await.unwrap();
+        let expiry = now + 1000;
+        let id = TransactionId::generate().unwrap();
+        let bytes = AuthorizationTransaction::new(request(&cfg), [7; 32], expiry)
+            .unwrap()
+            .encode()
+            .unwrap();
+        let reply = b
+            .call(
+                Operation::Create {
+                    client: Sha256::digest(b"desktop").into(),
+                    budget: 2,
+                },
+                &id,
+                expiry,
+                &bytes,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(reply.as_slice(), [status] if status == b"ok"));
+        assert_eq!(
+            a.create(request(&cfg), [7; 32]).await.err(),
+            Some(StoreError::Limited)
+        );
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        assert!(a.create(request(&cfg), [7; 32]).await.is_ok());
+        assert_eq!(
+            b.create(other_request(), [7; 32]).await.err(),
+            Some(StoreError::Limited)
+        );
+    }
+    async fn client_index_lifetime_cases(backend: &BrowserBackendConfig) {
+        let mut backend = backend.clone();
+        if let BrowserBackendConfig::Valkey { key_prefix, .. } = &mut backend {
+            key_prefix.push_str(":index-lifetime");
+        }
+        let mut cfg = (*config()).clone();
+        cfg.max_authorization_transactions = 3;
+        let store = ValkeyTransactionStore::new(Arc::new(cfg), &backend)
+            .await
+            .unwrap();
+        // Record expiry is permitted, but client-index expiry is denied. This
+        // exercises the index-specific preflight rather than the existing record check.
+        let before = transaction_snapshot(&store).await;
+        let _: String = command(
+            &store,
+            redis::cmd("ACL")
+                .arg("SETUSER")
+                .arg("default")
+                .arg("-pexpireat")
+                .arg(format!("(+pexpireat ~{}record:*)", store.prefix)),
+        )
+        .await;
+        let denied = store.create(request(&store.config), [7; 32]).await;
+        let _: String = command(
+            &store,
+            redis::cmd("ACL").arg(&["SETUSER", "default", "clearselectors", "+pexpireat"]),
+        )
+        .await;
+        assert_eq!(denied.err(), Some(StoreError::Unavailable));
+        assert_eq!(transaction_snapshot(&store).await, before);
+
+        let client: [u8; 32] = Sha256::digest(b"desktop").into();
+        let index = format!("{}client:{}", store.prefix, URL_SAFE_NO_PAD.encode(client));
+        let now = store.server_now_ms().await.unwrap();
+        let mut latest = 0;
+        let mut records = Vec::new();
+        for lifetime in [1000, 500, 1500] {
+            let expiry = now + lifetime;
+            let id = TransactionId::generate().unwrap();
+            let bytes = AuthorizationTransaction::new(request(&store.config), [7; 32], expiry)
+                .unwrap()
+                .encode()
+                .unwrap();
+            let reply = store
+                .call(
+                    Operation::Create { client, budget: 3 },
+                    &id,
+                    expiry,
+                    &bytes,
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(reply.as_slice(), [status] if status == b"ok"));
+            latest = latest.max(expiry);
+            let deadline: u64 = command(&store, redis::cmd("PEXPIRETIME").arg(&index)).await;
+            assert_eq!(deadline, latest);
+            records.push(store.keys(&id)[1].clone());
+        }
+        tokio::time::sleep(Duration::from_millis(1600)).await;
+        // No subsequent create/prune call is needed, even if this client is
+        // removed from configuration immediately after the last reservation.
+        let remaining: usize = command(&store, redis::cmd("EXISTS").arg(&index).arg(records)).await;
+        assert_eq!(remaining, 0);
     }
     async fn redemption_cases(backend: &BrowserBackendConfig) {
         use CodeStoreError::*;
@@ -1021,8 +1279,7 @@ mod tests {
                 .await
                 .is_ok()
         );
-        let count: usize = command(&a, &redis::cmd("DBSIZE")).await;
-        assert_eq!(count, 0);
+        assert_only_expiring_client_indexes(&a).await;
     }
     async fn code_cases(backend: &BrowserBackendConfig) {
         use CodeStoreError::*;
@@ -1043,6 +1300,7 @@ mod tests {
             .raw_read(&source.id, Operation::ReadConsent)
             .await
             .unwrap();
+        let before = transaction_snapshot(&a).await;
         // Allow ZADD only in the source namespace; code-index ZADD is denied specifically.
         let selector = format!("(+zadd ~{}*)", a.prefix);
         let _: String = command(
@@ -1079,8 +1337,7 @@ mod tests {
                 .await
                 .unwrap();
             assert!(preserved == original);
-            let count: usize = command(&a, &redis::cmd("DBSIZE")).await;
-            assert_eq!(count, 2);
+            assert_eq!(transaction_snapshot(&a).await, before);
         }
         let _: String = command(&a, redis::cmd("ACL").arg(&["SETUSER", "default", "+del"])).await;
         let (left, right) = tokio::join!(
@@ -1188,8 +1445,7 @@ mod tests {
         let count: usize = command(&a, redis::cmd("ZCARD").arg(&keys[0])).await;
         assert_eq!(count, 1);
         let _: usize = command(&a, redis::cmd("DEL").arg(&keys)).await;
-        let count: usize = command(&a, &redis::cmd("DBSIZE")).await;
-        assert_eq!(count, 0);
+        assert_only_expiring_client_indexes(&a).await;
     }
     async fn consent_cases(backend: &BrowserBackendConfig) {
         let (mut cfg, _, identity) = super::super::context::tests::fixture().await;
@@ -1417,8 +1673,7 @@ mod tests {
                 ));
             }
         }
-        let count: usize = command(&a, &redis::cmd("DBSIZE")).await;
-        assert_eq!(count, 0);
+        assert_only_expiring_client_indexes(&a).await;
     }
     async fn effective_deadline_and_hash_shape_cases(backend: &BrowserBackendConfig) {
         let (mut cfg, _, identity) = super::super::context::tests::fixture().await;
@@ -1776,6 +2031,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let a = ready.expect("disposable Valkey did not become ready");
+        admission_reclamation_cases(&backend).await;
+        client_index_lifetime_cases(&backend).await;
         let b = ValkeyTransactionStore::new(cfg.clone(), &backend)
             .await
             .unwrap();
@@ -1859,7 +2116,20 @@ mod tests {
             .encode()
             .unwrap();
         let reply = a
-            .call(Operation::Create, &short, expiry, &bytes, None)
+            .call(
+                Operation::Create {
+                    client: Sha256::digest(request(&a.config).client_id().as_bytes()).into(),
+                    budget: super::super::store::client_budget(
+                        &a.config,
+                        request(&a.config).client_id(),
+                    )
+                    .unwrap(),
+                },
+                &short,
+                expiry,
+                &bytes,
+                None,
+            )
             .await
             .unwrap();
         assert!(matches!(reply.as_slice(), [status] if status == b"ok"));
@@ -1926,21 +2196,29 @@ mod tests {
         );
         let _: usize = command(&a, redis::cmd("DEL").arg(&keys)).await;
         let _: String = command(&a, redis::cmd("SET").arg(&keys[0]).arg("wrong-type")).await;
+        let before = transaction_snapshot(&a).await;
         assert_eq!(
             a.create(request(&cfg), [7; 32]).await.err(),
             Some(StoreError::Unavailable)
         );
-        let count: usize = command(&a, &redis::cmd("DBSIZE")).await;
-        assert_eq!(count, 1);
+        assert_eq!(transaction_snapshot(&a).await, before);
         let _: usize = command(&a, redis::cmd("DEL").arg(&keys[0])).await;
-        let _: String = command(&a, redis::cmd("ACL").arg(&["SETUSER", "default", "-zadd"])).await;
-        assert_eq!(
-            a.create(request(&cfg), [7; 32]).await.err(),
-            Some(StoreError::Unavailable)
-        );
-        let count: usize = command(&a, &redis::cmd("DBSIZE")).await;
-        assert_eq!(count, 0);
-        let _: String = command(&a, redis::cmd("ACL").arg(&["SETUSER", "default", "+zadd"])).await;
+        for denied in ["zadd", "pexpireat"] {
+            let before = transaction_snapshot(&a).await;
+            let _: String = command(
+                &a,
+                redis::cmd("ACL").arg(&["SETUSER", "default", &format!("-{denied}")]),
+            )
+            .await;
+            let result = a.create(request(&cfg), [7; 32]).await;
+            let _: String = command(
+                &a,
+                redis::cmd("ACL").arg(&["SETUSER", "default", &format!("+{denied}")]),
+            )
+            .await;
+            assert_eq!(result.err(), Some(StoreError::Unavailable));
+            assert_eq!(transaction_snapshot(&a).await, before);
+        }
         consent_cases(&backend).await;
         effective_deadline_and_hash_shape_cases(&backend).await;
         authenticated_cases(&backend).await;
