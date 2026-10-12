@@ -203,12 +203,18 @@ python3 authotron/examples/ecmwf-api-key/render_api_key.py \
   --valkey-secret-file /tmp/opencode/authotron-browser-valkey.json \
   --oauth-secret-file /tmp/opencode/authotron-oauth-signing.json \
   --oauth-allow-ecmwf-uid <ecmwf-uid> \
+  --oauth-aviso-resource https://aviso-mcp-dev.lumi.apps.dte.destination-earth.eu/mcp \
   --output-dir /tmp/opencode/authotron-api-key
 ```
 
 `--oauth-allow-ecmwf-uid UID` is optional and repeatable (at most 32 unique uids,
 1–128 characters, no whitespace or control characters); it is rejected without
 `--oauth-secret-file`. The default allowlist is empty.
+
+`--oauth-aviso-resource URL` is optional and also requires `--oauth-secret-file`.
+It registers one extra resource (scope `aviso:read`) for the pre-registered MCP
+clients below. The URL must be a canonical HTTPS resource identifier: lowercase
+host, no default `:443`, a path, and no query, fragment or userinfo.
 
 The OAuth file holds **only `private-key-pem`**: an unencrypted RSA-2048 PKCS8 PEM
 generated on first use with mode `0600` and reused afterwards. It follows the same
@@ -228,7 +234,8 @@ new key changes the configuration checksum; the pod template additionally carrie
 oauth:
   enabled: true
   issuer: https://authotron-palyground.lumi.apps.dte.destination-earth.eu/
-  access_token_ttl_seconds: 120
+  access_token_ttl_seconds: 3600
+  max_authorization_transactions: 1024
   signing:
     active_kid: playground-<sha256-prefix>
     keys:
@@ -242,12 +249,26 @@ oauth:
       resources:
         - resource: https://127.0.0.1:8444/mcp
           scopes: [mcp:read]
+    - client_id: claude-code # ...one entry per pre-registered MCP client (below)
+      display_name: Claude Code
+      application_type: native
+      redirect_uris: ["http://localhost/callback", "http://127.0.0.1/callback"]
+      resources:
+        - resource: https://127.0.0.1:8444/mcp
+          scopes: [mcp:read]
+        - resource: <--oauth-aviso-resource> # only with the flag
+          scopes: [aviso:read]
   resources:
     - resource: https://127.0.0.1:8444/mcp
       allowed_realms: [browser-demo, ecmwf] # browser-demo only with Basic
       scopes:
         - name: mcp:read
           required_roles: [mcp-demo]
+    - resource: <--oauth-aviso-resource> # only with the flag
+      allowed_realms: [browser-demo, ecmwf] # browser-demo only with Basic
+      scopes:
+        - name: aviso:read
+          required_roles: []
 augmenters:
   - type: plain_advanced # only with Basic; mcp-demo only with OAuth
     name: Playground Basic roles
@@ -264,11 +285,15 @@ augmenters:
 Clients must use the issuer
 **`https://authotron-palyground.lumi.apps.dte.destination-earth.eu/`** (with the
 trailing slash), which matches `ui.browser_session.public_origin`. Its metadata is
-at `/.well-known/oauth-authorization-server`. Other OAuth settings keep server
-defaults (for example 1024 transactions); access tokens are shortened to
-**120 seconds** (server bounds 60–3600, default 300).
+at `/.well-known/oauth-authorization-server`. Access tokens live **3600 seconds**
+(the server maximum; default 300): no refresh tokens are issued yet, so clients
+repeat the browser sign-in after expiry. `max_authorization_transactions` is set
+explicitly to 1024; the server splits it into non-borrowable per-client shares
+(113–114 slots for each of the 9 clients). Other OAuth settings keep server defaults.
 
-**OAuth policy.** `mcp:read` requires role `mcp-demo`. `allowed_realms` stays
+**OAuth policy.** `aviso:read` requires no role: any user who signs in through a
+playground browser method (realms `browser-demo`, `ecmwf`) may obtain it, the same
+audience as the Aviso playground. `mcp:read` requires role `mcp-demo`. `allowed_realms` stays
 derived from the browser providers, so realm membership alone is not enough:
 
 - the Basic demo user `browser-demo` receives `mcp-demo` from its augmenter;
@@ -305,8 +330,80 @@ login.
 - The bundle now also contains the RSA private key (Base64 is not encryption).
   The renderer never prints it; it never appears in ConfigMaps, the source
   archive, annotations or command output.
-- Only the public client registration above exists; there is no dynamic
-  registration, refresh token or confidential client.
+- Only the public client registrations above exist; there is no dynamic
+  registration, refresh token or confidential client. Client IDs are public and
+  not proof of identity: any local program may claim `claude-code` and receive
+  a loopback callback. The user's consent page names the client it asked for.
+- An `aviso:read` token is valid for one hour and cannot be revoked early.
+
+### Pre-registered MCP clients
+
+Public clients are pre-registered so MCP clients that do not use dynamic client
+registration can sign in with a fixed client ID. Callbacks follow each vendor's
+documentation (checked 2026-10). Loopback `http://` callbacks require
+`application_type: native`, and the server matches them on any port with the
+same host, path and query (`localhost` and `127.0.0.1` are not interchangeable).
+Hosted-only clients use `web`. Every client may request `mcp:read` for the local
+demo resource and, with `--oauth-aviso-resource`, `aviso:read`; `mcp-local` keeps
+its fixed callback and the local resource only.
+
+| `client_id` | Client | Type | Registered callbacks |
+| --- | --- | --- | --- |
+| `mcp-local` | Local MCP demo | native | `http://127.0.0.1:49152/callback` |
+| `claude-code` | Claude Code | native | `http://localhost/callback`, `http://127.0.0.1/callback` |
+| `claude-ai` | Claude (web, Desktop, mobile) | web | `https://claude.ai/api/mcp/auth_callback` |
+| `codex` | OpenAI Codex | native | `http://127.0.0.1/callback` |
+| `chatgpt` | ChatGPT | web | `https://chatgpt.com/connector_platform_oauth_redirect` |
+| `gemini-cli` | Gemini CLI | native | `http://localhost/oauth/callback` |
+| `vscode` | Visual Studio Code | native | `http://127.0.0.1:33418`, `http://127.0.0.1:33418/`, `https://vscode.dev/redirect`, `https://insiders.vscode.dev/redirect` |
+| `cursor` | Cursor | native | `http://localhost/callback`, `https://www.cursor.com/agents/mcp/oauth/callback` |
+| `mcp-inspector` | MCP Inspector | native | `http://127.0.0.1/oauth/callback`, `http://localhost/oauth/callback`, `http://localhost/oauth/callback/debug` |
+
+VS Code documents the path-less `http://127.0.0.1:33418`; both spellings are
+registered because callback paths are compared literally. The renderer checks
+every row against the server's callback rules; the rendered configuration was
+also loaded by the server binary and validated against `authotron/schema.json`.
+
+The MCP server must advertise this issuer in its protected-resource metadata so
+clients discover it. Setup, with `AVISO` set to the `--oauth-aviso-resource` URL:
+
+- **Claude Code**: `claude mcp add --transport http --client-id claude-code aviso "$AVISO"`
+- **OpenAI Codex**: `codex mcp add aviso --url "$AVISO" --oauth-client-id codex`
+- **Gemini CLI** (`~/.gemini/settings.json`):
+
+  ```json
+  {
+    "mcpServers": {
+      "aviso": {
+        "httpUrl": "https://aviso-mcp-dev.lumi.apps.dte.destination-earth.eu/mcp",
+        "oauth": { "enabled": true, "clientId": "gemini-cli", "scopes": ["aviso:read"] }
+      }
+    }
+  }
+  ```
+
+- **Visual Studio Code**: add the server as an HTTP MCP server; when prompted for
+  a client ID (no dynamic registration), enter `vscode` and leave the secret empty.
+- **Cursor** (`~/.cursor/mcp.json`):
+
+  ```json
+  {
+    "mcpServers": {
+      "aviso": {
+        "url": "https://aviso-mcp-dev.lumi.apps.dte.destination-earth.eu/mcp",
+        "auth": { "CLIENT_ID": "cursor", "scopes": ["aviso:read"] }
+      }
+    }
+  }
+  ```
+
+- **Claude (claude.ai, Desktop, mobile)**: *Settings → Connectors → Add custom
+  connector*, URL `$AVISO`, advanced settings OAuth Client ID `claude-ai`, no secret.
+- **ChatGPT**: create a connector for `$AVISO` and choose a predefined OAuth client
+  with client ID `chatgpt`, no secret (public client, token auth `none`).
+- **MCP Inspector**: `npx @modelcontextprotocol/inspector`, transport Streamable
+  HTTP, URL `$AVISO`, then under *Authentication* set Client ID `mcp-inspector`
+  and scope `aviso:read`.
 
 The Ingress adds exactly `/oauth/authorize`, `/oauth/continue`, `/oauth/consent`,
 `/oauth/token` and `/oauth/jwks` (Exact) and
