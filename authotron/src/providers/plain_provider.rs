@@ -72,6 +72,15 @@ impl Provider for PlainAuthProvider {
 
     /// Decode the credentials (base64-encoded "username:password") and check
     /// against the config’s user list. Return a `User` on success.
+    fn account_still_exists(&self, username: &str) -> Option<bool> {
+        Some(
+            self.config
+                .users
+                .iter()
+                .any(|user| user.username == username),
+        )
+    }
+
     async fn authenticate(&self, credentials: &str) -> Result<User, String> {
         // 1) Decode base64 -> bytes
         let decoded_bytes = match general_purpose::STANDARD.decode(credentials) {
@@ -204,6 +213,16 @@ mod tests {
             realm: "test".to_string(),
             users: vec![],
         }
+    }
+
+    #[test]
+    fn account_still_exists_matches_configured_usernames_exactly() {
+        let provider = PlainAuthProvider::new(&create_test_config());
+        assert_eq!(provider.account_still_exists("user1"), Some(true));
+        assert_eq!(provider.account_still_exists("User1"), Some(false));
+        assert_eq!(provider.account_still_exists("removed"), Some(false));
+        let empty = PlainAuthProvider::new(&create_empty_users_config());
+        assert_eq!(empty.account_still_exists("user1"), Some(false));
     }
 
     /// Test that valid credentials (username:password) are correctly authenticated.

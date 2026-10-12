@@ -122,6 +122,11 @@ pub trait Provider: Send + Sync {
         None
     }
     async fn authenticate(&self, credentials: &str) -> Result<User, String>;
+    /// Whether `username` is still a configured account, without credentials.
+    /// `None` when the provider cannot tell (e.g. a remote API-key service).
+    fn account_still_exists(&self, _username: &str) -> Option<bool> {
+        None
+    }
 }
 
 /// Create an authentication provider from a given config.
