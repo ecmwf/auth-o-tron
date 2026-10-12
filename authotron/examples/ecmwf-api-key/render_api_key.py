@@ -28,6 +28,11 @@ _spec = importlib.util.spec_from_file_location(
 )
 private_paths = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(private_paths)
+_spec = importlib.util.spec_from_file_location(
+    "shared_images", Path(__file__).parents[1] / "shared_images.py"
+)
+shared_images = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(shared_images)
 NAMESPACE = preview.NAMESPACE
 SECRET_NAME = "authotron-ecmwf-browser"
 PROVIDER = {
@@ -40,8 +45,7 @@ LOGIN_PATHS = ("/login/ecmwf-api-key", "/login/account")
 BASIC_PROVIDER_NAME = "Playground Basic Provider"
 BASIC_USERNAME = "browser-demo"
 LOGO_PATH = "/static/aviso-logo.png"
-# Official Valkey 9.1.2 digest verified by the browser-sso renderer.
-VALKEY_IMAGE = "docker.io/valkey/valkey@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11"
+VALKEY_IMAGE = shared_images.VALKEY_IMAGE
 VALKEY_NAME = f"{preview.RELEASE}-browser-valkey"
 VALKEY_PASSWORD_ENV = "AOT_UI__BROWSER_SESSION__BACKEND__PASSWORD"
 

@@ -28,6 +28,11 @@ _spec = importlib.util.spec_from_file_location(
 )
 private_paths = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(private_paths)
+_spec = importlib.util.spec_from_file_location(
+    "shared_images", Path(__file__).parents[1] / "shared_images.py"
+)
+shared_images = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(shared_images)
 NAMESPACE = preview.NAMESPACE
 SECRET_NAME = "authotron-browser-sso"
 INGRESS_PEER = {
@@ -50,7 +55,7 @@ IMAGES = {
     # Valkey 9.1.2-alpine and unprivileged Nginx 1.28.2-alpine.
     "keycloak": "quay.io/keycloak/keycloak@sha256:27b3230fbabb8c9ff3c66c864cf09dcd8a41aca82e5100679d109ef0eeb05741",
     "oauth2-proxy": "quay.io/oauth2-proxy/oauth2-proxy@sha256:8498b0d0ef0a7b29686414000a08aee467f02d0299c9ed1e006a8f33fc017916",
-    "valkey": "docker.io/valkey/valkey@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11",
+    "valkey": shared_images.VALKEY_IMAGE,
     "nginx": "docker.io/nginxinc/nginx-unprivileged@sha256:7377697a821c131a924a7105fafbe7414db4e9fcc77a6f08f776f33f141ec3f8",
 }
 SECRET_KEYS = {
@@ -352,6 +357,11 @@ def deployment(
         PREFIX + component,
         spec={
             "replicas": 1,
+            **(
+                {"strategy": {"type": "Recreate"}}
+                if component in ("keycloak", "valkey")
+                else {}
+            ),
             "selector": {"matchLabels": labels(component)},
             "template": {"metadata": {"labels": labels(component)}, "spec": pod},
         },
@@ -676,6 +686,31 @@ def secret_resource(bundle):
     )
 
 
+def bind_credentials(resources, bundle):
+    """Roll only consumers of each credential; keep raw values out of Pod metadata."""
+    validate_secrets(bundle)
+    for doc in resources:
+        if doc["kind"] != "Deployment":
+            continue
+        template = doc["spec"]["template"]
+        keys = {
+            env["valueFrom"]["secretKeyRef"]["key"]
+            for container in template["spec"]["containers"]
+            for env in container.get("env", [])
+            if env.get("valueFrom", {}).get("secretKeyRef", {}).get("name")
+            == SECRET_NAME
+        }
+        if keys:
+            checksum = hashlib.sha256(
+                json.dumps(
+                    {key: bundle[key] for key in sorted(keys)}, sort_keys=True
+                ).encode()
+            ).hexdigest()
+            template["metadata"].setdefault("annotations", {})[
+                "checksum/credentials"
+            ] = checksum
+
+
 def validate_sso(resources, profile, assets):
     """Fail closed against the fixed composition, including every Pod and route field."""
     if NAMESPACE != "authotron-palyground":
@@ -707,6 +742,7 @@ def validate_sso(resources, profile, assets):
     except (ValueError, UnicodeError):
         raise ValueError("invalid encoded Secret") from None
     expected.append(secret_resource(bundle))
+    bind_credentials(expected, bundle)
     wanted = {(doc["kind"], doc["metadata"]["name"]): doc for doc in expected}
     if seen != wanted:
         raise ValueError(
@@ -800,6 +836,7 @@ def render_bundles(project, chart, profile, bundle):
     ):
         raise ValueError("credential in UI bundle")
     sso = render_public_sso(profile, assets) + [secret_resource(bundle)]
+    bind_credentials(sso, bundle)
     validate_sso(sso, profile, assets)
     return ui, sso, archive
 

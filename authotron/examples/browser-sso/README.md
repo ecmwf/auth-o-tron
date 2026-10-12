@@ -95,6 +95,36 @@ enter the public source ConfigMap through the compressed build archive.
 The Keycloak import and proxy consume the same namespace Secret, and callback
 registration/proxy configuration derive from one immutable profile.
 
+### Credential rotation and coordinated replacement
+
+Pod templates carry a SHA-256 checksum of only the Secret keys that each role
+consumes: Keycloak uses the client secret and demo password; OAuth2-proxy uses
+the client secret, cookie secret and Valkey password; Valkey uses its password.
+Only digests appear in annotations, never credential values. Keep generated,
+high-entropy credentials. The unchanged bundle renders identical checksums;
+changing credentials replaces their consumers even though the Secret name stays
+fixed. Nginx and the branding preview do not depend on these credentials.
+
+These checksums trigger replacement, but do not coordinate multiple Deployments.
+For rotation, schedule a demo outage and use the same explicit kubeconfig,
+context and `authotron-palyground` namespace as the apply procedure below:
+
+1. Render and review a complete replacement bundle using a newly generated
+   private credential file outside Git and the reserved source paths.
+2. Scale `authotron-sso-oauth2-proxy`, `authotron-sso-keycloak` and
+   `authotron-sso-valkey` to zero and wait until their old Pods have terminated.
+3. Apply the new Secret first, then the complete rendered SSO bundle using the
+   documented server-side apply procedure. The bundle restores one replica per
+   component. Wait for all three Deployments to be ready before resuming use.
+4. Start a fresh browser sign-in. Existing sessions and in-flight logins are lost.
+
+Do not update only the Secret or rotate live consumers independently: environment
+variables and Keycloak's imported realm remain at the old generation until Pod
+replacement. Keycloak and Valkey use `Recreate`, preventing overlapping independent
+ephemeral databases/session stores during ordinary updates. This deliberately
+introduces downtime and state loss; it does not provide atomic cross-service
+rotation. Both SSO and direct-login use the Valkey pin in `../shared_images.py`.
+
 Get independent review, run the offline tests and required workspace checks,
 then use server-side dry-run and apply with explicit kubeconfig, context and
 `--namespace=authotron-palyground`. All application resources belong only to that

@@ -1,9 +1,11 @@
 """Offline renderer checks using disposable sources, credentials and Helm output."""
 
 import base64
+import ast
 import copy
 from dataclasses import FrozenInstanceError
 import io
+import importlib.util
 import json
 from pathlib import Path
 import stat
@@ -62,6 +64,7 @@ class RendererTests(unittest.TestCase):
         self.bundle["cookie-secret"] = base64.b64encode(b"f" * 32).decode()
         self.docs = renderer.render_public_sso(self.profile, self.assets)
         self.docs.append(renderer.secret_resource(self.bundle))
+        renderer.bind_credentials(self.docs, self.bundle)
 
     def doc(self, kind, name, docs=None):
         return next(
@@ -80,6 +83,75 @@ class RendererTests(unittest.TestCase):
         change(docs)
         with self.assertRaises(ValueError):
             renderer.validate_sso(docs, self.profile, self.assets)
+
+    def test_credential_rotation_rolls_only_consuming_roles(self):
+        consumers = {
+            "client-secret": {"keycloak", "oauth2-proxy"},
+            "demo-user-password": {"keycloak"},
+            "cookie-secret": {"oauth2-proxy"},
+            "valkey-password": {"valkey", "oauth2-proxy"},
+        }
+        for key, roles in consumers.items():
+            with self.subTest(key=key):
+                bundle = dict(self.bundle)
+                bundle[key] = (
+                    base64.urlsafe_b64encode(b"r" * 32).decode()
+                    if key == "cookie-secret"
+                    else "rotated-" + "r" * 32
+                )
+                docs = renderer.render_public_sso(self.profile, self.assets)
+                docs.append(renderer.secret_resource(bundle))
+                renderer.bind_credentials(docs, bundle)
+                renderer.validate_sso(docs, self.profile, self.assets)
+                for role in ("keycloak", "oauth2-proxy", "valkey", "nginx"):
+                    original = self.doc("Deployment", renderer.PREFIX + role)
+                    changed = self.doc("Deployment", renderer.PREFIX + role, docs)
+                    self.assertEqual(original != changed, role in roles)
+                    annotations = changed["spec"]["template"]["metadata"].get(
+                        "annotations", {}
+                    )
+                    if role != "nginx":
+                        self.assertRegex(
+                            annotations["checksum/credentials"], r"^[0-9a-f]{64}$"
+                        )
+                public = yaml.safe_dump_all(
+                    doc for doc in docs if doc["kind"] != "Secret"
+                )
+                for value in bundle.values():
+                    self.assertNotIn(value, public)
+                    self.assertNotIn(base64.b64encode(value.encode()).decode(), public)
+                renderer.bind_credentials(docs, bundle)
+                renderer.validate_sso(docs, self.profile, self.assets)
+
+    def test_credential_checksum_and_stateful_strategy_are_validated(self):
+        for role in ("keycloak", "valkey"):
+            self.assertEqual(
+                self.doc("Deployment", renderer.PREFIX + role)["spec"]["strategy"],
+                {"type": "Recreate"},
+            )
+            self.assert_invalid(
+                lambda docs: self.doc("Deployment", renderer.PREFIX + role, docs)[
+                    "spec"
+                ].update(strategy={"type": "RollingUpdate"})
+            )
+        self.assert_invalid(
+            lambda docs: self.doc("Deployment", renderer.PREFIX + "oauth2-proxy", docs)[
+                "spec"
+            ]["template"]["metadata"]["annotations"].pop("checksum/credentials")
+        )
+
+    def test_valkey_pin_has_one_owner_for_both_renderers(self):
+        path = Path(renderer.__file__).parents[1] / "ecmwf-api-key/render_api_key.py"
+        spec = importlib.util.spec_from_file_location("direct_renderer", path)
+        direct = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(direct)
+        self.assertEqual(renderer.IMAGES["valkey"], direct.VALKEY_IMAGE)
+        self.assertEqual(direct.VALKEY_IMAGE, renderer.shared_images.VALKEY_IMAGE)
+        for module in (renderer, direct):
+            tree = ast.parse(Path(module.__file__).read_text())
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    self.assertNotIn("valkey@sha256:", node.value)
 
     def test_profile_is_immutable_and_derives_all_callback_uses(self):
         with self.assertRaises(FrozenInstanceError):
@@ -401,7 +473,7 @@ class RendererTests(unittest.TestCase):
             path.write_text("public build fixture\n")
         for name in preview.SOURCE_DIRS:
             directory = self.project / name
-            directory.mkdir(parents=True)
+            directory.mkdir(parents=True, exist_ok=True)
             (directory / "lib.rs").write_text("// public fixture\n")
         fixture = self.project / "authotron/examples/login-ui/aviso.yaml"
         fixture.parent.mkdir(parents=True, exist_ok=True)
