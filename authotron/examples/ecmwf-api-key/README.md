@@ -3,10 +3,10 @@
 This disposable renderer enables direct login at `/login`. API-key and optional
 Basic forms open in an accessible dialog without leaving the branded chooser;
 SSO remains a separate redirect. Standalone credential pages remain available as
-a JavaScript-free fallback. Each provider with a `browser` block is a numbered
-method at `/login/method/<n>` (0-based, in provider order): without Basic the API
-key form is `/login/method/0`; with Basic, the "Username and password" provider is
-listed first (`/login/method/0`) and "ECMWF API key" is `/login/method/1`. The
+a JavaScript-free fallback. Each provider with a `browser` block is a method at
+`/login/method/<id>`, keyed by its `browser.id`: the API key form is
+`/login/method/ecmwf-api-key` and, when Basic is enabled, the "Username and
+password" provider (listed first) is `/login/method/password`. The
 authenticated identity is shown at `/login/account`. The renderer targets the backend interface in the source being
 packaged; offline renderer checks do not establish backend runtime behavior.
 Browser sessions default to **300 seconds**, with configurable absolute expiry
@@ -34,7 +34,8 @@ direct API-key button. It never changes API-key validation or adds a Keycloak
 dependency to that path. The host-based browser cookie and backend origin
 checks use that origin. No ECMWF API key is placed in cluster configuration.
 Both direct methods use the single `ui.browser_session` block for this origin and
-the session lifetime; each provider's `browser.label` only names the chooser entry.
+the session lifetime; each provider's `browser.id` fixes its URL and
+`browser.label` only names the chooser entry.
 Older per-provider origin/lifetime settings must be moved to that shared block.
 The direct profile explicitly selects `backend: {type: memory}`; the five-resource
 branding baseline keeps Valkey disabled and has no direct-login configuration.
@@ -86,8 +87,10 @@ contains the generated password. The source archive and public ConfigMaps never
 contain it. The Basic provider supplies no roles itself: the configured
 `plain_advanced` augmenter adds `demo-user` and `augmented`, plus the demo email
 `browser-demo@example.invalid`, after authentication. These are demonstration
-roles, not production Aviso entitlements. API-key identities pass through the same
-augmentation pipeline; this fixture does not invent ECMWF role assignments.
+roles, not production Aviso entitlements. With the OAuth profile (below) the same
+augmenter also adds `mcp-demo`. API-key identities pass through the same
+augmentation pipeline; this fixture does not invent ECMWF role assignments except
+for uids explicitly listed with `--oauth-allow-ecmwf-uid`.
 
 ### Shared browser state and expiry
 
@@ -123,7 +126,7 @@ transaction_ttl_seconds: 300
 backend:
   type: valkey
   url: redis://authotron-login-preview-browser-valkey:6379/0
-  key_prefix: authotron:browser:v1:authotron-login-preview
+  key_prefix: authotron:browser:authotron-login-preview
   connect_timeout_ms: 2000
   operation_timeout_ms: 1000
 ```
@@ -199,8 +202,13 @@ python3 authotron/examples/ecmwf-api-key/render_api_key.py \
   --basic-secret-file /tmp/opencode/authotron-basic-demo.json \
   --valkey-secret-file /tmp/opencode/authotron-browser-valkey.json \
   --oauth-secret-file /tmp/opencode/authotron-oauth-signing.json \
+  --oauth-allow-ecmwf-uid <ecmwf-uid> \
   --output-dir /tmp/opencode/authotron-api-key
 ```
+
+`--oauth-allow-ecmwf-uid UID` is optional and repeatable (at most 32 unique uids,
+1–128 characters, no whitespace or control characters); it is rejected without
+`--oauth-secret-file`. The default allowlist is empty.
 
 The OAuth file holds **only `private-key-pem`**: an unencrypted RSA-2048 PKCS8 PEM
 generated on first use with mode `0600` and reused afterwards. It follows the same
@@ -220,6 +228,7 @@ new key changes the configuration checksum; the pod template additionally carrie
 oauth:
   enabled: true
   issuer: https://authotron-palyground.lumi.apps.dte.destination-earth.eu/
+  access_token_ttl_seconds: 120
   signing:
     active_kid: playground-<sha256-prefix>
     keys:
@@ -238,24 +247,59 @@ oauth:
       allowed_realms: [browser-demo, ecmwf] # browser-demo only with Basic
       scopes:
         - name: mcp:read
-          required_roles: []
+          required_roles: [mcp-demo]
+augmenters:
+  - type: plain_advanced # only with Basic; mcp-demo only with OAuth
+    name: Playground Basic roles
+    realm: browser-demo
+    match: { username: [browser-demo] }
+    augment: { roles: [demo-user, augmented, mcp-demo], attributes: {...} }
+  - type: plain_advanced # only with --oauth-allow-ecmwf-uid
+    name: Playground ECMWF OAuth allowlist
+    realm: ecmwf
+    match: { username: [<listed uids>] }
+    augment: { roles: [mcp-demo] }
 ```
 
 Clients must use the issuer
 **`https://authotron-palyground.lumi.apps.dte.destination-earth.eu/`** (with the
 trailing slash), which matches `ui.browser_session.public_origin`. Its metadata is
 at `/.well-known/oauth-authorization-server`. Other OAuth settings keep server
-defaults (for example 1024 transactions, 300-second tokens).
+defaults (for example 1024 transactions); access tokens are shortened to
+**120 seconds** (server bounds 60–3600, default 300).
+
+**OAuth policy.** `mcp:read` requires role `mcp-demo`. `allowed_realms` stays
+derived from the browser providers, so realm membership alone is not enough:
+
+- the Basic demo user `browser-demo` receives `mcp-demo` from its augmenter;
+- an ECMWF API-key user receives it only if its uid was passed with
+  `--oauth-allow-ecmwf-uid` (matched as `username` in realm `ecmwf`);
+- every other authenticated user is denied.
+
+**What a denied user sees.** The role check runs right after the credentials are
+verified on the OAuth login form (`POST /login/method/<id>` with the OAuth
+transaction). Valid credentials without `mcp-demo` (or from a realm not in
+`allowed_realms`) end the authorization: no consent page is shown, no
+authorization code is issued, the OAuth transaction is consumed, and the browser
+is redirected (`303`) to the client's registered callback with
+`error=access_denied`, the original `state` and `iss`, the same response as
+clicking *Deny* on the consent page. A waiting client such as mcp-local's
+`client.py` therefore gets the denial promptly. Wrong credentials still show the
+normal `401` login form. The server records the attempt as a rejected browser
+login.
 
 **Security notes.**
 
-- `required_roles: []` is deliberate because the MCP tool is synthetic: **any
-  successfully authenticated playground user** (any valid ECMWF API key, or the
-  Basic demo user) can obtain an `mcp:read` token for resource identifier
-  `https://127.0.0.1:8444/mcp`. Tokens therefore carry `roles: []`; mcp-local's
-  remote settings set `"required_role": null` so its resource server accepts
-  them (a test guards that both sides agree). Do not reuse this policy for a
-  real resource.
+- Only users holding `mcp-demo` (see the policy above) can obtain an `mcp:read`
+  token for resource identifier `https://127.0.0.1:8444/mcp`. Tokens carry
+  `roles: [mcp-demo]`; mcp-local's remote settings set `"required_role":
+  "mcp-demo"` so its resource server also rejects tokens without it (a test
+  guards that both sides agree). Keep the ECMWF allowlist minimal.
+- The allowlist is an augmenter, so it applies to every authentication of a
+  listed uid, not only to OAuth: `/authenticate` JWTs for those users also carry
+  `mcp-demo`. This is harmless here because `mcp-demo` grants nothing outside
+  this playground's `mcp:read` scope and mcp-local; do not reuse the role name
+  for real authorization elsewhere.
 - The resource identifier is a loopback URL for the local MCP example; any other
   service accepting tokens with that audience and this issuer would accept them.
 - The bundle now also contains the RSA private key (Base64 is not encryption).
@@ -289,7 +333,7 @@ Output is only `resources.yaml`, mode `0600`, containing **six resources** by de
 3. Internal ClusterIP Service.
 4. Ingress with the existing `/login` Exact, `/static/` Prefix and `/favicon.ico`
    ImplementationSpecific paths, with the preview's Exact `/login/` widened to a
-   single `/login/` Prefix. It covers every `/login/method/<n>` form,
+   single `/login/` Prefix. It covers every `/login/method/<id>` form,
    `/login/account` and their trailing-slash redirects without tracking the
    method count; unknown subpaths reach the app and get its 404.
 5. Immutable public source-archive ConfigMap.

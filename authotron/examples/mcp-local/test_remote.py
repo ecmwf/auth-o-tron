@@ -77,7 +77,7 @@ def test_endpoint_derivation_and_settings_shapes():
         "callback": "http://127.0.0.1:49152/callback",
         "client_id": "mcp-local",
         "scope": "mcp:read",
-        "required_role": None,
+        "required_role": "mcp-demo",
         "jwks_uri": REMOTE + "oauth/jwks",
         "issuer_tls": "system",
     }
@@ -105,6 +105,8 @@ def test_load_settings_accepts_exact_local_and_remote(tmp_path):
     [
         {"extra": "x"},
         {"role": "reader"},
+        {"required_role": None},
+        {"required_role": "reader"},
         {"issuer_tls": "local"},
         {"issuer_tls": None},
         {"jwks_uri": "https://other.example.org/oauth/jwks"},
@@ -311,18 +313,23 @@ def test_remote_endpoints_used_by_client_and_verifier():
         "iat": now,
         "exp": now + 60,
         "scope": demo_settings.SCOPE,
-        "roles": [],
+        "roles": [demo_settings.REMOTE_ROLE],
     }
 
     def sign(payload):
         return jwt.encode(payload, key, algorithm="RS256", headers={"kid": "k", "typ": "at+jwt"})
 
     async def verify():
-        # Remote settings require no role: an empty roles list from the playground passes.
+        # Remote settings require the playground's OAuth role.
         assert await verifier.verify_token(sign(claims)) is not None
-        assert await verifier.verify_token(sign({**claims, "roles": ["other"]})) is not None
-        # The claim shape is still enforced without a role requirement.
-        for roles in (None, "reader", [1], [""], ["r"] * 65):
+        assert (
+            await verifier.verify_token(sign({**claims, "roles": ["other", "mcp-demo"]}))
+            is not None
+        )
+        for roles in ([], ["other"], [demo_settings.ROLE], ["mcp-demo-x"]):
+            assert await verifier.verify_token(sign({**claims, "roles": roles})) is None
+        # The claim shape is enforced independently of membership.
+        for roles in (None, "mcp-demo", [1], [""], ["r"] * 65, ["mcp-demo", 1]):
             assert await verifier.verify_token(sign({**claims, "roles": roles})) is None
         assert await verifier.verify_token(sign({**claims, "aud": "https://x.example/"})) is None
         assert await verifier.verify_token(sign({**claims, "scope": "other"})) is not None

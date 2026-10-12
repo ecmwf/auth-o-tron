@@ -20,6 +20,8 @@ CALLBACK = "http://127.0.0.1:49152/callback"
 CLIENT_ID = "mcp-local"
 SCOPE = "mcp:read"
 ROLE = "reader"
+# The playground issuer (../ecmwf-api-key/render_api_key.py) requires this role for SCOPE.
+REMOTE_ROLE = "mcp-demo"
 SYSTEM_TRUST = "system"
 MAX_JSON_BYTES = 65536
 
@@ -59,8 +61,8 @@ def make_settings(issuer: str | None = None) -> dict:
     """Settings written by prepare_demo.py; None selects the local issuer.
 
     ``required_role`` is part of the contract: the local Authotron config grants ROLE, so
-    local tokens must carry it; remote issuers (e.g. the playground) grant no roles, so
-    remote settings carry ``null`` and the resource server only checks the claim shape.
+    local tokens must carry it. Remote issuers (the playground) issue SCOPE only to users
+    holding REMOTE_ROLE, so remote tokens must carry REMOTE_ROLE.
     """
     base = {
         "issuer": LOCAL_ISSUER if issuer is None else validate_remote_issuer(issuer),
@@ -68,7 +70,7 @@ def make_settings(issuer: str | None = None) -> dict:
         "callback": CALLBACK,
         "client_id": CLIENT_ID,
         "scope": SCOPE,
-        "required_role": ROLE if issuer is None else None,
+        "required_role": ROLE if issuer is None else REMOTE_ROLE,
     }
     base["jwks_uri"] = endpoints(base["issuer"])["jwks_uri"]
     if issuer is not None:

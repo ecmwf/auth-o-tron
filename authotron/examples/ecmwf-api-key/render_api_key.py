@@ -38,8 +38,9 @@ PROVIDER = {
     "name": "ECMWF API Provider",
     "realm": "ecmwf",
     "uri": "https://api.ecmwf.int/v1",
-    "browser": {"label": "ECMWF API key"},
+    "browser": {"id": "ecmwf-api-key", "label": "ECMWF API key"},
 }
+BASIC_ID = "password"
 BASIC_LABEL = "Username and password"
 BASIC_PROVIDER_NAME = "Playground Basic Provider"
 BASIC_USERNAME = "browser-demo"
@@ -56,9 +57,16 @@ OAUTH_SECRET_KEY = "oauth-signing.pem"
 OAUTH_VOLUME = "oauth-signing"
 OAUTH_RESOURCE = "https://127.0.0.1:8444/mcp"
 OAUTH_SCOPE = "mcp:read"
-# The demo tool is synthetic: any verified direct-login user qualifies. mcp-local's
-# remote settings mirror this with "required_role": null.
-OAUTH_REQUIRED_ROLES = ()
+# `mcp:read` requires this role: the Basic demo user gets it from its augmenter
+# and ECMWF users only via --oauth-allow-ecmwf-uid. mcp-local's remote settings
+# require the same single role.
+OAUTH_ROLE = "mcp-demo"
+OAUTH_REQUIRED_ROLES = (OAUTH_ROLE,)
+# Short-lived playground tokens; the server accepts 60..=3600 seconds.
+OAUTH_ACCESS_TOKEN_TTL_SECONDS = 120
+# ECMWF uids become `username` in realm `ecmwf`; bounded like the server's browser uid.
+OAUTH_MAX_ECMWF_UIDS = 32
+OAUTH_MAX_UID_LENGTH = 128
 OAUTH_CLIENT = {
     "client_id": "mcp-local",
     "display_name": "Local MCP demo",
@@ -92,6 +100,28 @@ def checked_session_options(
         raise ValueError("multiple application replicas require Valkey")
     if valkey_password is not None:
         checked_token(valkey_password)
+
+
+def checked_ecmwf_uids(uids, oauth_enabled):
+    """Valid: ("user_ecmwf",). Invalid: "user_ecmwf" (bare str), ("",), (" a",),
+    ("a", "a"), or any uid without OAuth."""
+    if isinstance(uids, (str, bytes)):
+        # tuple("abc") would silently allowlist the single characters.
+        raise ValueError("ECMWF OAuth allowlist must be a sequence of uids, not a str")
+    uids = tuple(uids)
+    if uids and not oauth_enabled:
+        raise ValueError("--oauth-allow-ecmwf-uid requires the OAuth profile")
+    if len(uids) > OAUTH_MAX_ECMWF_UIDS or len(set(uids)) != len(uids):
+        raise ValueError("ECMWF OAuth allowlist must be short and unique")
+    for uid in uids:
+        if (
+            not isinstance(uid, str)
+            or not 1 <= len(uid) <= OAUTH_MAX_UID_LENGTH
+            or uid != uid.strip()
+            or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in uid)
+        ):
+            raise ValueError("invalid ECMWF uid in OAuth allowlist")
+    return uids
 
 
 def checked_oauth_profile(oauth_enabled, valkey_password):
@@ -460,6 +490,7 @@ def oauth_config(host, kid, realms):
     return {
         "enabled": True,
         "issuer": f"https://{host}/",
+        "access_token_ttl_seconds": OAUTH_ACCESS_TOKEN_TTL_SECONDS,
         "signing": {
             "active_kid": kid,
             "keys": [
@@ -522,11 +553,13 @@ def transform(
     session_ttl_seconds=300,
     transaction_ttl_seconds=300,
     oauth_key=None,
+    oauth_allow_ecmwf_uids=(),
 ):
     checked_session_options(
         valkey_password, replicas, session_ttl_seconds, transaction_ttl_seconds
     )
     checked_oauth_profile(oauth_key is not None, valkey_password)
+    ecmwf_uids = checked_ecmwf_uids(oauth_allow_ecmwf_uids, oauth_key is not None)
     checked_token(token)
     resources = copy.deepcopy(baseline)
     config_map = next(d for d in resources if d["kind"] == "ConfigMap" and "data" in d)
@@ -547,7 +580,7 @@ def transform(
         else {
             "type": "valkey",
             "url": f"redis://{VALKEY_NAME}:6379/0",
-            "key_prefix": f"authotron:browser:v1:{preview.RELEASE}",
+            "key_prefix": f"authotron:browser:{preview.RELEASE}",
             "connect_timeout_ms": 2000,
             "operation_timeout_ms": 1000,
         },
@@ -561,7 +594,7 @@ def transform(
                 "name": BASIC_PROVIDER_NAME,
                 "realm": BASIC_REALM,
                 "users": [],
-                "browser": {"label": BASIC_LABEL},
+                "browser": {"id": BASIC_ID, "label": BASIC_LABEL},
             },
         )
         config["augmenters"] = [
@@ -571,11 +604,24 @@ def transform(
                 "realm": BASIC_REALM,
                 "match": {"username": [BASIC_USERNAME]},
                 "augment": {
-                    "roles": ["demo-user", "augmented"],
+                    # The demo user holds the OAuth scope role only when OAuth is on.
+                    "roles": ["demo-user", "augmented"]
+                    + ([OAUTH_ROLE] if oauth_key is not None else []),
                     "attributes": {"email": "browser-demo@example.invalid"},
                 },
             }
         ]
+    if ecmwf_uids:
+        # API-key users get the OAuth role only through this explicit uid allowlist.
+        config.setdefault("augmenters", []).append(
+            {
+                "type": "plain_advanced",
+                "name": "Playground ECMWF OAuth allowlist",
+                "realm": PROVIDER["realm"],
+                "match": {"username": list(ecmwf_uids)},
+                "augment": {"roles": [OAUTH_ROLE]},
+            }
+        )
     if oauth_key is not None:
         realms = [p["realm"] for p in config["providers"] if p.get("browser")]
         config["oauth"] = oauth_config(host, oauth_kid(oauth_key), realms)
@@ -694,6 +740,7 @@ def validate_resources(
     session_ttl_seconds=300,
     transaction_ttl_seconds=300,
     oauth_key=None,
+    oauth_allow_ecmwf_uids=(),
 ):
     """Compare the full output to the narrowly transformed, validated prototype."""
     preview.validate_inputs(host, image)
@@ -741,6 +788,7 @@ def validate_resources(
             session_ttl_seconds=session_ttl_seconds,
             transaction_ttl_seconds=transaction_ttl_seconds,
             oauth_key=oauth_key,
+            oauth_allow_ecmwf_uids=oauth_allow_ecmwf_uids,
         )
     )
     if resource_map(resources) != expected:
@@ -763,6 +811,7 @@ def render_api_key(
     session_ttl_seconds=300,
     transaction_ttl_seconds=300,
     oauth_key=None,
+    oauth_allow_ecmwf_uids=(),
 ):
     preview.validate_inputs(host, image)
     checked_token(token)
@@ -770,6 +819,7 @@ def render_api_key(
         valkey_password, replicas, session_ttl_seconds, transaction_ttl_seconds
     )
     checked_oauth_profile(oauth_key is not None, valkey_password)
+    ecmwf_uids = checked_ecmwf_uids(oauth_allow_ecmwf_uids, oauth_key is not None)
     if oauth_key is not None:
         checked_oauth_key({"private-key-pem": oauth_key})
     if basic is not None:
@@ -783,6 +833,8 @@ def render_api_key(
     )
     if oauth_key is not None:
         options["oauth_key"] = oauth_key
+    if ecmwf_uids:
+        options["oauth_allow_ecmwf_uids"] = ecmwf_uids
     resources = transform(baseline, host, token, basic, **options)
     validate_resources(resources, baseline, host, image, token, basic, **options)
     return resources, archive
@@ -799,6 +851,14 @@ def main():
     parser.add_argument("--basic-secret-file", type=Path)
     parser.add_argument("--valkey-secret-file", type=Path)
     parser.add_argument("--oauth-secret-file", type=Path)
+    parser.add_argument(
+        "--oauth-allow-ecmwf-uid",
+        action="append",
+        default=[],
+        dest="oauth_allow_ecmwf_uids",
+        metavar="UID",
+        help="grant the OAuth role to this ECMWF API-key uid (repeatable)",
+    )
     parser.add_argument("--replicas", type=int, default=1)
     parser.add_argument("--session-ttl-seconds", type=int, default=300)
     parser.add_argument("--transaction-ttl-seconds", type=int, default=300)
@@ -812,6 +872,7 @@ def main():
         args.transaction_ttl_seconds,
     )
     checked_oauth_profile(bool(args.oauth_secret_file), args.valkey_secret_file)
+    checked_ecmwf_uids(args.oauth_allow_ecmwf_uids, bool(args.oauth_secret_file))
     project = Path(__file__).resolve().parents[3]
     output_dir = checked_output_directory(args.output_dir, project)
     credential_paths = [
@@ -873,6 +934,8 @@ def main():
         if args.oauth_secret_file
         else {}
     )
+    if args.oauth_allow_ecmwf_uids:
+        oauth["oauth_allow_ecmwf_uids"] = tuple(args.oauth_allow_ecmwf_uids)
     resources, _ = render_api_key(
         project,
         args.chart,

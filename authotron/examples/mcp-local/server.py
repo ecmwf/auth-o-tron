@@ -185,8 +185,8 @@ class JWTVerifier:
             scopes = scope.split(" ")
             if len(set(scopes)) != len(scopes):
                 return None
-            # The roles claim must always be a bounded list of strings (possibly empty);
-            # membership is enforced only when the settings require a role.
+            # The roles claim must be a bounded list of non-empty strings that contains
+            # the configured role: ["reader"] passes locally, [] or ["other"] never does.
             roles = claims["roles"]
             if (
                 not isinstance(roles, list)
@@ -194,7 +194,7 @@ class JWTVerifier:
                 or any(not isinstance(role, str) or not 1 <= len(role) <= 128 for role in roles)
             ):
                 return None
-            if self.required_role is not None and self.required_role not in roles:
+            if self.required_role not in roles:
                 return None
             return AccessToken(
                 token=token,

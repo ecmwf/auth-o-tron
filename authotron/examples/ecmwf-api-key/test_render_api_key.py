@@ -32,11 +32,12 @@ OTHER_OAUTH_KEY = renderer.oauth_pem(
 )
 # sha256 of yaml.safe_dump_all(..., sort_keys=False) captured before the OAuth profile,
 # re-captured when the Ingress moved from per-method Exact paths to one `/login/` Prefix
-# (the only difference from the previous digests).
+# (the only difference from the previous digests), and again when provider `browser`
+# blocks gained stable ids and the Valkey key_prefix dropped its `v1` segment.
 PRE_OAUTH_DIGESTS = {
-    "plain": "ed0c86e904539142a522700465709ec30b3e6ddabc24cdfc24d7a41c59dca19a",
-    "basic": "a48a41307f235e45d80add7f4a42dd2d0a035579ce88b94b27fdf1eff3beda55",
-    "shared": "5fc545039564648087d1dcd7cc3902c62b257b46ffbc57ab4adac71a474157c3",
+    "plain": "8f0df75c61278e9783e6d93a058ef874ae94e702801cda18c449063cc18aa3c8",
+    "basic": "13ae205ef67116f3177090812eacc0e85208176e4ea5cfa7753a61dd6b2e0cd3",
+    "shared": "1aff8e97abbfb7667843c7675e050ec235068957fbbfca2d6107451f7fa652cb",
 }
 # One `/login/` Prefix replaces per-method Exact paths, independent of method count.
 API_KEY_PATH_RULES = [
@@ -211,7 +212,10 @@ class RendererTests(unittest.TestCase):
         )
         config = yaml.safe_load(config_map["data"]["config.yaml"])
         self.assertEqual(config["providers"], [renderer.PROVIDER])
-        self.assertEqual(config["providers"][0]["browser"], {"label": "ECMWF API key"})
+        self.assertEqual(
+            config["providers"][0]["browser"],
+            {"id": "ecmwf-api-key", "label": "ECMWF API key"},
+        )
         self.assertNotIn("ecmwf_api_key", config["ui"])
         self.assertEqual(
             config["ui"]["browser_session"],
@@ -323,7 +327,7 @@ class RendererTests(unittest.TestCase):
                     {
                         "type": "valkey",
                         "url": f"redis://{renderer.VALKEY_NAME}:6379/0",
-                        "key_prefix": f"authotron:browser:v1:{renderer.preview.RELEASE}",
+                        "key_prefix": f"authotron:browser:{renderer.preview.RELEASE}",
                         "connect_timeout_ms": 2000,
                         "operation_timeout_ms": 1000,
                     },
@@ -543,8 +547,11 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(public["providers"][0]["users"], [])
         self.assertEqual(public["providers"][0]["name"], renderer.BASIC_PROVIDER_NAME)
         self.assertEqual(
-            [p["browser"]["label"] for p in public["providers"]],
-            ["Username and password", "ECMWF API key"],
+            [p["browser"] for p in public["providers"]],
+            [
+                {"id": "password", "label": "Username and password"},
+                {"id": "ecmwf-api-key", "label": "ECMWF API key"},
+            ],
         )
         self.assertNotIn("basic", public["ui"])
         self.assertEqual(
@@ -916,6 +923,7 @@ class RendererTests(unittest.TestCase):
             lambda c: c["providers"].append(renderer.PROVIDER),
             lambda c: c["providers"][0].update(uri="https://other.example.org"),
             lambda c: c["providers"][0]["browser"].update(label="other"),
+            lambda c: c["providers"][0]["browser"].update(id="other"),
             lambda c: c["providers"][0].pop("browser"),
             lambda c: c["ui"]["browser_session"].update(
                 public_origin="https://other.example.org"
@@ -1102,14 +1110,117 @@ class RendererTests(unittest.TestCase):
             client["resources"],
             [{"resource": remote["resource"], "scopes": [remote["scope"]]}],
         )
-        # Empty required_roles in the issuer must pair with no role check in the resource.
-        required = remote["required_role"]
-        self.assertEqual(
-            list(renderer.OAUTH_REQUIRED_ROLES), [] if required is None else [required]
-        )
-        self.assertIsNone(required)
+        # The issuer's scope role is exactly the role the remote resource requires.
+        self.assertEqual(renderer.OAUTH_REQUIRED_ROLES, (remote["required_role"],))
+        self.assertEqual(remote["required_role"], "mcp-demo")
         roles = renderer.oauth_config(HOST, "kid", ["ecmwf"])["resources"][0]["scopes"]
-        self.assertEqual(roles, [{"name": remote["scope"], "required_roles": []}])
+        self.assertEqual(
+            roles, [{"name": remote["scope"], "required_roles": ["mcp-demo"]}]
+        )
+
+    def test_oauth_ecmwf_allowlist_grants_role_only_to_listed_uids(self):
+        baseline, _ = self.baseline()
+        options = dict(
+            valkey_password=VALKEY_PASSWORD,
+            oauth_key=OAUTH_KEY,
+            oauth_allow_ecmwf_uids=("user_a", "user_b"),
+        )
+        for basic in (None, BASIC):
+            with self.subTest(basic=basic is not None):
+                resources = renderer.transform(baseline, HOST, TOKEN, basic, **options)
+                renderer.validate_resources(
+                    resources, baseline, HOST, IMAGE, TOKEN, basic, **options
+                )
+                config = yaml.safe_load(
+                    find(resources, "ConfigMap")["data"]["config.yaml"]
+                )
+                self.assertEqual(
+                    config["augmenters"][-1],
+                    {
+                        "type": "plain_advanced",
+                        "name": "Playground ECMWF OAuth allowlist",
+                        "realm": "ecmwf",
+                        "match": {"username": ["user_a", "user_b"]},
+                        "augment": {"roles": ["mcp-demo"]},
+                    },
+                )
+                self.assertEqual(len(config["augmenters"]), 2 if basic else 1)
+                # The allowlist is policy, not a widening of the allowed realms.
+                self.assertEqual(
+                    config["oauth"]["resources"][0]["allowed_realms"],
+                    ["browser-demo", "ecmwf"] if basic else ["ecmwf"],
+                )
+                # A rendering without the uid is rejected by the guard.
+                with self.assertRaises(ValueError):
+                    renderer.validate_resources(
+                        resources,
+                        baseline,
+                        HOST,
+                        IMAGE,
+                        TOKEN,
+                        basic,
+                        **{**options, "oauth_allow_ecmwf_uids": ("user_a",)},
+                    )
+        for uids, oauth_key in (
+            (("user_a",), None),
+            (("",), OAUTH_KEY),
+            ((" user_a",), OAUTH_KEY),
+            (("user a",), OAUTH_KEY),
+            (("user\x00",), OAUTH_KEY),
+            (("u" * 129,), OAUTH_KEY),
+            (("user_a", "user_a"), OAUTH_KEY),
+            (tuple(f"u{i}" for i in range(33)), OAUTH_KEY),
+            ("user_a", OAUTH_KEY),
+            (b"user_a", OAUTH_KEY),
+        ):
+            with self.subTest(uids=uids[:2], oauth=oauth_key is not None):
+                with self.assertRaises(ValueError):
+                    renderer.transform(
+                        baseline,
+                        HOST,
+                        TOKEN,
+                        BASIC,
+                        valkey_password=VALKEY_PASSWORD,
+                        oauth_key=oauth_key,
+                        oauth_allow_ecmwf_uids=uids,
+                    )
+
+    def test_oauth_policy_denies_users_without_the_role(self):
+        """Mirror of the server's scope check: required_roles must all be held."""
+        baseline, _ = self.baseline()
+        resources = renderer.transform(
+            baseline,
+            HOST,
+            TOKEN,
+            BASIC,
+            valkey_password=VALKEY_PASSWORD,
+            oauth_key=OAUTH_KEY,
+            oauth_allow_ecmwf_uids=("listed",),
+        )
+        config = yaml.safe_load(find(resources, "ConfigMap")["data"]["config.yaml"])
+        resource = config["oauth"]["resources"][0]
+        (scope,) = resource["scopes"]
+
+        def roles(realm, username):
+            granted = []
+            for augmenter in config["augmenters"]:
+                if (
+                    realm == augmenter["realm"]
+                    and username in augmenter["match"]["username"]
+                ):
+                    granted += augmenter["augment"]["roles"]
+            return granted
+
+        def allowed(realm, username):
+            return realm in resource["allowed_realms"] and set(
+                scope["required_roles"]
+            ) <= set(roles(realm, username))
+
+        self.assertTrue(allowed("browser-demo", "browser-demo"))
+        self.assertTrue(allowed("ecmwf", "listed"))
+        self.assertFalse(allowed("ecmwf", "unlisted"))
+        self.assertFalse(allowed("browser-demo", "someone-else"))
+        self.assertFalse(allowed("ecmwf", "browser-demo"))
 
     def test_oauth_key_generation_reuse_permissions_and_schema(self):
         path = self.root / "oauth.json"
@@ -1183,6 +1294,23 @@ class RendererTests(unittest.TestCase):
                 config = yaml.safe_load(public_text)
                 oauth = config["oauth"]
                 self.assertEqual(oauth["issuer"], f"https://{HOST}/")
+                self.assertEqual(oauth["access_token_ttl_seconds"], 120)
+                # Only the Basic demo user holds the OAuth role by default.
+                self.assertEqual(
+                    [
+                        (a["realm"], a["match"], a["augment"]["roles"])
+                        for a in config.get("augmenters", [])
+                    ],
+                    [
+                        (
+                            "browser-demo",
+                            {"username": ["browser-demo"]},
+                            ["demo-user", "augmented", "mcp-demo"],
+                        )
+                    ]
+                    if basic
+                    else [],
+                )
                 self.assertEqual(
                     oauth["issuer"].rstrip("/"),
                     config["ui"]["browser_session"]["public_origin"],
@@ -1213,7 +1341,10 @@ class RendererTests(unittest.TestCase):
                             "resource": renderer.OAUTH_RESOURCE,
                             "allowed_realms": realms,
                             "scopes": [
-                                {"name": renderer.OAUTH_SCOPE, "required_roles": []}
+                                {
+                                    "name": renderer.OAUTH_SCOPE,
+                                    "required_roles": ["mcp-demo"],
+                                }
                             ],
                         }
                     ],
@@ -1416,12 +1547,42 @@ class RendererTests(unittest.TestCase):
             renderer.main()
         pem = json.loads(oauth_file.read_text())["private-key-pem"]
         self.assertEqual(render.call_args.kwargs["oauth_key"], pem)
+        self.assertNotIn("oauth_allow_ecmwf_uids", render.call_args.kwargs)
+        with (
+            patch(
+                "sys.argv",
+                arguments
+                + ["--oauth-allow-ecmwf-uid", "user_a"]
+                + ["--oauth-allow-ecmwf-uid", "user_b"],
+            ),
+            patch.object(renderer, "signing_secret", return_value=TOKEN),
+            patch.object(renderer, "basic_credentials", return_value=BASIC),
+            patch.object(renderer, "valkey_secret", return_value=VALKEY_PASSWORD),
+            patch.object(
+                renderer, "render_api_key", return_value=(resources, b"archive")
+            ) as render,
+            patch("builtins.print"),
+        ):
+            renderer.main()
+        self.assertEqual(
+            render.call_args.kwargs["oauth_allow_ecmwf_uids"], ("user_a", "user_b")
+        )
         self.assertEqual(oauth_file.stat().st_mode & 0o777, 0o600)
         printed_text = str(printed.call_args_list)
         self.assertIn(f"OAuth issuer: https://{HOST}/", printed_text)
         for needle in ("PRIVATE KEY", pem.splitlines()[1], TOKEN, VALKEY_PASSWORD):
             self.assertNotIn(needle, printed_text)
         self.assertEqual((output_dir / "resources.yaml").stat().st_mode & 0o777, 0o600)
+        without_oauth = arguments[: arguments.index("--oauth-secret-file")]
+        with (
+            patch("sys.argv", without_oauth + ["--oauth-allow-ecmwf-uid", "user_a"]),
+            patch.object(renderer, "signing_secret") as signing,
+            patch.object(renderer, "render_api_key") as render,
+        ):
+            with self.assertRaises(ValueError):
+                renderer.main()
+            signing.assert_not_called()
+            render.assert_not_called()
         for extra in (
             ["--oauth-secret-file", str(self.root / "jwt.json")],
             ["--oauth-secret-file", str(self.root / "valkey.json")],

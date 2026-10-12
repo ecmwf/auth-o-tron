@@ -130,11 +130,11 @@ not supported. Authotron uses an in-memory browser session backend and no store
 or metrics listener. Restarting it invalidates active browser transactions.
 
 A remote-issuer runtime additionally contains `"issuer_tls": "system"`, its
-`issuer`/`jwks_uri` point at the remote issuer, and `"required_role"` is `null`;
-all other keys are identical. `server.py` enforces `required_role` only when it is
-set; it always requires a `roles` claim that is a list of at most 64 non-empty
-strings (an empty list is valid). The local Authotron grants `reader` and
-requires it for `mcp:read`; the playground grants `mcp:read` without roles.
+`issuer`/`jwks_uri` point at the remote issuer, and `"required_role"` is
+`"mcp-demo"`; all other keys are identical. `server.py` requires a `roles` claim
+that is a list of at most 64 non-empty strings and contains `required_role`. The
+local Authotron grants `reader` and requires it for `mcp:read`; the playground
+requires `mcp-demo` for `mcp:read`.
 
 ## Use the Kubernetes playground as issuer
 
@@ -148,7 +148,8 @@ the values this demo uses:
 | OAuth client | `mcp-local` (public native client) |
 | Redirect URI | `http://127.0.0.1:49152/callback` |
 | Resource | `https://127.0.0.1:8444/mcp` |
-| Scope | `mcp:read`, granted to any authenticated user (`required_roles: []`; tokens carry `roles: []`) |
+| Scope | `mcp:read`, requiring role `mcp-demo` (`required_roles: [mcp-demo]`; tokens carry `roles: [mcp-demo]`) |
+| Access-token lifetime | 120 seconds |
 
 If any of these differ on the cluster, authorization or token validation fails.
 From the repository root, prepare a remote-issuer runtime (no Authotron binary needed):
@@ -188,14 +189,23 @@ Issuer, JWKS, and token requests use the operating system's trust store with
 certificate and hostname verification (proxy environment variables are ignored);
 only the local MCP resource uses `tls-ca.pem`. The playground has a publicly
 trusted certificate, so the browser needs no certificate exception for the
-issuer. Sign in with the playground's Basic demo user or with a real ECMWF API
-key, then approve `mcp:read`. The resource server must be able to reach the
+issuer. Sign in with the playground's Basic demo user, or with an ECMWF API key
+whose uid the operator allowlisted (`render_api_key.py --oauth-allow-ecmwf-uid`),
+then approve `mcp:read`. The resource server must be able to reach the
 playground to fetch its JWKS.
+
+Any other account is denied by the playground's OAuth policy: after valid
+credentials no consent page appears and the browser is redirected straight to
+the client's registered callback with `error=access_denied` (plus the original
+`state` and `iss`), so `client.py` reports the denial promptly instead of
+waiting for its callback timeout. Clicking *Deny* on the consent page returns
+the same `error=access_denied`. Wrong credentials still show the login form.
 
 ## Security and limitations
 
 This demo uses a preregistered, fixed public native client (`mcp-local`) and a
-synthetic read-only scope (`mcp:read`). Access tokens last five minutes; there are
+synthetic read-only scope (`mcp:read`). Access tokens last five minutes locally
+(two minutes from the playground); there are
 no refresh tokens, SSO brokering, Dynamic Client Registration (DCR), or Client ID
 Metadata Documents (CIMD). The plaintext loopback backends and disposable local
 TLS setup are demo-only and are not a production deployment configuration.

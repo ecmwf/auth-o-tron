@@ -163,7 +163,7 @@ def prepare(runtime_dir: Path, issuer: str | None = None) -> Path:
                     "name": "basic",
                     "realm": "local",
                     "users": [{"username": "alice", "password": password, "roles": [ROLE]}],
-                    "browser": {"label": "Username and password"},
+                    "browser": {"id": "password", "label": "Username and password"},
                 }
             ],
             "augmenters": [],
