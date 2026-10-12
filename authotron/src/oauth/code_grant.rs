@@ -226,6 +226,9 @@ impl CodeGrant {
     pub fn provider_roles(&self) -> &[String] {
         self.context.provider_roles()
     }
+    pub fn method(&self) -> &str {
+        self.context.method()
+    }
     pub fn client_id(&self) -> &str {
         self.request().client_id()
     }

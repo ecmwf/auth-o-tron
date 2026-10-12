@@ -113,6 +113,7 @@ impl OAuthRuntime {
             username: code.as_user().username.clone(),
             realm: code.as_user().realm.clone(),
             provider_roles: code.provider_roles().to_vec(),
+            method: code.method().into(),
         };
         let response = self
             .token(proof)

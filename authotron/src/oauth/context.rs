@@ -45,6 +45,7 @@ struct ContextDto {
     realm: String,
     roles: Vec<String>,
     provider_roles: Vec<String>,
+    method: String,
     verified_at_ms: u64,
     transaction: String,
     source_transaction_id_hash: Option<[u8; 32]>,
@@ -168,6 +169,9 @@ impl AuthenticatedAuthorization {
     pub fn provider_roles(&self) -> &[String] {
         self.identity.provider_roles()
     }
+    pub fn method(&self) -> &str {
+        self.identity.method()
+    }
     /// Eligible scopes only; this accessor conveys no consent decision.
     pub fn authorized_scopes(&self) -> &[String] {
         &self.scopes
@@ -182,11 +186,12 @@ impl AuthenticatedAuthorization {
             .encode()
             .map_err(|_| ContextError::InvalidTransaction)?;
         let dto = ContextDto {
-            version: 3,
+            version: 4,
             username: user.username.clone(),
             realm: user.realm.clone(),
             roles: user.roles.clone(),
             provider_roles: self.provider_roles().to_vec(),
+            method: self.method().into(),
             verified_at_ms: self.verified_at_ms(),
             transaction: URL_SAFE_NO_PAD.encode(transaction),
             source_transaction_id_hash: self.source_transaction_id_hash,
@@ -278,7 +283,7 @@ fn decode_parts(
         return Err(TooLarge);
     }
     let dto: ContextDto = serde_json::from_slice(bytes).map_err(|_| InvalidRecord)?;
-    if dto.version != 3 {
+    if dto.version != 4 {
         return Err(UnsupportedVersion);
     }
     if dto.transaction.len() > (MAX_TRANSACTION_BYTES * 4).div_ceil(3) {
@@ -300,6 +305,7 @@ fn decode_parts(
         dto.realm,
         dto.roles,
         dto.provider_roles,
+        dto.method,
         dto.verified_at_ms,
     )
     .map_err(|error| match error {
@@ -369,7 +375,7 @@ pub(super) mod tests {
         names.sort_unstable();
         assert_eq!(
             names.join(" "),
-            "provider_roles realm roles source_transaction_id_hash transaction username verified_at_ms version"
+            "method provider_roles realm roles source_transaction_id_hash transaction username verified_at_ms version"
         );
         let restored = AuthenticatedAuthorization::decode(&bytes, &config, &[7; 32], now).unwrap();
         assert_eq!(restored.encode().unwrap(), bytes);
@@ -400,8 +406,10 @@ pub(super) mod tests {
         let bytes = context.encode().unwrap();
         let original: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         for (field, replacement, error) in [
-            ("version", json!(4), UnsupportedVersion),
-            ("version", json!(2), UnsupportedVersion),
+            ("version", json!(5), UnsupportedVersion),
+            ("version", json!(3), UnsupportedVersion),
+            ("method", json!("Password"), InvalidRecord),
+            ("method", json!(""), InvalidRecord),
             ("provider_roles", json!(vec!["reader"; 65]), InvalidRecord),
             ("provider_roles", json!([""]), InvalidRecord),
             ("source_transaction_id_hash", json!([1, 2]), InvalidRecord),

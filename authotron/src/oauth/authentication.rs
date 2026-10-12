@@ -30,6 +30,7 @@ pub enum AuthenticationError {
 pub struct VerifiedOAuthIdentity {
     user: User,
     provider_roles: Vec<String>,
+    method: String,
     verified_at_ms: u64,
 }
 impl VerifiedOAuthIdentity {
@@ -43,6 +44,10 @@ impl VerifiedOAuthIdentity {
     }
     pub fn verified_at_ms(&self) -> u64 {
         self.verified_at_ms
+    }
+    /// Browser method id (`browser.id`) whose provider verified the credentials.
+    pub fn method(&self) -> &str {
+        &self.method
     }
 }
 
@@ -82,6 +87,7 @@ pub async fn verify_identity(
         Ok(VerifiedOAuthIdentity {
             user,
             provider_roles,
+            method: method.into(),
             verified_at_ms,
         })
     })
@@ -131,17 +137,22 @@ pub(super) fn restore_from_trusted_storage(
     realm: String,
     roles: Vec<String>,
     provider_roles: Vec<String>,
+    method: String,
     verified_at_ms: u64,
 ) -> Result<VerifiedOAuthIdentity, AuthenticationError> {
     validate_identity_fields(&username, &realm, &roles)
         .and_then(|()| validate_identity_fields(&username, &realm, &provider_roles))
         .map_err(|_| AuthenticationError::Rejected)?;
+    if !crate::config::ui::valid_browser_id(&method) {
+        return Err(AuthenticationError::Rejected);
+    }
     if !valid_time(verified_at_ms) {
         return Err(AuthenticationError::Unavailable);
     }
     Ok(VerifiedOAuthIdentity {
         user: User::new(realm, username, Some(roles), None, None, None),
         provider_roles,
+        method,
         verified_at_ms,
     })
 }
@@ -308,6 +319,7 @@ mod tests {
             assert!(proof.as_user().roles.contains(&"derived".into()));
             let base: &[&str] = if method == "password" { &["base"] } else { &[] };
             assert_eq!(proof.provider_roles(), base);
+            assert_eq!(proof.method(), method);
             assert!(proof.as_user().attributes.is_empty() && proof.as_user().scopes.is_empty());
             assert!(u128::from(proof.verified_at_ms()) >= before);
         }

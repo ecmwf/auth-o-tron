@@ -334,8 +334,8 @@ restoration does not rerun upstream verification.
 Private codecs are wire-bounded: Pending 16 KiB, authenticated context 64 KiB,
 ConsentReady/code grant 96 KiB. Trusted authenticated storage is required, not a MAC
 against compromised cache contents. Code envelopes bind their actual code hash and
-originating literal issuer. Valkey namespaces are `:oauth:authorization-transactions:v5:`
-and `:oauth:authorization-codes:v2:`; code hashes contain exactly code_hash/issuer/expiry/payload.
+originating literal issuer. Valkey namespaces are `:oauth:authorization-transactions:v6:`
+and `:oauth:authorization-codes:v3:`; code hashes contain exactly code_hash/issuer/expiry/payload.
 Shared issuance atomically persists code while consuming consent; redemption compares
 all code fields/index score/effective deadline before atomic deletion and proof release.
 Expected failures preserve unexpired state. Unexpected write failures, OOM, cancellation
@@ -344,9 +344,10 @@ there is no automatic replay or fallback. Memory is development-only, per-instan
 without restart persistence. Capacity bounds logical records, not total allocation;
 100000 96 KiB records alone permit about 9.15 GiB payload plus overhead.
 
-The v5 transaction and v2 code namespaces store the provider's pre-augmentation roles
-that refresh tokens need. Upgrading from v4/v1 drops in-flight authorization attempts
-and unredeemed codes, so users must restart those logins. Do not mix old and new
+The v6 transaction and v3 code namespaces store the provider's pre-augmentation roles
+and the browser method id that refresh tokens need. Upgrading from earlier versions
+drops in-flight authorization attempts and unredeemed codes, so users must restart
+those logins. Do not mix old and new
 application replicas behind one login endpoint. Restricted backend ACLs must permit
 `ZRANGE` as well as the existing sorted-set/hash operations, with access to all keys
 beneath the configured OAuth transaction prefix, including its client indexes.

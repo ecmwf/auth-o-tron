@@ -71,6 +71,8 @@ pub struct RefreshGrant {
     pub username: String,
     pub realm: String,
     pub provider_roles: Vec<String>,
+    /// Browser method id of the login that started the family.
+    pub method: String,
 }
 impl RefreshGrant {
     pub(super) fn encode(&self) -> Result<Vec<u8>, RefreshStoreError> {
@@ -167,6 +169,7 @@ pub(super) mod tests {
             username: "alice".into(),
             realm: "local".into(),
             provider_roles: vec!["reader".into()],
+            method: "password".into(),
         }
     }
 
