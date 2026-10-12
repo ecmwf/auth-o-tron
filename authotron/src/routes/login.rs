@@ -50,6 +50,9 @@ pub fn routes(config: &UiConfig) -> Router<AppState> {
 }
 
 async fn login(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    if let Some(response) = super::oauth::login_entry_recovery(&state, &headers).await {
+        return response;
+    }
     let oauth_pending = match super::oauth::form_transaction(&state, &headers).await {
         Ok(transaction) => transaction.is_some(),
         Err(status) => return super::oauth::local(status),

@@ -18,6 +18,7 @@ use crate::{
 };
 use crate::{config::ConfigV2, models::user::User, providers::ecmwfapi_provider::EcmwfApiProvider};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -156,7 +157,7 @@ impl LoginFlow {
     }
 }
 
-fn valid_id(value: &str) -> bool {
+pub(crate) fn valid_id(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|c| c.is_ascii_hexdigit())
 }
 
@@ -237,7 +238,7 @@ pub struct BrowserLoginState {
     valkey: Option<valkey::Valkey>,
 }
 
-fn opaque_id() -> String {
+pub(crate) fn opaque_id() -> String {
     // Two UUIDv4 values provide 244 random bits (version/variant bits are fixed).
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
@@ -322,18 +323,28 @@ impl BrowserLoginState {
     }
 
     pub async fn form(&self, flow: LoginFlow) -> Result<(String, String), BrowserVerifyError> {
+        self.form_with_binding(flow, None).await
+    }
+
+    pub(crate) async fn form_with_binding(
+        &self,
+        flow: LoginFlow,
+        binding: Option<&str>,
+    ) -> Result<(String, String), BrowserVerifyError> {
+        let csrf = opaque_id();
+        let stored_csrf =
+            binding.map_or_else(|| csrf.clone(), |binding| bound_csrf(binding, &csrf));
         if let Some(backend) = self.shared()? {
             let s = self
                 .settings
                 .as_ref()
                 .ok_or(BrowserVerifyError::Unavailable)?;
             let sid = opaque_id();
-            let csrf = opaque_id();
             let result = backend
                 .call(&[
                     "form".into(),
                     sid.clone(),
-                    csrf.clone(),
+                    stored_csrf,
                     flow.tag().into(),
                     (s.transaction_ttl_seconds * 1000).to_string(),
                     s.max_forms.to_string(),
@@ -353,10 +364,6 @@ impl BrowserLoginState {
                 .lock()
                 .map_err(|_| BrowserVerifyError::Unavailable)?;
             let now = Instant::now();
-            entries.cleanup(now);
-            if entries.forms.len() >= self.settings.as_ref().map_or(CAPACITY, |s| s.max_forms) {
-                return Err(BrowserVerifyError::Capacity);
-            }
             if !entries.forms_quota.admit(
                 now,
                 self.settings
@@ -366,12 +373,18 @@ impl BrowserLoginState {
             ) {
                 return Err(BrowserVerifyError::Limited);
             }
+            let capacity = self.settings.as_ref().map_or(CAPACITY, |s| s.max_forms);
+            if entries.forms.len() >= capacity {
+                entries.forms.retain(|_, form| form.expires > now);
+                if entries.forms.len() >= capacity {
+                    return Err(BrowserVerifyError::Capacity);
+                }
+            }
             let sid = opaque_id();
-            let csrf = opaque_id();
             entries.forms.insert(
                 sid.clone(),
                 FormTransaction {
-                    csrf: csrf.clone(),
+                    csrf: stored_csrf,
                     flow,
                     expires: now + Duration::from_secs(self.transaction_ttl()),
                 },
@@ -399,6 +412,21 @@ impl BrowserLoginState {
         } else {
             self.consume_form_for(sid, csrf, flow)
         }
+    }
+
+    pub(crate) async fn consume_bound(
+        &self,
+        token: &str,
+        binding: &str,
+        flow: LoginFlow,
+    ) -> Result<bool, BrowserVerifyError> {
+        let Some((sid, csrf)) = token.split_once('.') else {
+            return Ok(false);
+        };
+        if !valid_id(binding) || !valid_id(sid) || !valid_id(csrf) {
+            return Ok(false);
+        }
+        self.consume(sid, &bound_csrf(binding, csrf), flow).await
     }
 
     pub async fn discard(&self, sid: &str) -> Result<(), BrowserVerifyError> {
@@ -552,7 +580,14 @@ impl BrowserLoginState {
             .entries
             .lock()
             .map_err(|_| BrowserVerifyError::Unavailable)?;
-        entries.cleanup(Instant::now());
+        let now = Instant::now();
+        if entries
+            .forms
+            .get(sid)
+            .is_some_and(|form| form.expires <= now)
+        {
+            entries.forms.remove(sid);
+        }
         let matches = entries.forms.get(sid).is_some_and(|form| {
             form.flow == flow && bool::from(form.csrf.as_bytes().ct_eq(csrf.as_bytes()))
         });
@@ -562,7 +597,7 @@ impl BrowserLoginState {
         Ok(matches)
     }
 
-    /// Burn malformed same-origin submissions after the route has checked Origin.
+    /// Explicit cancellation for callers that already established transaction ownership.
     fn discard_form(&self, sid: &str) -> Result<(), BrowserVerifyError> {
         self.entries
             .lock()
@@ -602,7 +637,7 @@ impl BrowserLoginState {
                 .ok_or(BrowserVerifyError::Unavailable)?;
             if let Some(cap) = s.max_shared_inflight_logins {
                 Some(
-                    tokio::time::timeout_at(
+                    within_deadline(
                         deadline,
                         backend.admit(
                             s.max_logins_per_window,
@@ -611,16 +646,14 @@ impl BrowserLoginState {
                             s.verification_timeout_seconds,
                         ),
                     )
-                    .await
-                    .map_err(|_| BrowserVerifyError::Unavailable)??,
+                    .await?,
                 )
             } else {
-                tokio::time::timeout_at(
+                within_deadline(
                     deadline,
                     backend.quota(s.max_logins_per_window, s.rate_window_seconds),
                 )
-                .await
-                .map_err(|_| BrowserVerifyError::Unavailable)??;
+                .await?;
                 None
             }
         } else {
@@ -639,13 +672,13 @@ impl BrowserLoginState {
             }
             None
         };
-        let result = tokio::time::timeout_at(deadline, operation)
-            .await
-            .unwrap_or(Err(BrowserVerifyError::Timeout));
-        if let Some(lease) = &mut lease {
-            lease.release().await?;
-        }
-        result
+        complete_verification(deadline, operation, async {
+            if let Some(lease) = &mut lease {
+                lease.release().await?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     #[cfg(test)]
@@ -785,7 +818,9 @@ impl BrowserLoginState {
             .lock()
             .map_err(|_| BrowserVerifyError::Unavailable)?;
         let now = Instant::now();
-        entries.cleanup(now);
+        if entries.sessions.len() >= self.settings.as_ref().map_or(CAPACITY, |s| s.max_sessions) {
+            entries.sessions.retain(|_, session| session.expires > now);
+        }
         let replacing = previous.is_some_and(|id| entries.sessions.contains_key(id));
         if entries.sessions.len() - usize::from(replacing)
             >= self.settings.as_ref().map_or(CAPACITY, |s| s.max_sessions)
@@ -814,7 +849,13 @@ impl BrowserLoginState {
             .entries
             .lock()
             .map_err(|_| BrowserVerifyError::Unavailable)?;
-        entries.cleanup(Instant::now());
+        if entries
+            .sessions
+            .get(sid)
+            .is_some_and(|session| session.expires <= Instant::now())
+        {
+            entries.sessions.remove(sid);
+        }
         Ok(entries.sessions.get(sid).cloned())
     }
 
@@ -826,6 +867,51 @@ impl BrowserLoginState {
     #[cfg(test)]
     fn session(&self, sid: &str) -> Option<BrowserSession> {
         self.memory_session(sid).unwrap()
+    }
+}
+
+fn bound_csrf(binding: &str, csrf: &str) -> String {
+    // Both components are fixed-length opaque hex IDs; the domain separates this digest.
+    format!(
+        "{:x}",
+        Sha256::digest(format!("browser-form:{binding}:{csrf}"))
+    )
+}
+
+async fn within_deadline<T>(
+    deadline: tokio::time::Instant,
+    operation: impl std::future::Future<Output = Result<T, BrowserVerifyError>>,
+) -> Result<T, BrowserVerifyError> {
+    if tokio::time::Instant::now() >= deadline {
+        return Err(BrowserVerifyError::Timeout);
+    }
+    let result = tokio::time::timeout_at(deadline, operation)
+        .await
+        .unwrap_or(Err(BrowserVerifyError::Timeout));
+    // A cooperatively polled future can return Ready after doing work past the deadline.
+    if tokio::time::Instant::now() >= deadline {
+        return Err(BrowserVerifyError::Timeout);
+    }
+    result
+}
+
+async fn complete_verification(
+    deadline: tokio::time::Instant,
+    operation: impl std::future::Future<Output = Result<User, BrowserVerifyError>>,
+    cleanup: impl std::future::Future<Output = Result<(), BrowserVerifyError>>,
+) -> Result<User, BrowserVerifyError> {
+    let result = within_deadline(deadline, operation).await;
+    let released = within_deadline(deadline, cleanup).await;
+    if tokio::time::Instant::now() >= deadline {
+        return Err(BrowserVerifyError::Timeout);
+    }
+    // Cleanup cannot turn failed verification into another outcome. A verified identity
+    // is usable only after successful release; failures otherwise remain fail-closed.
+    match result {
+        Err(error) => Err(error),
+        Ok(user) => released
+            .map(|()| user)
+            .map_err(|_| BrowserVerifyError::Unavailable),
     }
 }
 
@@ -842,6 +928,134 @@ pub fn validated_key(value: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn release_failure_preserves_rejection_and_timeout_but_rejects_verified_success() {
+        for (verification, expected) in [
+            (Ok(maximum_identity()), BrowserVerifyError::Unavailable),
+            (
+                Err(BrowserVerifyError::Rejected),
+                BrowserVerifyError::Rejected,
+            ),
+            (
+                Err(BrowserVerifyError::Timeout),
+                BrowserVerifyError::Timeout,
+            ),
+        ] {
+            let released = std::cell::Cell::new(false);
+            let result = complete_verification(
+                tokio::time::Instant::now() + Duration::from_secs(10),
+                async { verification },
+                async {
+                    released.set(true);
+                    Err(BrowserVerifyError::Unavailable)
+                },
+            )
+            .await;
+            assert_eq!(result.err(), Some(expected));
+            assert!(released.get());
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_verification_after_deadline_is_timeout_without_polling_cleanup() {
+        for verification in [Ok(maximum_identity()), Err(BrowserVerifyError::Rejected)] {
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+            let result = complete_verification(
+                deadline,
+                async {
+                    // Deliberately return Ready late in one poll, which timeout_at alone can accept.
+                    std::thread::sleep(Duration::from_millis(20));
+                    verification
+                },
+                async { panic!("expired cleanup must be left to the lease drop guard") },
+            )
+            .await;
+            assert_eq!(result.err(), Some(BrowserVerifyError::Timeout));
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_cleanup_after_deadline_overrides_success_and_rejection_with_timeout() {
+        for verified in [true, false] {
+            for cleanup in [Ok(()), Err(BrowserVerifyError::Unavailable)] {
+                let result = complete_verification(
+                    tokio::time::Instant::now() + Duration::from_millis(10),
+                    async {
+                        if verified {
+                            Ok(maximum_identity())
+                        } else {
+                            Err(BrowserVerifyError::Rejected)
+                        }
+                    },
+                    async {
+                        std::thread::sleep(Duration::from_millis(20));
+                        cleanup
+                    },
+                )
+                .await;
+                assert_eq!(result.err(), Some(BrowserVerifyError::Timeout));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_misses_and_rate_rejection_leave_unrelated_expired_entries_for_cleanup() {
+        let state = state();
+        let (form, _) = state.create_form().unwrap();
+        let session = state.create_session(maximum_identity(), None).unwrap();
+        {
+            let mut entries = state.entries.lock().unwrap();
+            entries.forms.get_mut(&form).unwrap().expires = Instant::now();
+            entries.sessions.get_mut(&session).unwrap().expires = Instant::now();
+            entries.forms_quota.used = usize::MAX;
+        }
+        for _ in 0..10 {
+            assert!(state.memory_session(&opaque_id()).unwrap().is_none());
+            assert!(matches!(
+                state.form(LoginFlow::Basic).await,
+                Err(BrowserVerifyError::Limited)
+            ));
+        }
+        {
+            let entries = state.entries.lock().unwrap();
+            assert!(entries.forms.contains_key(&form));
+            assert!(entries.sessions.contains_key(&session));
+        }
+        assert!(state.memory_session(&session).unwrap().is_none());
+        assert!(state.entries.lock().unwrap().forms.contains_key(&form));
+        state.cleanup();
+        assert!(state.entries.lock().unwrap().forms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_capacity_reclaims_expired_forms_without_pruning_sessions() {
+        let mut state = state();
+        state.settings.as_mut().unwrap().max_forms = 1;
+        let (expired, _) = state.form(LoginFlow::Basic).await.unwrap();
+        let session = state.create_session(maximum_identity(), None).unwrap();
+        {
+            let mut entries = state.entries.lock().unwrap();
+            entries.forms.get_mut(&expired).unwrap().expires = Instant::now();
+            entries.sessions.get_mut(&session).unwrap().expires = Instant::now();
+        }
+        let (fresh, csrf) = state.form(LoginFlow::Basic).await.unwrap();
+        assert!(
+            state
+                .entries
+                .lock()
+                .unwrap()
+                .sessions
+                .contains_key(&session)
+        );
+        assert!(!state.entries.lock().unwrap().forms.contains_key(&expired));
+        assert!(
+            state
+                .consume(&fresh, &csrf, LoginFlow::Basic)
+                .await
+                .unwrap()
+        );
+    }
 
     fn maximum_identity() -> User {
         User::new(

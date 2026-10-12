@@ -30,7 +30,9 @@ impl Valkey {
             .arg(include_str!("valkey.lua"))
             .arg(1)
             .arg(&self.prefix)
-            .arg(args);
+            .arg(args)
+            .arg(super::SESSION_WIRE_BYTES_LIMIT)
+            .arg(super::SESSION_ENVELOPE_BYTES_RESERVE);
         self.connection
             .query(&command)
             .await
@@ -269,6 +271,55 @@ mod tests {
         ));
         b.discard(&f1).await.unwrap();
         a.discard(&f2).await.unwrap();
+
+        let binding = opaque_id();
+        let (first_id, first_challenge) = a
+            .form_with_binding(LoginFlow::Basic, Some(&binding))
+            .await
+            .unwrap();
+        let (second_id, second_challenge) = b
+            .form_with_binding(LoginFlow::Basic, Some(&binding))
+            .await
+            .unwrap();
+        let first = format!("{first_id}.{first_challenge}");
+        let second = format!("{second_id}.{second_challenge}");
+        for invalid in [
+            first_id.clone(),
+            format!("{first_id}."),
+            format!("{first_id}.{second_challenge}"),
+            format!("{first}.extra"),
+        ] {
+            assert!(
+                !b.consume_bound(&invalid, &binding, LoginFlow::Basic)
+                    .await
+                    .unwrap()
+            );
+        }
+        assert!(
+            !b.consume_bound(&first, &opaque_id(), LoginFlow::Basic)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !b.consume_bound(&first, &binding, LoginFlow::ApiKey)
+                .await
+                .unwrap()
+        );
+        let (left, right) = tokio::join!(
+            a.consume_bound(&first, &binding, LoginFlow::Basic),
+            b.consume_bound(&first, &binding, LoginFlow::Basic)
+        );
+        assert_ne!(left.unwrap(), right.unwrap());
+        assert!(
+            a.consume_bound(&second, &binding, LoginFlow::Basic)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !b.consume_bound(&second, &binding, LoginFlow::Basic)
+                .await
+                .unwrap()
+        );
 
         let (left, right) =
             tokio::join!(a.save_session(user(), None), b.save_session(user(), None));
@@ -674,19 +725,66 @@ mod tests {
             .verification_timeout_seconds = 1;
         let mut timed = BrowserLoginState::new(&timed_config).unwrap();
         timed.initialize(true).await.unwrap();
+        let timed_backend = timed.valkey.as_ref().unwrap();
+        let metrics = crate::metrics::Metrics::new();
+        let mut captured = None;
         let started = std::time::Instant::now();
         assert!(matches!(
-            timed.admitted(std::future::pending()).await,
+            timed
+                .admitted_with_metrics(
+                    async {
+                        let leases: Vec<(String, String)> = command(
+                            timed_backend,
+                            "ZRANGE",
+                            &["deadline:leases", "0", "-1", "WITHSCORES"],
+                        )
+                        .await;
+                        assert_eq!(leases.len(), 1);
+                        let (id, expiry) = leases.into_iter().next().unwrap();
+                        // A second member with the same expiry distinguishes exact release from pruning.
+                        let _: usize = command(
+                            timed_backend,
+                            "ZADD",
+                            &["deadline:leases", &expiry, "unrelated"],
+                        )
+                        .await;
+                        captured = Some((id, expiry));
+                        std::future::pending().await
+                    },
+                    Some(&metrics)
+                )
+                .await,
             Err(BrowserVerifyError::Timeout)
         ));
         assert!(started.elapsed() < Duration::from_secs(2));
-        let count: usize = command(
-            timed.valkey.as_ref().unwrap(),
-            "ZCARD",
-            &["deadline:leases"],
+        assert_eq!(timed.inflight.available_permits(), 1);
+        assert!(
+            metrics
+                .render()
+                .unwrap()
+                .contains("authotron_browser_logins_inflight 0")
+        );
+        let (id, expiry) = captured.expect("verification acquired a shared lease");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let score: Option<String> =
+                    command(timed_backend, "ZSCORE", &["deadline:leases", &id]).await;
+                if score.is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached cleanup must remove the exact lease before natural expiry");
+        let remaining: Vec<(String, String)> = command(
+            timed_backend,
+            "ZRANGE",
+            &["deadline:leases", "0", "-1", "WITHSCORES"],
         )
         .await;
-        assert_eq!(count, 0, "verification timeout awaits exact lease release");
+        assert_eq!(remaining, vec![("unrelated".into(), expiry)]);
+        let _: usize = command(timed_backend, "ZREM", &["deadline:leases", "unrelated"]).await;
 
         let mut disabled =
             BrowserLoginState::new(&config("redis://127.0.0.1:1/0", "disabled")).unwrap();
@@ -738,7 +836,12 @@ mod tests {
         use tower::ServiceExt;
         // ACL denies an index write after verification; preflight prevents a
         // session record from being created without its capacity index.
-        let (acl_sid, acl_csrf) = app_state.browser.form(LoginFlow::Basic).await.unwrap();
+        let acl_binding = opaque_id();
+        let (acl_sid, acl_csrf) = app_state
+            .browser
+            .form_with_binding(LoginFlow::Basic, Some(&acl_binding))
+            .await
+            .unwrap();
         let _: String = command(backend, "ACL", &["SETUSER", "default", "-zadd"]).await;
         let orphan_sid = opaque_id();
         assert!(
@@ -767,10 +870,10 @@ mod tests {
             .oneshot(
                 Request::post("/login/basic")
                     .header("origin", "https://login.example.test")
-                    .header("cookie", format!("__Host-authotron_form={acl_sid}"))
+                    .header("cookie", format!("__Host-authotron_form={acl_binding}"))
                     .header("content-type", "application/x-www-form-urlencoded")
                     .body(Body::from(format!(
-                        "username=alice&password=public-fixture&csrf={acl_csrf}"
+                        "username=alice&password=public-fixture&csrf={acl_sid}.{acl_csrf}"
                     )))
                     .unwrap(),
             )
@@ -811,6 +914,21 @@ mod tests {
             .split('"')
             .next()
             .unwrap();
+        let wrong_browser = other_app
+            .clone()
+            .oneshot(
+                Request::post("/login/basic")
+                    .header("origin", "https://login.example.test")
+                    .header("cookie", format!("__Host-authotron_form={}", opaque_id()))
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "username=alice&password=public-fixture&csrf={csrf}"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(wrong_browser.status(), StatusCode::FORBIDDEN);
         let response = other_app
             .oneshot(
                 Request::post("/login/basic")
@@ -900,6 +1018,45 @@ mod tests {
                 Err(BrowserVerifyError::Unavailable)
             ));
         }
+        // Fail only release after admission. Rejection/timeout retain their meaning;
+        // a successful verification cannot escape a failed cleanup as success.
+        for (index, (verification, expected)) in [
+            (Ok(user()), BrowserVerifyError::Unavailable),
+            (
+                Err(BrowserVerifyError::Rejected),
+                BrowserVerifyError::Rejected,
+            ),
+            (
+                Err(BrowserVerifyError::Timeout),
+                BrowserVerifyError::Timeout,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let browser = state(&url, &format!("release-outcome-{index}")).await;
+            let metrics = crate::metrics::Metrics::new();
+            let result = browser
+                .admitted_with_metrics(
+                    async {
+                        let _: String =
+                            command(backend, "ACL", &["SETUSER", "default", "-zrem"]).await;
+                        verification
+                    },
+                    Some(&metrics),
+                )
+                .await;
+            let _: String = command(backend, "ACL", &["SETUSER", "default", "+zrem"]).await;
+            assert_eq!(result.err(), Some(expected));
+            assert_eq!(browser.inflight.available_permits(), 1);
+            assert!(
+                metrics
+                    .render()
+                    .unwrap()
+                    .contains("authotron_browser_logins_inflight 0")
+            );
+        }
+
         // Stall only cleanup: admission and local Basic verification finish before the pause.
         struct PauseCleanup(Valkey, Arc<std::sync::atomic::AtomicBool>);
         #[async_trait::async_trait]
@@ -976,6 +1133,30 @@ mod tests {
                 .contains("authotron_browser_logins_inflight 0")
         );
         // Detached bounded cleanup or expiry releases the shared lease, not the caller deadline.
+        tokio::time::sleep(Duration::from_millis(3000)).await;
+        augmented.store(false, std::sync::atomic::Ordering::Release);
+        let direct = tokio::time::timeout(
+            Duration::from_millis(1800),
+            browser.verify_identity(
+                crate::browser::BrowserCredentials::Basic {
+                    username: "alice",
+                    password: "public-fixture",
+                },
+                &auth,
+                &metrics,
+            ),
+        )
+        .await
+        .expect("direct verification exceeded total deadline tolerance");
+        assert_eq!(direct.err(), Some(BrowserVerifyError::Timeout));
+        assert!(augmented.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(browser.inflight.available_permits(), 1);
+        assert!(
+            metrics
+                .render()
+                .unwrap()
+                .contains("authotron_browser_logins_inflight 0")
+        );
         tokio::time::sleep(Duration::from_millis(3000)).await;
         auth.augmenters.clear();
         assert!(

@@ -103,7 +103,11 @@
         input.id = `login-dialog-${name}`;
         input.className = "login-input";
         input.required = true;
-        input.maxLength = name === "username" ? 256 : name === "password" ? 1024 : 512;
+        const length = original.getAttribute("maxlength");
+        if (!/^[1-9][0-9]*$/.test(length || "")) return false;
+        const maxLength = Number(length);
+        if (!Number.isSafeInteger(maxLength) || maxLength > 8192) return false;
+        input.maxLength = maxLength;
         input.autocomplete = name === "username" ? "username" : name === "password" ? "current-password" : "off";
         const label = document.createElement("label");
         label.htmlFor = input.id;
@@ -230,7 +234,7 @@
     endpoint = null;
     opener?.focus();
     opener = null;
-    // Let a pending GET settle before another flow can replace its shared cookie.
+    // Let a pending GET settle before opening another dialog.
   });
   window.addEventListener("pagehide", () => {
     if (!posting) controller?.abort();

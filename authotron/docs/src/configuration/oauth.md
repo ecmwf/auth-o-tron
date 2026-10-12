@@ -17,6 +17,7 @@ Enabled OAuth requires:
 - Valid browser-session settings and an explicitly selected Memory or Valkey backend.
 - A root HTTPS issuer whose origin matches `ui.browser_session.public_origin`.
 - Nonempty preregistered client/resource policy and usable RS256 signing keys.
+- Transaction capacity of at least one slot per registered client.
 
 Configuration checks precede OAuth file/network initialization. Startup fails closed
 on missing settings, unusable keys or backend connection failure, without fallback.
@@ -100,7 +101,7 @@ automatic fallback are not implemented. Backend durability depends on its config
 | --- | --- |
 | `GET /.well-known/oauth-authorization-server` | RFC 8414 metadata with literal issuer, authorization/token endpoints, JWKS URI, code grant, public-client `none` authentication and S256 |
 | `GET /oauth/jwks` | Public RSA JWKs only: `kty`, `alg`, `use`, `kid`, `n`, `e` |
-| `GET /oauth/authorize` | Strict bounded authorization query; creates a browser-bound transaction and redirects to `/login` |
+| `GET /oauth/authorize` | Strict bounded authorization query; reserves a client-partition slot, resumes an exact matching active request, or shows a 409 conflict for a different request |
 | `GET /login/basic`, `/login/ecmwf-api-key` | Existing modal/native forms capture the current OAuth transaction ID in a server-rendered hidden field |
 | `POST` to the selected login form | Single trusted Origin, one-use flow CSRF, exact hidden-ID/cookie match and pending lookup before fresh strict verification; promotes authenticated state and redirects to fixed `/oauth/continue` |
 | `GET /oauth/continue` | Always a local consent page, not an automatic callback redirect; refresh rotates the challenge |
@@ -165,6 +166,17 @@ ordinary browser authentication. Stale forms from another tab cannot authenticat
 a new client's request. Without OAuth context, the existing `/login/account` flow
 retains its normal behavior.
 
+Credential POST checks remain strict. GET login entry points instead provide
+recovery: authenticated/consent-ready transactions resume `/oauth/continue`;
+expired, lost, or malformed OAuth state clears the OAuth cookies and shows an
+explicit restart/direct-sign-in choice. Backend outages remain errors and do not
+silently switch the flow to direct authentication. Only one OAuth flow is active
+per browser cookie pair: an exact validated-request match resumes that flow rather
+than allocating another slot. A different client, callback, resource, scopes,
+state, or PKCE challenge produces a 409 conflict page with an explicit link to
+continue the current request; no cookies change and no automatic redirect occurs.
+Finish or deny the current request before starting a different authorization.
+
 Credential and consent pages escape all configured/client/identity text. They do not
 render client state or tokens. Modal JavaScript whitelists the optional canonical
 transaction field and navigates only to literal same-origin `/oauth/continue` or
@@ -195,6 +207,26 @@ role; attributes and preexisting user scopes never grant permissions.
 | `max_authentication_age_seconds` | 300 | 1–3600 seconds |
 | `authentication_clock_skew_seconds` | 30 | 0–60 seconds; future verification timestamps only, no age-deadline grace |
 
+Transaction capacity is partitioned across registered clients without borrowing:
+each receives `floor(max_authorization_transactions / client_count)` slots, and
+the remainder is assigned one slot at a time in configuration order. The shares
+sum to the global cap; enabled startup rejects fewer slots than clients. Pending,
+authenticated, and consent-ready records occupy the same client share. Memory
+reserves under its mutex; Valkey checks and reserves atomically and reclaims
+expired or consumed index members. Client-index metadata expires by its latest
+original reservation deadline even without another request. Early consumption
+can leave bounded metadata until that deadline; admission reconciles it against
+the authoritative global index. Keep client ordering and all limits identical
+across replicas, and drain active transactions before changing the partition.
+
+This isolates one client's reservations from another client's capacity; it is
+**not authenticated caller isolation or a denial-of-service guarantee**. Client
+IDs are public and cookies can be replaced. An attacker can target one client's
+share, every registered client, or request-processing resources. Production
+deployments still require trusted edge admission/rate controls; never derive an
+abuse-control identity from untrusted forwarded headers. Reusing a live browser
+flow avoids accidental reservations but does not identify an attacker.
+
 Code expiry is the minimum of code TTL, original consent ceiling, transaction expiry
 and authentication freshness. Current policy/TTL tightening can shorten eligibility;
 relaxation never extends stored ceilings. Valkey state transitions use server TIME;
@@ -206,7 +238,7 @@ restoration does not rerun upstream verification.
 Private codecs are wire-bounded: Pending 16 KiB, authenticated context 64 KiB,
 ConsentReady/code grant 96 KiB. Trusted authenticated storage is required, not a MAC
 against compromised cache contents. Code envelopes bind their actual code hash and
-originating literal issuer. Valkey namespaces are `:oauth:authorization-transactions:v3:`
+originating literal issuer. Valkey namespaces are `:oauth:authorization-transactions:v4:`
 and `:oauth:authorization-codes:v1:`; code hashes contain exactly code_hash/issuer/expiry/payload.
 Shared issuance atomically persists code while consuming consent; redemption compares
 all code fields/index score/effective deadline before atomic deletion and proof release.
@@ -215,6 +247,13 @@ or lost replies can leave ambiguous mutation outcomes: atomic execution is not r
 there is no automatic replay or fallback. Memory is development-only, per-instance,
 without restart persistence. Capacity bounds logical records, not total allocation;
 100000 96 KiB records alone permit about 9.15 GiB payload plus overhead.
+
+The v4 transaction namespace introduces client capacity indexes. Upgrading from
+v3 requires draining/restarting in-flight authorization attempts; the authorization
+code namespace is unchanged. Do not mix v3/v4 application replicas behind one
+login endpoint. Restricted backend ACLs must permit `ZRANGE` as well as the
+existing sorted-set/hash operations, with access to all keys beneath the configured
+OAuth transaction prefix, including its client indexes.
 
 ## Signing and deferred capabilities
 

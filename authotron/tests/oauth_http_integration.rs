@@ -161,6 +161,340 @@ async fn consent_page(app: &Router, jar: &Jar) -> (String, String) {
     assert!(!html.contains("opaque+client"));
     (hidden(&html, "csrf"), hidden(&html, "oauth_transaction"))
 }
+
+fn isolate_clients(config: &mut ConfigV2) {
+    let mut other = config.oauth.clients[0].clone();
+    other.client_id = "other".into();
+    config.oauth.clients.push(other);
+    config.oauth.max_authorization_transactions = 3;
+}
+
+async fn admission_isolation(a: &Router, b: &Router) {
+    let path = format!("/oauth/authorize?{}", authorize_query());
+    let mut attacker = Jar::default();
+    let response = get(a, &path, &attacker).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    attacker.update(&response);
+    let binding = attacker.header();
+    for _ in 0..5 {
+        let response = get(b, &path, &attacker).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        attacker.update(&response);
+        assert_eq!(attacker.header(), binding);
+    }
+    // Cookie-free requests can exhaust desktop's share (2), but not other's (1).
+    assert_eq!(
+        get(b, &path, &Jar::default()).await.status(),
+        StatusCode::SEE_OTHER
+    );
+    for _ in 0..5 {
+        assert_eq!(
+            get(a, &path, &Jar::default()).await.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+    let other = path.replace("client_id=desktop", "client_id=other");
+    assert_eq!(
+        get(b, &other, &Jar::default()).await.status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        get(a, &other, &Jar::default()).await.status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        get(b, "/login/basic", &attacker).await.status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn authorize_reserves_other_clients_capacity_and_reuses_live_browser_binding() {
+    let (_key, mut config) = fixture("http://127.0.0.1:9");
+    isolate_clients(&mut config);
+    let (app, _) = startup::build_app(Arc::new(config)).await.unwrap();
+    admission_isolation(&app, &app).await;
+}
+
+#[tokio::test]
+async fn transaction_capacity_must_reserve_at_least_one_slot_per_client() {
+    let (_key, mut config) = fixture("http://127.0.0.1:9");
+    isolate_clients(&mut config);
+    config.oauth.max_authorization_transactions = 1;
+    assert!(startup::build_app(Arc::new(config)).await.is_err());
+}
+
+#[tokio::test]
+async fn authorize_only_reuses_the_exact_validated_request_in_every_state() {
+    let (_key, mut config) = fixture("http://127.0.0.1:9");
+    isolate_clients(&mut config);
+    let second_callback = "http://127.0.0.1:49152/other";
+    config.oauth.clients[0]
+        .redirect_uris
+        .push(second_callback.into());
+    let mut second_resource = config.oauth.resources[0].clone();
+    second_resource.resource = "https://mcp.example.test/other".into();
+    config.oauth.resources.push(second_resource);
+    let mut grant = config.oauth.clients[0].resources[0].clone();
+    grant.resource = "https://mcp.example.test/other".into();
+    config.oauth.clients[0].resources.push(grant);
+    let mut scope = config.oauth.resources[0].scopes[0].clone();
+    scope.name = "write".into();
+    config.oauth.resources[0].scopes.push(scope);
+    config.oauth.clients[0].resources[0]
+        .scopes
+        .push("write".into());
+    let (app, _) = startup::build_app(Arc::new(config)).await.unwrap();
+    let mut jar = Jar::default();
+    let (csrf, tx) = login_form(&app, &mut jar, "/login/basic").await;
+    for phase in 0..3 {
+        if phase == 1 {
+            let fields = [
+                ("csrf", csrf.as_str()),
+                ("oauth_transaction", tx.as_str()),
+                ("username", "alice"),
+                ("password", "päss:秘密"),
+            ];
+            let response = send(&app, post("/login/basic", &jar, &fields, Some(ORIGIN))).await;
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            jar.update(&response);
+        } else if phase == 2 {
+            consent_page(&app, &jar).await;
+        }
+        let response = get(
+            &app,
+            &format!("/oauth/authorize?{}", authorize_query()),
+            &jar,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            if phase == 0 {
+                "/login"
+            } else {
+                "/oauth/continue"
+            }
+        );
+        for (field, value) in [
+            ("client_id", "other"),
+            ("redirect_uri", second_callback),
+            ("resource", "https://mcp.example.test/other"),
+            ("scope", "write"),
+            ("state", "different-state"),
+            (
+                "code_challenge",
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            ),
+        ] {
+            let mut pairs: Vec<_> = url::form_urlencoded::parse(authorize_query().as_bytes())
+                .into_owned()
+                .collect();
+            pairs.iter_mut().find(|(name, _)| name == field).unwrap().1 = value.into();
+            let query = encoded(
+                &pairs
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), value.as_str()))
+                    .collect::<Vec<_>>(),
+            );
+            let response = get(&app, &format!("/oauth/authorize?{query}"), &jar).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "{field}, phase {phase}"
+            );
+            assert!(!response.headers().contains_key(header::LOCATION));
+            assert!(!response.headers().contains_key(header::SET_COOKIE));
+            assert!(
+                text(response)
+                    .await
+                    .contains("Continue current authorization")
+            );
+        }
+    }
+}
+
+async fn assert_explicit_recovery(response: Response, jar: &Jar) {
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key(header::LOCATION));
+    assert_eq!(
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .count(),
+        2
+    );
+    let mut cleared = jar.clone();
+    cleared.update(&response);
+    assert!(!cleared.0.contains_key("__Host-authotron_oauth"));
+    assert!(!cleared.0.contains_key("__Host-authotron_oauth_browser"));
+    assert!(text(response).await.contains("Restart authorization"));
+}
+
+#[tokio::test]
+async fn malformed_partial_and_duplicate_oauth_cookies_recover_only_on_get() {
+    let (_key, config) = fixture("http://127.0.0.1:9");
+    let (app, _) = startup::build_app(Arc::new(config)).await.unwrap();
+    let mut jar = Jar::default();
+    let (csrf, tx) = login_form(&app, &mut jar, "/login/basic").await;
+    let headers = [
+        format!("__Host-authotron_oauth={tx}"),
+        format!(
+            "__Host-authotron_oauth_browser={}",
+            jar.0["__Host-authotron_oauth_browser"]
+        ),
+        "__Host-authotron_oauth=malformed; __Host-authotron_oauth_browser=malformed".into(),
+        format!("{}; __Host-authotron_oauth={tx}", jar.header()),
+        format!(
+            "{}; __Host-authotron_oauth_browser={}",
+            jar.header(),
+            jar.0["__Host-authotron_oauth_browser"]
+        ),
+    ];
+    for cookies in headers {
+        for path in ["/login", "/login/basic", "/login/ecmwf-api-key"] {
+            let response = send(
+                &app,
+                Request::get(path)
+                    .header(header::COOKIE, &cookies)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_explicit_recovery(response, &jar).await;
+        }
+        let mut request = post(
+            "/login/basic",
+            &jar,
+            &[
+                ("csrf", &csrf),
+                ("oauth_transaction", &tx),
+                ("username", "alice"),
+                ("password", "päss:秘密"),
+            ],
+            Some(ORIGIN),
+        );
+        request
+            .headers_mut()
+            .insert(header::COOKIE, cookies.parse().unwrap());
+        let response = send(&app, request).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(!response.headers().contains_key(header::LOCATION));
+    }
+}
+
+async fn consent_binding_recovery(app: &Router) {
+    let mut jar = Jar::default();
+    let (csrf, tx) = login_form(app, &mut jar, "/login/basic").await;
+    let response = send(
+        app,
+        post(
+            "/login/basic",
+            &jar,
+            &[
+                ("csrf", &csrf),
+                ("oauth_transaction", &tx),
+                ("username", "alice"),
+                ("password", "päss:秘密"),
+            ],
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    jar.update(&response);
+    let (csrf, tx) = consent_page(app, &jar).await;
+    let mut wrong = jar.clone();
+    wrong.0.insert(
+        "__Host-authotron_oauth_browser".into(),
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+    );
+    let fields = [
+        ("csrf", csrf.as_str()),
+        ("oauth_transaction", tx.as_str()),
+        ("decision", "deny"),
+    ];
+    let response = send(app, post("/oauth/consent", &wrong, &fields, Some(ORIGIN))).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!response.headers().contains_key(header::LOCATION));
+    for path in ["/login", "/login/basic", "/login/ecmwf-api-key"] {
+        assert_explicit_recovery(get(app, path, &wrong).await, &wrong).await;
+    }
+    // Neither the rejected POST nor GET recovery consumes the legitimate flow.
+    let response = send(app, post("/oauth/consent", &jar, &fields, Some(ORIGIN))).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert!(
+        response.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .contains("access_denied")
+    );
+}
+
+#[tokio::test]
+async fn consent_ready_wrong_browser_recovers_without_accepting_post() {
+    let (_key, config) = fixture("http://127.0.0.1:9");
+    let (app, _) = startup::build_app(Arc::new(config)).await.unwrap();
+    consent_binding_recovery(&app).await;
+}
+
+#[tokio::test]
+async fn login_get_recovers_lost_state_and_resumes_advanced_state_without_post_downgrade() {
+    let (_key, config) = fixture("http://127.0.0.1:9");
+    let config = Arc::new(config);
+    let (app, _) = startup::build_app(config.clone()).await.unwrap();
+    let mut jar = Jar::default();
+    let (csrf, tx) = login_form(&app, &mut jar, "/login/basic").await;
+    let fields = [
+        ("csrf", csrf.as_str()),
+        ("oauth_transaction", tx.as_str()),
+        ("username", "alice"),
+        ("password", "päss:秘密"),
+    ];
+    let response = send(&app, post("/login/basic", &jar, &fields, Some(ORIGIN))).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    jar.update(&response);
+    for consent_ready in [false, true] {
+        if consent_ready {
+            consent_page(&app, &jar).await;
+        }
+        let response = get(&app, "/login", &jar).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[header::LOCATION], "/oauth/continue");
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+    }
+    // A process restart loses development-memory state. Recovery is an explicit
+    // GET page, while the original credential POST still fails closed.
+    let (restarted, _) = startup::build_app(config).await.unwrap();
+    let response = get(&restarted, "/login", &jar).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut cleared = jar.clone();
+    cleared.update(&response);
+    assert!(!cleared.0.contains_key("__Host-authotron_oauth"));
+    assert!(!cleared.0.contains_key("__Host-authotron_oauth_browser"));
+    assert!(text(response).await.contains("Restart authorization"));
+    let response = send(
+        &restarted,
+        post("/login/basic", &cleared, &fields, Some(ORIGIN)),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(
+        !response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .any(|value| value
+                .to_str()
+                .unwrap()
+                .starts_with("__Host-authotron_session="))
+    );
+    assert_eq!(
+        get(&restarted, "/login/basic", &cleared).await.status(),
+        StatusCode::OK
+    );
+}
 async fn complete(a: &Router, b: &Router, api: bool) {
     let mut jar = Jar::default();
     let path = if api {
@@ -332,10 +666,12 @@ async fn invalid_authorization_and_stale_login_forms_never_verify_or_redirect() 
     }
     let mut jar = Jar::default();
     let (csrf, old_tx) = login_form(&app, &mut jar, "/login/ecmwf-api-key").await;
+    // A distinct browser starts a different flow; posting the old form with the
+    // new flow's cookie pair must still fail before credential verification.
     let response = get(
         &app,
         &format!("/oauth/authorize?{}", authorize_query()),
-        &jar,
+        &Jar::default(),
     )
     .await;
     jar.update(&response);
@@ -697,8 +1033,83 @@ async fn disposable_valkey_http_oauth_cross_replica_flow() {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     let a = ready.unwrap();
-    let (b, _) = startup::build_app(config).await.unwrap();
+    let (b, _) = startup::build_app(config.clone()).await.unwrap();
     complete(&a, &b, false).await;
     complete(&a, &b, true).await;
+    consent_binding_recovery(&b).await;
+    // An ACL failure is storage unavailability, not a missing browser flow.
+    // Use an authenticated administrative fixture connection to restore access
+    // before assertions; application requests must retain both binding cookies.
+    let mut jar = Jar::default();
+    let (csrf, tx) = login_form(&a, &mut jar, "/login/basic").await;
+    let response = send(
+        &a,
+        post(
+            "/login/basic",
+            &jar,
+            &[
+                ("csrf", &csrf),
+                ("oauth_transaction", &tx),
+                ("username", "alice"),
+                ("password", "päss:秘密"),
+            ],
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    jar.update(&response);
+    let (csrf, tx) = consent_page(&b, &jar).await;
+    let BrowserBackendConfig::Valkey { url, password, .. } =
+        &config.ui.browser_session.as_ref().unwrap().backend
+    else {
+        unreachable!()
+    };
+    let mut connection = redis::IntoConnectionInfo::into_connection_info(url.as_str()).unwrap();
+    connection.redis.password = Some(password.clone());
+    let client = redis::Client::open(connection).unwrap();
+    let mut admin = client.get_multiplexed_async_connection().await.unwrap();
+    let _: () = redis::cmd("ACL")
+        .arg(&["SETUSER", "default", "-eval"])
+        .query_async(&mut admin)
+        .await
+        .unwrap();
+    let mut responses = Vec::new();
+    for path in ["/login", "/login/basic", "/login/ecmwf-api-key"] {
+        responses.push(get(&b, path, &jar).await);
+    }
+    let _: () = redis::cmd("ACL")
+        .arg(&["SETUSER", "default", "+eval"])
+        .query_async(&mut admin)
+        .await
+        .unwrap();
+    for response in responses {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        assert!(!response.headers().contains_key(header::LOCATION));
+    }
+    let response = send(
+        &a,
+        post(
+            "/oauth/consent",
+            &jar,
+            &[
+                ("csrf", &csrf),
+                ("oauth_transaction", &tx),
+                ("decision", "deny"),
+            ],
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let (_isolated_key, mut isolated) = fixture(&mock.url());
+    isolated.ui.browser_session.as_mut().unwrap().backend =
+        config.ui.browser_session.as_ref().unwrap().backend.clone();
+    isolate_clients(&mut isolated);
+    let isolated = Arc::new(isolated);
+    let (a, _) = startup::build_app(isolated.clone()).await.unwrap();
+    let (b, _) = startup::build_app(isolated).await.unwrap();
+    admission_isolation(&a, &b).await;
     upstream.assert_async().await;
 }

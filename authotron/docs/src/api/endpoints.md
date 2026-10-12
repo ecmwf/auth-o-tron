@@ -198,7 +198,7 @@ auth_duration_seconds_bucket{result="success",realm="internal",le="0.1"} 35
 When `ui.enabled` and either `ui.basic` or `ui.ecmwf_api_key` are configured,
 `ui.browser_session` with an explicit `backend.type` (`memory` or `valkey`) is required and the application port serves the corresponding
 `GET/POST /login/basic` or `GET/POST /login/ecmwf-api-key`, plus `GET /login/account`.
-Both forms share bounded admission, a configurable verification-plus-augmentation
+Both forms share bounded admission, a configurable verification/augmentation/lease-release
 deadline (default ten seconds), exact Origin checks, and cookie-bound single-use flow-specific CSRF.
 `max_inflight_logins` is a per-pod nonblocking limit (default 8). Optional nullable
 `max_shared_inflight_logins` adds a global Valkey lease cap (1–65536); its default
@@ -219,9 +219,9 @@ They return 404 when disabled. See [Login UI](../configuration/ui.md).
 
 | Endpoint | Request / response |
 |----------|--------------------|
-| `GET /login/basic` | Escaped username/password form with transaction cookie and CSRF token; never consumes query credentials |
+| `GET /login/basic` | Escaped username/password form with browser-binding cookie and independent transaction/challenge in `csrf`; never consumes query credentials |
 | `POST /login/basic` | URL-encoded `username`, `password`, `csrf` only; username ≤256 UTF-8 bytes, password ≤1,024 UTF-8 bytes; Unicode/whitespace password preserved |
-| `GET /login/ecmwf-api-key` | API-key form with transaction cookie and CSRF token |
+| `GET /login/ecmwf-api-key` | API-key form with the same stable browser-binding cookie and its own opaque `csrf` value |
 | `POST /login/ecmwf-api-key` | URL-encoded `api_key`, `csrf` only; key ≤512 bytes |
 | `GET /login/account` | Session-only augmented identity, escaped roles, and allowlisted `ecmwf-email`, `email`, `display_name`; no session →303 `/login` |
 

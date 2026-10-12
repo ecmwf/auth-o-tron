@@ -64,6 +64,9 @@ impl OAuthRuntime {
         {
             return Err("OAuth requires signing keys, preregistered clients and resources");
         }
+        if config.oauth.max_authorization_transactions < config.oauth.clients.len() {
+            return Err("OAuth transaction capacity must reserve at least one slot per client");
+        }
         let session = config
             .ui
             .browser_session
@@ -139,6 +142,47 @@ impl OAuthRuntime {
         context: AuthenticatedAuthorization,
     ) -> Result<(), StoreError> {
         dispatch!(self, promote_authenticated(id, hash, context))
+    }
+    pub(crate) async fn advanced(
+        &self,
+        id: &TransactionId,
+        hash: &[u8; 32],
+    ) -> Result<(), StoreError> {
+        self.advanced_context(id, hash).await.map(|_| ())
+    }
+    async fn advanced_context(
+        &self,
+        id: &TransactionId,
+        hash: &[u8; 32],
+    ) -> Result<AuthenticatedAuthorization, StoreError> {
+        match dispatch!(self, lookup_authenticated(id, hash)) {
+            Ok(context) => Ok(context),
+            Err(StoreError::Missing) => self.consent_context(id, hash).await,
+            Err(error) => Err(error),
+        }
+    }
+    pub(crate) async fn active_request_matches(
+        &self,
+        id: &TransactionId,
+        hash: &[u8; 32],
+        request: &ValidatedAuthorizationRequest,
+    ) -> Result<bool, StoreError> {
+        let matches = |stored: &ValidatedAuthorizationRequest| {
+            stored.client_id() == request.client_id()
+                && stored.redirect_uri() == request.redirect_uri()
+                && stored.resource() == request.resource()
+                && stored.scopes() == request.scopes()
+                && stored.state() == request.state()
+                && stored.challenge().digest() == request.challenge().digest()
+        };
+        match self.bound(id, hash).await {
+            Ok(bound) => Ok(matches(bound.transaction().request())),
+            Err(StoreError::Missing) => self
+                .advanced_context(id, hash)
+                .await
+                .map(|context| matches(context.transaction().request())),
+            Err(error) => Err(error),
+        }
     }
     pub(crate) async fn prepare(
         &self,

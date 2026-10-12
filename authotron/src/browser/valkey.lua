@@ -1,7 +1,10 @@
 local prefix = KEYS[1]
 local op = ARGV[1]
-local session_wire_bytes_limit = 65536
-local session_envelope_bytes_reserve = 36
+local session_wire_bytes_limit = tonumber(ARGV[#ARGV - 1])
+local session_envelope_bytes_reserve = tonumber(ARGV[#ARGV])
+if not session_wire_bytes_limit or not session_envelope_bytes_reserve or session_envelope_bytes_reserve <= 0 or session_wire_bytes_limit <= session_envelope_bytes_reserve then
+  return redis.error_reply('invalid wire limits')
+end
 local t = redis.call('TIME')
 local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
 local function prune(index)

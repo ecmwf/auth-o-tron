@@ -148,7 +148,10 @@ async fn form_response(
         Ok(transaction) => transaction,
         Err(status) => return super::oauth::local(status),
     };
-    let (sid, csrf) = match state.browser.form(flow).await {
+    let binding = cookie_value(headers, FORM_COOKIE)
+        .filter(|value| crate::browser::valid_id(value))
+        .unwrap_or_else(crate::browser::opaque_id);
+    let (sid, csrf) = match state.browser.form_with_binding(flow, Some(&binding)).await {
         Ok(form) => form,
         Err(error) => return unavailable(error),
     };
@@ -162,7 +165,7 @@ async fn form_response(
                 @else { "Verify your identity for a short-lived Auth-O-Tron browser session." }
             }
             form class="key-form" method="post" action=(if flow == LoginFlow::ApiKey { "/login/ecmwf-api-key" } else { "/login/basic" }) {
-                input type="hidden" name="csrf" value=(csrf);
+                input type="hidden" name="csrf" value=(format!("{sid}.{csrf}"));
                 @if let Some(id) = &oauth_transaction { input type="hidden" name="oauth_transaction" value=(id); }
                 @if flow == LoginFlow::ApiKey {
                     label for="api-key" { "ECMWF API key" }
@@ -185,7 +188,7 @@ async fn form_response(
     set_cookie(
         &mut response,
         FORM_COOKIE,
-        sid,
+        binding,
         state.browser.transaction_ttl(),
     );
     response
@@ -200,14 +203,21 @@ fn flow_error(flow: LoginFlow) -> &'static str {
 }
 
 async fn key_form(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = super::oauth::login_entry_recovery(&state, &headers).await {
+        return response;
+    }
     form_response(&state, &headers, LoginFlow::ApiKey, StatusCode::OK, false).await
 }
 
 async fn basic_form(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(response) = super::oauth::login_entry_recovery(&state, &headers).await {
+        return response;
+    }
     form_response(&state, &headers, LoginFlow::Basic, StatusCode::OK, false).await
 }
 
-// Valid: api_key=public-fixture&csrf=opaque. Invalid: a missing or duplicate csrf field.
+// CSRF syntax: <64 hex transaction ID>.<64 hex challenge>; e.g. two 64-digit
+// hex strings separated by '.', never a bare transaction ID or duplicate field.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KeyForm {
@@ -217,7 +227,8 @@ struct KeyForm {
     csrf: String,
 }
 
-// Valid: username=alice&password=public-fixture&csrf=opaque. Invalid: submitted roles.
+// Valid fields: username=alice&password=public-fixture&csrf=<transaction>.<challenge>
+// (each CSRF component is 64 hex digits). Invalid: submitted roles or duplicate csrf.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BasicForm {
@@ -323,11 +334,7 @@ async fn submit_inner(
             } else {
                 StatusCode::BAD_REQUEST
             };
-            if let Some(sid) = cookie_value(&headers, FORM_COOKIE)
-                && let Err(error) = state.browser.discard(&sid).await
-            {
-                return unavailable(error);
-            }
+            // Unparseable input proves neither transaction ownership nor CSRF knowledge.
             return form_response(&state, &headers, flow, status, true).await;
         }
     };
@@ -339,8 +346,12 @@ async fn submit_inner(
                 return super::oauth::local(status);
             }
         };
-    let valid_transaction = if let Some(sid) = cookie_value(&headers, FORM_COOKIE) {
-        match state.browser.consume(&sid, &payload.csrf, flow).await {
+    let valid_transaction = if let Some(binding) = cookie_value(&headers, FORM_COOKIE) {
+        match state
+            .browser
+            .consume_bound(&payload.csrf, &binding, flow)
+            .await
+        {
             Ok(valid) => valid,
             Err(error) => return unavailable(error),
         }
@@ -431,8 +442,7 @@ async fn submit_inner(
             attempt.outcome = BrowserOutcome::BackendUnavailable;
             return super::oauth::local(StatusCode::SERVICE_UNAVAILABLE);
         }
-        let mut response = private_response(Redirect::to("/oauth/continue").into_response());
-        set_cookie(&mut response, FORM_COOKIE, String::new(), 0);
+        let response = private_response(Redirect::to("/oauth/continue").into_response());
         attempt.outcome = BrowserOutcome::Success;
         return response;
     }
@@ -472,7 +482,6 @@ async fn submit_inner(
     };
     let mut response = private_response(Redirect::to("/login/account").into_response());
     set_cookie(&mut response, SESSION_COOKIE, sid, state.browser.ttl);
-    set_cookie(&mut response, FORM_COOKIE, String::new(), 0);
     attempt.outcome = BrowserOutcome::Success;
     response
 }

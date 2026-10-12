@@ -162,7 +162,7 @@ Session TTL defaults to 300 seconds and must be between 60 and 86,400 seconds.
 Configuration is checked before creating stores or browser network state.
 
 **ECMWF API key** opens `GET /login/ecmwf-api-key`. Submission requires a
-same-origin POST with the host-only transaction cookie and one-use CSRF token;
+same-origin POST with the host-only browser-binding cookie and one-use CSRF token;
 transactions expire after `transaction_ttl_seconds` (default five minutes). The response redirects only to the fixed
 `/login/account` identity view, not an arbitrary application callback.
 
@@ -248,7 +248,9 @@ match, and rotates sessions while accounting for a previous SID. No key scans ar
 used. Session reads do not refresh TTL. Stored records have a versioned envelope
 and a strict browser-only projection; a `STRLEN` guard rejects records over 64 KiB
 before fetching or parsing their JSON. Memory uses monotonic expiry and periodic
-30-second cleanup. Shared and memory quota windows need not have identical phase.
+30-second cleanup. Memory account lookups expire only the requested entry rather
+than scanning both stores; capacity reclamation scans only the affected store.
+Shared and memory quota windows need not have identical phase.
 
 Longer session lifetimes **increase credential-revocation latency**: revocation
 is checked on the next verification, not on each account view. At the maximum,
@@ -272,8 +274,13 @@ instance**; it does not coordinate replicas.
 
 Optional shared leases expire after the
 configured verification deadline plus a fixed two-second grace, and release
-checks both the lease ID and its expiry. Normal completion awaits release;
-request cancellation performs bounded asynchronous cleanup, with expiry recovery
+checks both the lease ID and its expiry. Normal completion awaits release within
+the same verification deadline; cleanup cannot extend the local admission budget.
+Completion is checked against the elapsed deadline even when a future returns
+ready late. Once the deadline has elapsed the outcome is timeout. Before then,
+verification rejection/timeout takes precedence over release failure; successful
+verification followed by release failure fails closed as backend unavailable.
+Request cancellation performs bounded asynchronous cleanup, with expiry recovery
 after process crashes. Leases are **not perfect fencing**: a suspended process
 can resume after its lease expires. The ECMWF HTTP request remains capped at
 ten seconds even when the overall verification/augmentation deadline is longer.
@@ -403,18 +410,31 @@ Errors are generic, and browser routes never send a `WWW-Authenticate` challenge
 that could trigger the browser's HTTP Basic dialog.
 
 Both flows share the same bounded transaction/session stores, cookies, quotas
-and configurable admission limit (default eight). CSRF tokens are cookie-bound, single-use,
+and configurable admission limit (default eight). Each form has an independent
+transaction ID and challenge, carried together in the opaque `csrf` field. The
+`__Host-authotron_form` cookie is a stable browser binding, not the current form's
+transaction ID. Opening another form with that binding, or completing one form,
+does not invalidate outstanding forms. Malformed or mismatched submissions cannot
+consume another form's transaction. CSRF tokens are cookie-bound, single-use,
 expire after the configured transaction TTL, and are also bound to the selected flow; an API-key
 form token cannot submit Basic login or vice versa. Each POST requires exactly
 one Origin header matching the configured normalized HTTPS origin. Forwarded
 headers and submitted fields never choose the origin or destination.
+
+This preserves multiple forms once the browser has a binding. Concurrent first
+visits without a cookie (also after cookie expiry) can still race to establish
+different bindings; the losing form fails closed and must be reopened. The new
+composite CSRF format intentionally rejects old forms. Drain old-version replicas
+when upgrading and ask users to load a fresh form; existing identity sessions
+remain readable, but old/new form endpoints are not rollout-compatible.
 
 After **each successful direct verification**, Auth-O-Tron invokes the existing
 `Auth::check_augmenters` pipeline: matching-realm ordinary augmenters run in
 parallel, then `plain_advanced` augmenters run serially in configuration order.
 Existing augmenter error semantics remain: an individual augmenter error is
 recorded and does not itself reject the verified identity. A configurable overall
-deadline (default ten seconds) and the admission permit cover verification **and augmentation**;
+deadline (default ten seconds) and the admission permit cover verification,
+augmentation, and awaited shared-lease release;
 timeout creates no session. The resulting identity is checked and projected
 before session storage and redirecting to `/login/account`.
 
@@ -482,6 +502,10 @@ parameters. Selecting a configured action navigates to the client that starts
 authorization and owns its callback. The isolated browser SSO demo under
 `authotron/examples/browser-sso` uses Keycloak, OAuth2-proxy and ephemeral Valkey
 sessions; it does not use Auth-O-Tron's token store or connect to real Aviso data.
+Its renderer tests do not establish live ingress TLS/forwarded-header behavior,
+the proxy-native identity endpoint's response headers, or callback/refresh
+acceptance. Those checks remain deployment prerequisites, not guarantees supplied
+by rendering Kubernetes objects.
 
 ## Endpoints and Image Requirement
 

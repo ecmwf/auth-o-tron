@@ -111,6 +111,140 @@ async fn transaction_for(app: Router, path: &str) -> (String, String) {
     )
 }
 
+#[tokio::test]
+async fn shared_cookie_jar_preserves_tabs_and_rejects_cross_browser_without_burning() {
+    let (app, _) = startup::build_app(Arc::new(combined_config("http://127.0.0.1:1")))
+        .await
+        .unwrap();
+    let (mut jar, first) = transaction_for(app.clone(), BASIC).await;
+    let response = request(
+        app.clone(),
+        Request::get(BASIC)
+            .header(header::COOKIE, &jar)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let cookie = response_cookie(&response, "__Host-authotron_form").unwrap();
+    let next = cookie.to_string().split(';').next().unwrap().to_owned();
+    assert_eq!(jar, next);
+    jar = next;
+    let html = text(response).await;
+    let second = html
+        .split("name=\"csrf\" value=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let (other, _) = transaction_for(app.clone(), BASIC).await;
+    assert_eq!(
+        request(app.clone(), basic_post(&other, &first, "alice", PASSWORD))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let (first_id, _) = first.split_once('.').unwrap();
+    let (_, second_challenge) = second.split_once('.').unwrap();
+    let mixed = format!("{first_id}.{second_challenge}");
+    assert_eq!(
+        request(app.clone(), basic_post(&jar, &mixed, "alice", PASSWORD))
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    for partial in [
+        first_id.to_owned(),
+        format!("{first_id}."),
+        format!(".{second_challenge}"),
+        format!("{first}.extra"),
+    ] {
+        assert_eq!(
+            request(app.clone(), basic_post(&jar, &partial, "alice", PASSWORD))
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    let duplicate = format!("{jar}; {jar}");
+    assert_eq!(
+        request(
+            app.clone(),
+            basic_post(&duplicate, &first, "alice", PASSWORD)
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        request(
+            app.clone(),
+            post(Some(&jar), Some(&first), Some(ORIGIN), KEY)
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    for token in [&first, second] {
+        let response = request(app.clone(), basic_post(&jar, token, "alice", PASSWORD)).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(response_cookie(&response, "__Host-authotron_form").is_none());
+        let session = response_cookie(&response, "__Host-authotron_session").unwrap();
+        jar = format!(
+            "{}; {}",
+            jar.split(';').next().unwrap(),
+            session.to_string().split(';').next().unwrap()
+        );
+        assert_eq!(
+            request(app.clone(), basic_post(&jar, token, "alice", PASSWORD))
+                .await
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+}
+
+#[tokio::test]
+async fn concurrent_first_forms_without_binding_fail_closed_and_allow_retry() {
+    let (app, _) = startup::build_app(Arc::new(combined_config("http://127.0.0.1:1")))
+        .await
+        .unwrap();
+    // Both requests leave before either response can establish a browser cookie.
+    let ((first_cookie, first), (jar, second)) = tokio::join!(
+        transaction_for(app.clone(), BASIC),
+        transaction_for(app.clone(), BASIC)
+    );
+    assert_ne!(first_cookie, jar);
+    // The second response wins the browser cookie race. The first form cannot use it.
+    let response = request(app.clone(), basic_post(&jar, &first, "alice", PASSWORD)).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let retry_cookie = response_cookie(&response, "__Host-authotron_form").unwrap();
+    assert_eq!(retry_cookie.to_string().split(';').next().unwrap(), jar);
+    let html = text(response).await;
+    let retry = html
+        .split("name=\"csrf\" value=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    for token in [second.as_str(), retry] {
+        assert_eq!(
+            request(app.clone(), basic_post(&jar, token, "alice", PASSWORD))
+                .await
+                .status(),
+            StatusCode::SEE_OTHER
+        );
+    }
+    // The mismatch did not consume the first form either.
+    assert_eq!(
+        request(app, basic_post(&first_cookie, &first, "alice", PASSWORD))
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+}
+
 fn post(
     cookie: Option<&str>,
     csrf: Option<&str>,
@@ -511,8 +645,12 @@ async fn oversized_and_malformed_forms_are_sanitized_and_do_not_verify() {
     .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(!text(response).await.contains(KEY));
-    let replay = request(app, post(Some(&cookie), Some(&csrf), Some(ORIGIN), KEY)).await;
-    assert_eq!(replay.status(), StatusCode::FORBIDDEN);
+    let replay = request(
+        app,
+        post(Some(&cookie), Some(&csrf), Some(ORIGIN), "invalid key"),
+    )
+    .await;
+    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
     mock.assert_async().await;
 }
 
@@ -799,7 +937,7 @@ async fn basic_rejects_forged_duplicate_and_cross_flow_fields_and_enforces_exact
             request(app.clone(), basic_post(&cookie, &csrf, "alice", PASSWORD))
                 .await
                 .status(),
-            StatusCode::FORBIDDEN
+            StatusCode::SEE_OTHER
         );
     }
     for source in [BASIC, PATH] {

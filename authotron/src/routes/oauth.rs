@@ -46,7 +46,7 @@ pub(super) fn routes(enabled: bool) -> Router<AppState> {
         .route("/oauth/token", post(token))
         .layer(DefaultBodyLimit::max(8192))
 }
-fn private(response: Response) -> Response {
+fn secure_oauth_response(response: Response) -> Response {
     let mut response = super::login::secure_response(response, true);
     response.headers_mut().insert(header::CONTENT_SECURITY_POLICY, "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'".parse().unwrap());
     response
@@ -58,7 +58,7 @@ fn private(response: Response) -> Response {
     response
 }
 pub(super) fn local(status: StatusCode) -> Response {
-    private((status, "Authorization request could not be completed").into_response())
+    secure_oauth_response((status, "Authorization request could not be completed").into_response())
 }
 fn store_status(error: StoreError) -> StatusCode {
     match error {
@@ -80,7 +80,7 @@ fn cookie(response: &mut Response, name: &'static str, value: &str, ttl: u64) {
         .append(header::SET_COOKIE, cookie.to_string().parse().unwrap());
 }
 /// Valid: one canonical transaction and browser cookie. Invalid: duplicate or partial pairs.
-pub(super) fn context(
+pub(super) fn parse_browser_binding(
     headers: &HeaderMap,
 ) -> Result<Option<(TransactionId, [u8; 32])>, StatusCode> {
     let mut tx = None;
@@ -118,18 +118,58 @@ pub(super) async fn form_transaction(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<Option<String>, StatusCode> {
-    let Some((id, hash)) = context(headers)? else {
+    let Some((id, hash)) = parse_browser_binding(headers)? else {
         return Ok(None);
     };
     let runtime = state.oauth.as_ref().ok_or(StatusCode::FORBIDDEN)?;
     runtime.bound(&id, &hash).await.map_err(store_status)?;
     Ok(Some(id.as_secret_str().into()))
 }
+/// GET-only recovery. Credential POSTs continue to require the exact posted context.
+/// A stale flow requires an explicit retry; it never silently becomes direct login.
+pub(super) async fn login_entry_recovery(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Option<Response> {
+    let binding = match parse_browser_binding(headers) {
+        Ok(None) => return None,
+        Ok(Some(binding)) => Some(binding),
+        Err(_) => None,
+    };
+    if let (Some(runtime), Some((id, hash))) = (&state.oauth, binding) {
+        match runtime.bound(&id, &hash).await {
+            Ok(_) => return None,
+            Err(StoreError::Missing) => {}
+            Err(error) => return Some(local(store_status(error))),
+        }
+        match runtime.advanced(&id, &hash).await {
+            Ok(()) => {
+                return Some(secure_oauth_response(
+                    Redirect::to("/oauth/continue").into_response(),
+                ));
+            }
+            Err(StoreError::Missing) => {}
+            Err(error) => return Some(local(store_status(error))),
+        }
+    }
+    let page = super::login::render_page(
+        &super::browser_login::private_ui(state),
+        html! {
+            h2 id="login-card-title" { "Authorization session ended" }
+            p { "Restart authorization from your application, or continue to sign in directly." }
+            a href="/login" { "Continue to sign in" }
+        },
+    );
+    let mut response = secure_oauth_response(Html(page).into_response());
+    cookie(&mut response, TX, "", 0);
+    cookie(&mut response, BROWSER, "", 0);
+    Some(response)
+}
 pub(super) fn posted_context(
     headers: &HeaderMap,
     submitted: Option<&str>,
 ) -> Result<Option<(TransactionId, [u8; 32])>, StatusCode> {
-    let context = context(headers)?;
+    let context = parse_browser_binding(headers)?;
     match (&context, submitted) {
         (None, None) => Ok(None),
         (Some((id, _)), Some(value)) if id.as_secret_str() == value => Ok(context),
@@ -145,12 +185,16 @@ async fn metadata(State(state): State<AppState>) -> Response {
     let runtime = state.oauth.as_ref().unwrap();
     let issuer = runtime.config.issuer.as_deref().unwrap();
     let base = issuer.trim_end_matches('/');
-    private(Json(json!({"issuer": issuer, "authorization_endpoint": format!("{base}/oauth/authorize"), "token_endpoint": format!("{base}/oauth/token"), "jwks_uri": format!("{base}/oauth/jwks"), "response_types_supported": ["code"], "grant_types_supported": ["authorization_code"], "token_endpoint_auth_methods_supported": ["none"], "code_challenge_methods_supported": ["S256"], "authorization_response_iss_parameter_supported": true})).into_response())
+    secure_oauth_response(Json(json!({"issuer": issuer, "authorization_endpoint": format!("{base}/oauth/authorize"), "token_endpoint": format!("{base}/oauth/token"), "jwks_uri": format!("{base}/oauth/jwks"), "response_types_supported": ["code"], "grant_types_supported": ["authorization_code"], "token_endpoint_auth_methods_supported": ["none"], "code_challenge_methods_supported": ["S256"], "authorization_response_iss_parameter_supported": true})).into_response())
 }
 async fn jwks(State(state): State<AppState>) -> Response {
-    private(Json(state.oauth.as_ref().unwrap().keys.jwks()).into_response())
+    secure_oauth_response(Json(state.oauth.as_ref().unwrap().keys.jwks()).into_response())
 }
-async fn authorize(State(state): State<AppState>, RawQuery(query): RawQuery) -> Response {
+async fn authorize(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+) -> Response {
     let runtime = state.oauth.as_ref().unwrap();
     let request = match validate_authorization_request(
         &runtime.config,
@@ -159,6 +203,31 @@ async fn authorize(State(state): State<AppState>, RawQuery(query): RawQuery) -> 
         Ok(request) => request,
         Err(_) => return local(StatusCode::BAD_REQUEST),
     };
+    // One active flow per browser cookie pair. Dropping cookies can bypass this
+    // browser convenience guard, but cannot borrow another client's reserved share.
+    if let Ok(Some((id, hash))) = parse_browser_binding(&headers) {
+        match runtime.active_request_matches(&id, &hash, &request).await {
+            Ok(false) => {
+                let page = super::login::render_page(
+                    &super::browser_login::private_ui(&state),
+                    html! {
+                        h2 id="login-card-title" { "Another authorization is in progress" }
+                        p { "This request differs from the current authorization. Finish or deny the current authorization before restarting from your application." }
+                        a href="/login" { "Continue current authorization" }
+                    },
+                );
+                return secure_oauth_response((StatusCode::CONFLICT, Html(page)).into_response());
+            }
+            Ok(true) | Err(StoreError::Missing) => {}
+            Err(error) => return local(store_status(error)),
+        }
+    }
+    if let Some(response) = login_entry_recovery(&state, &headers).await {
+        return response;
+    }
+    if matches!(parse_browser_binding(&headers), Ok(Some(_))) {
+        return secure_oauth_response(Redirect::to("/login").into_response());
+    }
     let nonce = match OAuthRuntime::nonce() {
         Ok(nonce) => nonce,
         Err(_) => return local(StatusCode::SERVICE_UNAVAILABLE),
@@ -168,7 +237,7 @@ async fn authorize(State(state): State<AppState>, RawQuery(query): RawQuery) -> 
         Ok(created) => created,
         Err(error) => return local(store_status(error)),
     };
-    let mut response = private(Redirect::to("/login").into_response());
+    let mut response = secure_oauth_response(Redirect::to("/login").into_response());
     let ttl = runtime.config.authorization_transaction_ttl_seconds;
     cookie(&mut response, TX, created.id.as_secret_str(), ttl);
     cookie(&mut response, BROWSER, nonce.as_secret_str(), ttl);
@@ -176,7 +245,7 @@ async fn authorize(State(state): State<AppState>, RawQuery(query): RawQuery) -> 
 }
 async fn continue_consent(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let runtime = state.oauth.as_ref().unwrap();
-    let (id, hash) = match context(&headers) {
+    let (id, hash) = match parse_browser_binding(&headers) {
         Ok(Some(context)) => context,
         _ => return local(StatusCode::FORBIDDEN),
     };
@@ -210,7 +279,7 @@ async fn continue_consent(State(state): State<AppState>, headers: HeaderMap) -> 
             }
         },
     );
-    let mut response = private(Html(page).into_response());
+    let mut response = secure_oauth_response(Html(page).into_response());
     // Browsers enforce form-action on POST redirects too: allow only the registered
     // callback origin in addition to self, while the actual form action stays local.
     let callback_origin = url::Url::parse(request.redirect_uri())
@@ -221,7 +290,7 @@ async fn continue_consent(State(state): State<AppState>, headers: HeaderMap) -> 
     response
 }
 /// Valid: `code=a%2Bb`; invalid: duplicate known fields or malformed `%ZZ` escapes.
-fn form(
+fn parse_urlencoded_form(
     headers: &HeaderMap,
     bytes: &[u8],
     allowed: &[&str],
@@ -269,7 +338,7 @@ async fn consent(
         return local(StatusCode::FORBIDDEN);
     }
     let fields = match body.ok().and_then(|body| {
-        form(
+        parse_urlencoded_form(
             &headers,
             &body,
             &["csrf", "oauth_transaction", "decision"],
@@ -327,13 +396,13 @@ async fn consent(
         if callback.contains('?') { '&' } else { '?' },
         query.finish()
     );
-    let mut response = private(Redirect::to(&destination).into_response());
+    let mut response = secure_oauth_response(Redirect::to(&destination).into_response());
     cookie(&mut response, TX, "", 0);
     cookie(&mut response, BROWSER, "", 0);
     response
 }
 fn token_error(status: StatusCode, error: &'static str) -> Response {
-    private((status, Json(json!({"error": error}))).into_response())
+    secure_oauth_response((status, Json(json!({"error": error}))).into_response())
 }
 async fn token(
     State(state): State<AppState>,
@@ -345,7 +414,7 @@ async fn token(
         return token_error(StatusCode::BAD_REQUEST, "invalid_client");
     }
     let fields = match body.ok().and_then(|body| {
-        form(
+        parse_urlencoded_form(
             &headers,
             &body,
             &[
@@ -395,7 +464,7 @@ async fn token(
         Err(_) => return token_error(StatusCode::BAD_REQUEST, "invalid_grant"),
     };
     match runtime.token(proof) {
-        Ok(token) => private(Json(token).into_response()),
+        Ok(token) => secure_oauth_response(Json(token).into_response()),
         Err(_) => token_error(StatusCode::SERVICE_UNAVAILABLE, "server_error"),
     }
 }
