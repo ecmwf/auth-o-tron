@@ -582,7 +582,10 @@ async fn token(
         }
         Err(_) => return token_error(StatusCode::BAD_REQUEST, "invalid_grant"),
     };
-    match runtime.exchange(proof, &state.metrics).await {
+    match runtime
+        .exchange(proof, &state.browser, &state.metrics)
+        .await
+    {
         Ok(token) => secure_oauth_response(Json(token).into_response()),
         Err(_) => token_error(StatusCode::SERVICE_UNAVAILABLE, "server_error"),
     }
@@ -602,12 +605,7 @@ async fn refresh_token(
         resource: fields.get("resource").map(String::as_str),
     };
     match runtime
-        .refresh(
-            request,
-            &state.auth,
-            &state.metrics,
-            state.browser.verification_timeout(),
-        )
+        .refresh(request, &state.auth, &state.browser, &state.metrics)
         .await
     {
         Ok(token) => secure_oauth_response(Json(token).into_response()),

@@ -22,11 +22,11 @@ use super::{
 };
 use crate::{
     auth::Auth,
+    browser::{BrowserLoginState, BrowserMethod},
     config::{OAuthPolicyError, RefreshTokenPolicy},
     metrics::{Metrics, RefreshTokenEvent},
     models::user::User,
 };
-use std::time::Duration;
 
 pub(crate) enum RefreshBackend {
     Memory(Box<MemoryRefreshStore>),
@@ -84,6 +84,20 @@ fn narrowed_scopes(
     Ok(scopes)
 }
 
+/// The client policy with its absolute lifetime capped by the login method's
+/// `refresh_max_lifetime_seconds`.
+fn method_policy(policy: &RefreshTokenPolicy, method: &BrowserMethod) -> RefreshTokenPolicy {
+    let absolute_ttl_seconds = method
+        .refresh_max_lifetime_seconds
+        .map_or(policy.absolute_ttl_seconds, |cap| {
+            cap.min(policy.absolute_ttl_seconds)
+        });
+    RefreshTokenPolicy {
+        absolute_ttl_seconds,
+        ..policy.clone()
+    }
+}
+
 impl OAuthRuntime {
     fn refresh_policy(&self, client_id: &str) -> Option<&RefreshTokenPolicy> {
         self.config
@@ -103,6 +117,7 @@ impl OAuthRuntime {
     pub(crate) async fn exchange(
         &self,
         proof: RedeemedAuthorization,
+        browser: &BrowserLoginState,
         metrics: &Metrics,
     ) -> Result<TokenResponse, RefreshGrantError> {
         let code = proof.grant();
@@ -118,18 +133,25 @@ impl OAuthRuntime {
         let response = self
             .token(proof)
             .map_err(|_| RefreshGrantError::Unavailable)?;
-        Ok(self.with_new_family(response, &grant, metrics).await)
+        Ok(self
+            .with_new_family(response, &grant, browser, metrics)
+            .await)
     }
     async fn with_new_family(
         &self,
         response: TokenResponse,
         grant: &RefreshGrant,
+        browser: &BrowserLoginState,
         metrics: &Metrics,
     ) -> TokenResponse {
-        let (Some(backend), Some(policy)) = (&self.refresh, self.refresh_policy(&grant.client_id))
-        else {
+        let (Some(backend), Some(policy), Some(method)) = (
+            &self.refresh,
+            self.refresh_policy(&grant.client_id),
+            browser.method(&grant.method),
+        ) else {
             return response;
         };
+        let policy = &method_policy(policy, method);
         let issued = async {
             let token = RefreshToken::generate()?;
             let now = self
@@ -161,8 +183,8 @@ impl OAuthRuntime {
         &self,
         request: RefreshRequest<'_>,
         auth: &Auth,
+        browser: &BrowserLoginState,
         metrics: &Metrics,
-        augmentation_timeout: Duration,
     ) -> Result<TokenResponse, RefreshGrantError> {
         use RefreshGrantError::*;
         let backend = self.refresh.as_ref().ok_or(InvalidGrant)?;
@@ -188,14 +210,28 @@ impl OAuthRuntime {
             metrics.record_refresh_token(RefreshTokenEvent::FamilyRevoked);
             Err::<TokenResponse, _>(reason)
         };
-        let Some(policy) = self.refresh_policy(request.client_id) else {
+        // A removed login method or client opt-out ends the family.
+        let (Some(policy), Some(method)) = (
+            self.refresh_policy(request.client_id),
+            browser.method(&family.grant.method),
+        ) else {
             return revoke(InvalidGrant).await;
         };
+        let policy = &method_policy(policy, method);
         let ceiling =
             match effective_absolute(family.created_at_ms, family.absolute_expires_at_ms, policy) {
                 Some(ceiling) if now < ceiling => ceiling,
                 _ => return revoke(InvalidGrant).await,
             };
+        // Providers that can tell (plain password users) end families of removed accounts.
+        if method.account_still_exists(&family.grant.username) == Some(false) {
+            tracing::info!(
+                event_name = "oauth.refresh_token.account_removed",
+                method = %family.grant.method,
+                "refresh token family revoked: account no longer configured"
+            );
+            return revoke(InvalidGrant).await;
+        }
         if request
             .resource
             .is_some_and(|resource| resource != family.grant.resource)
@@ -212,7 +248,7 @@ impl OAuthRuntime {
             None,
         );
         let user = tokio::time::timeout(
-            augmentation_timeout,
+            browser.verification_timeout(),
             auth.check_augmenters_strict(user, metrics),
         )
         .await
@@ -288,7 +324,7 @@ mod tests {
         file.write_all(pem.as_bytes()).unwrap();
         let config: ConfigV2 = serde_json::from_value(serde_json::json!({
             "store": {"enabled": false}, "services": [], "augmenters": [],
-            "providers": [{"type": "plain", "name": "basic", "realm": "local", "users": [], "browser": {"id": "password", "label": "Password"}}],
+            "providers": [{"type": "plain", "name": "basic", "realm": "local", "users": [{"username": "alice", "password": "fixture-only"}], "browser": {"id": "password", "label": "Password"}}],
             "server": {"port": 0}, "jwt": {"iss": "fixture", "exp": 300, "secret": "fixture-only"}, "logging": {"level": "warn", "format": "console"},
             "ui": {"enabled": true, "browser_session": {"public_origin": "https://login.example.org", "backend": {"type": "memory"}}},
             "oauth": {"enabled": true, "issuer": "https://login.example.org/", "signing": {"active_kid": "k", "keys": [{"kid": "k", "private_key_file": file.path()}]},
@@ -318,6 +354,15 @@ mod tests {
             config.auth.clone(),
         )
     }
+    fn browser(config: &ConfigV2) -> BrowserLoginState {
+        BrowserLoginState::new(config).unwrap()
+    }
+    /// `config` with the password method's provider block edited by `edit`.
+    fn with_provider(config: &ConfigV2, edit: impl FnOnce(&mut serde_json::Value)) -> ConfigV2 {
+        let mut value = serde_json::to_value(config).unwrap();
+        edit(&mut value["providers"][0]);
+        serde_json::from_value(value).unwrap()
+    }
     fn request(token: &RefreshToken) -> RefreshRequest<'_> {
         RefreshRequest {
             token: token.as_secret_str(),
@@ -331,7 +376,7 @@ mod tests {
     async fn refresh_reruns_augmentation_from_provider_roles_and_fails_closed() {
         let (_file, config, runtime) = runtime().await;
         let metrics = Metrics::new();
-        let timeout = Duration::from_secs(5);
+        let browser = browser(&config);
         let mut stale = grant();
         stale.provider_roles = vec![];
         // Provider roles alone lack `reader`; no augmenter grants it, so policy denies.
@@ -339,7 +384,7 @@ mod tests {
         let none = auth(&config, serde_json::json!([]));
         assert_eq!(
             runtime
-                .refresh(request(&token), &none, &metrics, timeout)
+                .refresh(request(&token), &none, &browser, &metrics)
                 .await
                 .err(),
             Some(RefreshGrantError::InvalidGrant)
@@ -350,7 +395,7 @@ mod tests {
             serde_json::json!([{"type": "plain", "name": "r", "realm": "local", "roles": {"reader": ["alice"]}}]),
         );
         let response = runtime
-            .refresh(request(&token), &granting, &metrics, timeout)
+            .refresh(request(&token), &granting, &browser, &metrics)
             .await
             .unwrap();
         let next = serde_json::to_value(response).unwrap()["refresh_token"]
@@ -365,14 +410,14 @@ mod tests {
         let next = RefreshToken::parse(&next).unwrap();
         assert_eq!(
             runtime
-                .refresh(request(&next), &failing, &metrics, timeout)
+                .refresh(request(&next), &failing, &browser, &metrics)
                 .await
                 .err(),
             Some(RefreshGrantError::Unavailable)
         );
         assert!(
             runtime
-                .refresh(request(&next), &granting, &metrics, timeout)
+                .refresh(request(&next), &granting, &browser, &metrics)
                 .await
                 .is_ok()
         );
@@ -380,8 +425,9 @@ mod tests {
 
     #[tokio::test]
     async fn unstorable_family_still_returns_the_access_token() {
-        let (_file, _config, runtime) = runtime().await;
+        let (_file, config, runtime) = runtime().await;
         let metrics = Metrics::new();
+        let browser = browser(&config);
         let issuer = TokenIssuer::new(&runtime.config, &runtime.keys).unwrap();
         let user = User::new(
             "local".into(),
@@ -402,12 +448,14 @@ mod tests {
                 )
                 .unwrap()
         };
-        let response = runtime.with_new_family(issued(), &grant(), &metrics).await;
+        let response = runtime
+            .with_new_family(issued(), &grant(), &browser, &metrics)
+            .await;
         assert!(serde_json::to_value(response).unwrap()["refresh_token"].is_string());
         let mut oversized = grant();
         oversized.provider_roles = vec!["r".repeat(64); 1024];
         let response = runtime
-            .with_new_family(issued(), &oversized, &metrics)
+            .with_new_family(issued(), &oversized, &browser, &metrics)
             .await;
         let body = serde_json::to_value(response).unwrap();
         assert!(body["access_token"].is_string());
@@ -419,6 +467,123 @@ mod tests {
         ] {
             assert!(output.contains(line), "{line}");
         }
+    }
+
+    async fn family_absolute(runtime: &OAuthRuntime, token: &RefreshToken, now: u64) -> u64 {
+        let backend = runtime.refresh.as_ref().unwrap();
+        let RefreshBackend::Memory(store) = backend else {
+            unreachable!()
+        };
+        let presented = store.lookup(&token.hash(), now).await.unwrap();
+        match presented {
+            Presented::Current(family) => family.absolute_expires_at_ms,
+            other => panic!("expected current family, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn login_method_caps_family_lifetime_at_issue_and_on_refresh() {
+        let (_file, config, runtime) = runtime().await;
+        let metrics = Metrics::new();
+        let granting = auth(
+            &config,
+            serde_json::json!([{"type": "plain", "name": "r", "realm": "local", "roles": {"reader": ["alice"]}}]),
+        );
+        let capped = with_provider(&config, |provider| {
+            provider["browser"]["refresh_max_lifetime_seconds"] = 600.into();
+        });
+        let capped = browser(&capped);
+        let issuer = TokenIssuer::new(&runtime.config, &runtime.keys).unwrap();
+        let user = User::new(
+            "local".into(),
+            "alice".into(),
+            Some(vec!["reader".into()]),
+            None,
+            None,
+            None,
+        );
+        let now = runtime.now().await.unwrap();
+        let response = issuer
+            .issue_refreshed(
+                "desktop",
+                "https://mcp.example.org/mcp",
+                &["read".into()],
+                &user,
+                now,
+            )
+            .unwrap();
+        let response = runtime
+            .with_new_family(response, &grant(), &capped, &metrics)
+            .await;
+        let token = serde_json::to_value(response).unwrap()["refresh_token"]
+            .as_str()
+            .map(|token| RefreshToken::parse(token).unwrap())
+            .unwrap();
+        let absolute = family_absolute(&runtime, &token, now).await;
+        assert!(
+            (now + 600_000..now + 601_000).contains(&absolute),
+            "{absolute}"
+        );
+        // Uncapped families follow the client's absolute lifetime (3600 s).
+        let uncapped = family(&runtime, &grant()).await;
+        assert!(family_absolute(&runtime, &uncapped, now).await >= now + 3_600_000);
+        // A cap configured after login shortens the family at its next refresh.
+        let response = runtime
+            .refresh(request(&uncapped), &granting, &capped, &metrics)
+            .await
+            .unwrap();
+        let next = serde_json::to_value(response).unwrap()["refresh_token"]
+            .as_str()
+            .map(|token| RefreshToken::parse(token).unwrap())
+            .unwrap();
+        assert!(family_absolute(&runtime, &next, now).await < now + 601_000);
+    }
+
+    #[tokio::test]
+    async fn removed_password_account_or_method_revokes_the_family() {
+        let (_file, config, runtime) = runtime().await;
+        let metrics = Metrics::new();
+        let granting = auth(
+            &config,
+            serde_json::json!([{"type": "plain", "name": "r", "realm": "local", "roles": {"reader": ["alice"]}}]),
+        );
+        let current = browser(&config);
+        let removed_user = browser(&with_provider(&config, |provider| {
+            provider["users"] =
+                serde_json::json!([{"username": "bob", "password": "fixture-only"}]);
+        }));
+        let renamed_method = browser(&with_provider(&config, |provider| {
+            provider["browser"]["id"] = "staff".into();
+        }));
+        for removed in [&removed_user, &renamed_method] {
+            let token = family(&runtime, &grant()).await;
+            assert_eq!(
+                runtime
+                    .refresh(request(&token), &granting, removed, &metrics)
+                    .await
+                    .err(),
+                Some(RefreshGrantError::InvalidGrant)
+            );
+            // The family is revoked, not merely rejected.
+            assert_eq!(
+                runtime
+                    .refresh(request(&token), &granting, &current, &metrics)
+                    .await
+                    .err(),
+                Some(RefreshGrantError::InvalidGrant)
+            );
+        }
+        let token = family(&runtime, &grant()).await;
+        assert!(
+            runtime
+                .refresh(request(&token), &granting, &current, &metrics)
+                .await
+                .is_ok()
+        );
+        let output = metrics.render().unwrap();
+        assert!(
+            output.contains("authotron_oauth_refresh_tokens_total{event=\"family_revoked\"} 2")
+        );
     }
 
     #[test]

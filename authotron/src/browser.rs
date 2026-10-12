@@ -183,7 +183,18 @@ enum MethodVerifier {
 pub struct BrowserMethod {
     pub label: String,
     pub flow: LoginFlow,
+    pub refresh_max_lifetime_seconds: Option<u64>,
     verifier: MethodVerifier,
+}
+
+impl BrowserMethod {
+    /// See [`Provider::account_still_exists`]; used where no credentials are presented.
+    pub fn account_still_exists(&self, username: &str) -> Option<bool> {
+        match &self.verifier {
+            MethodVerifier::Plain(provider) => provider.account_still_exists(username),
+            MethodVerifier::EcmwfApi(provider) => provider.account_still_exists(username),
+        }
+    }
 }
 
 pub(crate) fn valid_id(value: &str) -> bool {
@@ -291,6 +302,7 @@ impl BrowserLoginState {
                     method: method.id.into(),
                     kind: method.kind(),
                 },
+                refresh_max_lifetime_seconds: method.refresh_max_lifetime_seconds,
                 verifier: match method.provider {
                     BrowserMethodProvider::Plain(c) => {
                         MethodVerifier::Plain(PlainAuthProvider::new(c))
@@ -1428,6 +1440,7 @@ mod tests {
         state.methods.push(BrowserMethod {
             label: "ECMWF API key".into(),
             flow: LoginFlow::api_key("ecmwf-api-key"),
+            refresh_max_lifetime_seconds: None,
             verifier: MethodVerifier::EcmwfApi(EcmwfApiProvider::new(&EcmwfApiProviderConfig {
                 uri: server.url(),
                 realm: "ecmwf".into(),
