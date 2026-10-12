@@ -6,7 +6,7 @@
 // granted to it by virtue of its status as an intergovernmental organisation nor
 // does it submit to any jurisdiction.
 
-//! Configuration contract for future OAuth authorization-server support.
+//! Configuration contract for the opt-in OAuth authorization server.
 
 use super::oauth_policy::{ClientResource, OAuthResource};
 use super::oauth_signing::OAuthSigningConfig;
@@ -162,8 +162,9 @@ impl OAuthClient {
 
 /// Valid native callback: `http://127.0.0.1:49152/callback`. Invalid: `http://localhost/callback`.
 fn validate_callback(value: &str, application_type: ApplicationType) -> Result<(), &'static str> {
-    let error = "OAuth callback must be an absolute HTTPS URI, or a native HTTP IP-loopback URI with an explicit nonzero port; no userinfo, fragment, backslash, whitespace or controls";
+    let error = "OAuth callback must be an absolute HTTPS URI, or a native HTTP IP-loopback URI with an explicit nonzero port; no userinfo, fragment, backslash, whitespace, controls or malformed percent escapes";
     if value.len() > 2048
+        || !valid_percent_triplets(value)
         || value.contains('\\')
         || value.chars().any(|c| c.is_whitespace() || c.is_control())
     {
@@ -198,8 +199,23 @@ fn validate_callback(value: &str, application_type: ApplicationType) -> Result<(
     }) {
         return Err("OAuth callback query must not contain reserved response parameters");
     }
-    // Retain the original string for future exact matching, including port, path and query.
+    // Retain the original string for exact matching, including port, path and query.
     Ok(())
+}
+
+/// Checks spelling only: `%20` and `%25` are valid; `%`, `%2` and `%GG` are invalid.
+/// Registered identifiers remain literal strings, without decoding or normalization.
+pub(super) fn valid_percent_triplets(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%'
+            && !(bytes.next().is_some_and(|c| c.is_ascii_hexdigit())
+                && bytes.next().is_some_and(|c| c.is_ascii_hexdigit()))
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Valid: `https://login.example.org/`. Invalid: `https://login.example.org/oauth`.
@@ -335,6 +351,93 @@ mod tests {
 
     fn client(callback: &str) -> OAuthClient {
         serde_json::from_value(json!({"client_id": "mcp.desktop-1", "display_name": "MCP Desktop", "redirect_uris": [callback]})).unwrap()
+    }
+
+    #[test]
+    fn registered_uri_percent_triplets_are_checked_without_normalization() {
+        use crate::oauth::authorization::{AuthorizationError, validate_authorization_request};
+
+        let config_for = |callback: &str, resource: &str| -> OAuthConfig {
+            serde_json::from_value(json!({
+                "issuer": "https://login.example.org",
+                "clients": [{"client_id": "desktop", "display_name": "Desktop",
+                    "redirect_uris": [callback],
+                    "resources": [{"resource": resource, "scopes": ["read"]}]}],
+                "resources": [{"resource": resource, "allowed_realms": ["local"],
+                    "scopes": [{"name": "read", "required_roles": []}]}]
+            }))
+            .unwrap()
+        };
+        let query_for = |callback: &str, resource: &str| {
+            // Outer form escaping preserves the registered URI's literal percent escapes.
+            url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs([
+                    ("client_id", "desktop"),
+                    ("redirect_uri", callback),
+                    ("resource", resource),
+                    ("scope", "read"),
+                    ("response_type", "code"),
+                    ("code_challenge_method", "S256"),
+                    (
+                        "code_challenge",
+                        "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+                    ),
+                ])
+                .finish()
+        };
+        for escape in ["%", "%2", "%GG", "%20", "%25", "%2f", "%2F"] {
+            let valid = matches!(escape, "%20" | "%25" | "%2f" | "%2F");
+            for (callback, resource) in [
+                (
+                    format!("https://app.example.org/cb{escape}"),
+                    "https://mcp.example.org/mcp".to_owned(),
+                ),
+                (
+                    format!("https://app.example.org/cb?fixed={escape}"),
+                    "https://mcp.example.org/mcp".to_owned(),
+                ),
+                (
+                    format!("https://app.example.org/cb?fixed{escape}=value"),
+                    "https://mcp.example.org/mcp".to_owned(),
+                ),
+                (
+                    "https://app.example.org/cb".to_owned(),
+                    format!("https://mcp.example.org/mcp{escape}"),
+                ),
+            ] {
+                let config = config_for(&callback, &resource);
+                assert_eq!(config.validate().is_ok(), valid, "{callback} {resource}");
+                let query = query_for(&callback, &resource);
+                let result = validate_authorization_request(&config, query.as_bytes());
+                if valid {
+                    let request = result.unwrap();
+                    assert_eq!(request.redirect_uri(), callback);
+                    assert_eq!(request.resource(), resource);
+                    // Decoding or changing hex case does not authorize another spelling.
+                    let alternate_escape = match escape {
+                        "%20" => " ",
+                        "%25" => "%",
+                        "%2f" => "%2F",
+                        "%2F" => "%2f",
+                        _ => unreachable!(),
+                    };
+                    let alternate_callback = callback.replace(escape, alternate_escape);
+                    let alternate_resource = resource.replace(escape, alternate_escape);
+                    let alternate = query_for(&alternate_callback, &alternate_resource);
+                    let expected = if alternate_callback != callback {
+                        AuthorizationError::InvalidRequest
+                    } else {
+                        AuthorizationError::InvalidTarget
+                    };
+                    assert_eq!(
+                        validate_authorization_request(&config, alternate.as_bytes()).err(),
+                        Some(expected)
+                    );
+                } else {
+                    assert_eq!(result.err(), Some(AuthorizationError::ServerError));
+                }
+            }
+        }
     }
 
     #[test]

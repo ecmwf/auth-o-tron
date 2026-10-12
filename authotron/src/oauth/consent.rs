@@ -233,8 +233,8 @@ impl ConsentSession {
             ConsentToken(token),
         ))
     }
-    /// Consumes this session even on failure. Only exact "approve"/"deny" are decisions;
-    /// future HTTP parsing must reject duplicate fields and check Origin independently.
+    /// Consumes this session even on failure. Only exact "approve"/"deny" are decisions.
+    /// The HTTP route rejects duplicate fields and checks Origin independently.
     pub fn decide(
         self,
         submitted_token: &str,

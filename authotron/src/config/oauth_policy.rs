@@ -6,7 +6,7 @@
 // granted to it by virtue of its status as an intergovernmental organisation nor
 // does it submit to any jurisdiction.
 
-//! Explicit resource permissions for future OAuth grants; no authentication or I/O.
+//! Explicit resource permissions for OAuth grants; no authentication or I/O.
 
 use super::OAuthConfig;
 use authotron_types::User;
@@ -83,7 +83,7 @@ fn find<T>(entries: &[T], mut predicate: impl FnMut(&T) -> bool) -> Option<&T> {
 
 /// Valid `https://mcp.example.org/mcp`; invalid `https://MCP.example.org/mcp?x=1`.
 fn resource_uri(value: &str) -> bool {
-    if value.len() > 2048 {
+    if value.len() > 2048 || !super::oauth::valid_percent_triplets(value) {
         return false;
     }
     let Ok(uri) = value.parse::<http::Uri>() else {

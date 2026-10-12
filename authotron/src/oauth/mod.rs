@@ -1,4 +1,5 @@
-//! OAuth capabilities are explicitly invoked; application startup remains gated.
+//! OAuth authorization-server runtime, initialized at startup only when OAuth is enabled.
+//! HTTP routes enforce request parsing and browser-origin checks before domain transitions.
 
 pub mod authentication;
 pub mod authorization;

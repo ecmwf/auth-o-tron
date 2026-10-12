@@ -179,8 +179,10 @@ CORS is disabled; cross-origin public SPAs are not supported in this baseline.
 Requests require exact client/callback/resource and all requested scopes. There is no
 URI aliasing, partial consent, first-party skip or variable native loopback-port matching.
 Web callbacks require HTTPS; native callbacks additionally permit literal HTTP loopback
-with an explicit fixed port. Callback userinfo/fragments/control characters and reserved
-response query names are rejected. Resource URIs are canonical HTTPS and explicitly
+with an explicit fixed port. Callback userinfo/fragments/control characters, malformed
+percent escapes, and reserved response query names are rejected. Resource URIs also
+reject malformed percent escapes; valid escapes retain their literal spelling rather
+than being decoded for matching. Resources are canonical HTTPS and explicitly
 bound to each client. Eligible identity must have an allowed realm and every required
 role; attributes and preexisting user scopes never grant permissions.
 
@@ -225,7 +227,9 @@ old public keys through the longest access-token lifetime plus clock skew. Never
 or reuse legacy `jwt.secret` as an OAuth RSA key.
 
 The HTTP token controller always uses atomic redemption then
-`TokenIssuer::issue_from_redeemed`, never the raw-User trusted-caller helper. It binds
+`TokenIssuer::issue_from_redeemed`. The direct raw-User entry point
+`issue_access_token` is private and test-only; production issuance requires
+atomic code-redemption proof. The issuer binds
 the exact cached issuer and rechecks current grant eligibility before signing RS256
 with `typ: at+jwt` and active kid. Claims include iss/sub/aud/iat/exp/jti/client_id/scope
 and only the required-role union, with no username/email/credentials or unrelated roles.

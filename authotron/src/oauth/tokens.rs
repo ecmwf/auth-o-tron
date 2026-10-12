@@ -6,7 +6,7 @@
 // granted to it by virtue of its status as an intergovernmental organisation nor
 // does it submit to any jurisdiction.
 
-//! Typed, policy-checked access tokens; authentication and consent are caller responsibilities.
+//! Typed, policy-checked access tokens issued from atomic code-redemption proof.
 
 use super::{code_grant::CodeGrant, keys::KeyManager, store::RedeemedAuthorization};
 use crate::config::{OAuthConfig, OAuthPolicyError};
@@ -34,7 +34,7 @@ impl std::fmt::Display for TokenError {
 }
 impl std::error::Error for TokenError {}
 
-/// A bearer credential: deliberately not Debug. Serialization is for the future HTTP response.
+/// A bearer credential: deliberately not Debug. Serialized by the HTTP token endpoint.
 #[derive(Serialize)]
 pub struct TokenResponse {
     access_token: String,
@@ -118,9 +118,9 @@ impl<'a> TokenIssuer<'a> {
             now_ms / 1000,
         )
     }
-    /// Requires fresh verification, trusted successful augmentation and upstream consent/grant checks.
-    /// This helper does not authenticate, obtain consent or validate an authorization-code proof.
-    pub fn issue_access_token(
+    /// Exercises signing directly in unit tests without constructing redemption proof.
+    #[cfg(test)]
+    fn issue_access_token(
         &self,
         client_id: &str,
         resource: &str,

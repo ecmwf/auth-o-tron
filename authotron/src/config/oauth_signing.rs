@@ -6,7 +6,7 @@
 // granted to it by virtue of its status as an intergovernmental organisation nor
 // does it submit to any jurisdiction.
 
-//! File references for future RS256 signing; validation performs no file I/O.
+//! File references for RS256 signing; validation performs no file I/O.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
