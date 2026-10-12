@@ -205,9 +205,11 @@ the same `error=access_denied`. Wrong credentials still show the login form.
 
 This demo uses a preregistered, fixed public native client (`mcp-local`) and a
 synthetic read-only scope (`mcp:read`). Access tokens last five minutes locally
-(two minutes from the playground); there are
-no refresh tokens, SSO brokering, Dynamic Client Registration (DCR), or Client ID
-Metadata Documents (CIMD). The plaintext loopback backends and disposable local
+(two minutes from the playground). The local client registration enables rotating
+refresh tokens (one day idle, seven days absolute); the end-to-end test exercises
+rotation, reuse detection and `/oauth/revoke`, while the one-shot `client.py` does
+not keep them. There is no SSO brokering, Dynamic Client Registration (DCR), or
+Client ID Metadata Documents (CIMD). The plaintext loopback backends and disposable local
 TLS setup are demo-only and are not a production deployment configuration.
 
 ## Test and remove

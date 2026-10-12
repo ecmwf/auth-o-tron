@@ -179,7 +179,9 @@ class EndToEnd(unittest.TestCase):
             response = http.post(issuer + "oauth/token", data=exchange)
             self.assertEqual(response.status_code, 200)
             token = response.json()["access_token"]
+            refresh_token = response.json()["refresh_token"]
             self.assertEqual(http.post(issuer + "oauth/token", data=exchange).status_code, 400)
+            self.exercise_refresh(http, issuer, resource, tls, refresh_token)
             self.assertEqual(
                 http.post(
                     resource, json={}, headers={"Authorization": "Bearer invalid"}
@@ -235,6 +237,36 @@ class EndToEnd(unittest.TestCase):
             asyncio.run(asyncio.wait_for(self.call_tool(resource, tls, token), 30))
             self.exercise_client(http, runtime, issuer, credentials)
             self.exercise_client(http, runtime, issuer, credentials, failed_exchange=True)
+
+    def exercise_refresh(self, http, issuer, resource, tls, first):
+        def refresh(token):
+            return http.post(
+                issuer + "oauth/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "client_id": "mcp-local",
+                    "refresh_token": token,
+                },
+            )
+
+        response = refresh(first)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        second = response.json()["refresh_token"]
+        self.assertNotEqual(second, first)
+        asyncio.run(
+            asyncio.wait_for(self.call_tool(resource, tls, response.json()["access_token"]), 30)
+        )
+        response = refresh(second)
+        self.assertEqual(response.status_code, 200)
+        third = response.json()["refresh_token"]
+        # An older ancestor is reuse: it revokes the family, including the current token.
+        self.assertEqual(refresh(first).json(), {"error": "invalid_grant"})
+        self.assertEqual(refresh(third).json(), {"error": "invalid_grant"})
+        revoked = http.post(
+            issuer + "oauth/revoke", data={"token": third, "client_id": "mcp-local"}
+        )
+        self.assertEqual(revoked.status_code, 200)
 
     def exercise_client(self, http, runtime, issuer, credentials, failed_exchange=False):
         client = subprocess.Popen(

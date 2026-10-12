@@ -82,6 +82,10 @@ class SetupTests(unittest.TestCase):
             [{"resource": setup.RESOURCE, "scopes": [setup.SCOPE]}],
         )
         self.assertEqual(
+            oauth["clients"][0]["refresh_tokens"],
+            {"enabled": True, "idle_ttl_seconds": 86400, "absolute_ttl_seconds": 604800},
+        )
+        self.assertEqual(
             oauth["resources"],
             [
                 {

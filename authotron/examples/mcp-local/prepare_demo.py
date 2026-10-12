@@ -196,6 +196,11 @@ def prepare(runtime_dir: Path, issuer: str | None = None) -> Path:
                         "application_type": "native",
                         "redirect_uris": [CALLBACK],
                         "resources": [{"resource": RESOURCE, "scopes": [SCOPE]}],
+                        "refresh_tokens": {
+                            "enabled": True,
+                            "idle_ttl_seconds": 86400,
+                            "absolute_ttl_seconds": 604800,
+                        },
                     }
                 ],
                 "resources": [
