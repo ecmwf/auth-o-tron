@@ -18,6 +18,7 @@ pub mod id_token;
 pub mod jwks;
 #[cfg(test)]
 pub(crate) mod mock;
+pub mod token_client;
 
 /// Bounded failure classes, safe for logs and metric labels; provider-supplied text is
 /// never carried.
@@ -28,6 +29,10 @@ pub enum OidcError {
     /// An answer outside the protocol: unexpected status, malformed or oversized body,
     /// or a destination that is not an allowed provider URL.
     InvalidResponse,
+    /// The provider rejected the authorization response or code (`invalid_grant`).
+    Rejected,
+    /// The token endpoint refused this client or request: a configuration problem.
+    ClientRejected,
     /// The ID token's signature, key or claims failed validation.
     InvalidIdToken,
     /// Validated claims do not form an acceptable identity.
