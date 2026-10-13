@@ -96,6 +96,9 @@ impl ValkeyRefreshStore {
     fn lock_key(&self, family_id: &str) -> String {
         format!("{}lock:{family_id}", self.prefix)
     }
+    fn family_key(&self, family_id: &str) -> String {
+        format!("{}family:{family_id}", self.prefix)
+    }
     async fn run(
         &self,
         keys: &[String],
@@ -238,33 +241,28 @@ impl ValkeyRefreshStore {
             _ => Err(RefreshStoreError::Unavailable),
         }
     }
-    /// Replaces the sealed upstream grant while `presented` is the family's current token
-    /// and `generation` its current upstream generation. Repeating a stored replacement
-    /// reports `Stored` again.
+    /// Replaces the sealed upstream grant of a live family while `generation` is its
+    /// upstream generation, whichever token is current: a client's rotation must not
+    /// discard an upstream token the provider has already rotated. Repeating a stored
+    /// replacement reports `Stored` again.
     pub async fn set_upstream(
         &self,
         family_id: &str,
-        presented: &[u8; 32],
         generation: u64,
         sealed: &str,
         now_ms: u64,
     ) -> Result<UpstreamStored, RefreshStoreError> {
         let reply = self
             .run(
-                &[self.token_key(presented)],
+                &[self.family_key(family_id)],
                 "set_upstream",
                 now_ms,
-                &[
-                    URL_SAFE_NO_PAD.encode(presented).as_bytes(),
-                    family_id.as_bytes(),
-                    generation.to_string().as_bytes(),
-                    sealed.as_bytes(),
-                ],
+                &[generation.to_string().as_bytes(), sealed.as_bytes()],
             )
             .await?;
         match reply.as_slice() {
             [status] if status == b"stored" => Ok(UpstreamStored::Stored),
-            [status] if status == b"stale" || status == b"missing" => Ok(UpstreamStored::Stale),
+            [status] if status == b"stale" => Ok(UpstreamStored::Stale),
             _ => Err(RefreshStoreError::Unavailable),
         }
     }
@@ -461,7 +459,7 @@ mod tests {
         assert_eq!(current.created_at_ms, now);
         assert_eq!(current.absolute_expires_at_ms, ceiling);
         let id = current.family_id;
-        let family_key = format!("{}family:{id}", a.prefix);
+        let family_key = a.family_key(&id);
         let ttl: i64 = a
             .connection
             .query(redis::cmd("PEXPIRETIME").arg(&family_key))
@@ -625,17 +623,17 @@ mod tests {
             })
         );
         let id = current.family_id;
-        for (store, presented, generation, sealed, expected) in [
-            (&a, [9; 32], 0, "v1.k.second", UpstreamStored::Stale),
-            (&b, [1; 32], 1, "v1.k.second", UpstreamStored::Stale),
-            (&a, [1; 32], 0, "v1.k.second", UpstreamStored::Stored),
+        for (store, family, generation, sealed, expected) in [
+            (&a, "other", 0, "v1.k.second", UpstreamStored::Stale),
+            (&b, id.as_str(), 1, "v1.k.second", UpstreamStored::Stale),
+            (&a, id.as_str(), 0, "v1.k.second", UpstreamStored::Stored),
             // A run resent after a lost reply recognises its own replacement.
-            (&b, [1; 32], 0, "v1.k.second", UpstreamStored::Stored),
-            (&b, [1; 32], 0, "v1.k.other", UpstreamStored::Stale),
+            (&b, id.as_str(), 0, "v1.k.second", UpstreamStored::Stored),
+            (&b, id.as_str(), 0, "v1.k.other", UpstreamStored::Stale),
         ] {
             assert_eq!(
                 store
-                    .set_upstream(&id, &presented, generation, sealed, now)
+                    .set_upstream(family, generation, sealed, now)
                     .await
                     .unwrap(),
                 expected
@@ -654,17 +652,16 @@ mod tests {
                 .unwrap(),
             Rotated::Rotated
         );
+        // The family's own rotation does not block a replacement for its generation.
         assert_eq!(
-            b.set_upstream(&id, &[1; 32], 1, "v1.k.third", now)
+            b.set_upstream(&id, 1, "v1.k.third", now).await.unwrap(),
+            UpstreamStored::Stored
+        );
+        assert_eq!(
+            b.set_upstream(&id, 2, "v1.k.fourth", now + 600_000)
                 .await
                 .unwrap(),
             UpstreamStored::Stale
-        );
-        assert_eq!(
-            b.set_upstream(&id, &[2; 32], 1, "v1.k.third", now)
-                .await
-                .unwrap(),
-            UpstreamStored::Stored
         );
         a.issue(&grant(), [5; 32], now, &policy(), None)
             .await
@@ -672,7 +669,7 @@ mod tests {
         let plain = family(a.lookup(&[5; 32], now).await.unwrap());
         assert!(plain.upstream.is_none() && !plain.grant.upstream_coupled);
         assert_eq!(
-            a.set_upstream(&plain.family_id, &[5; 32], 0, "v1.k.x", now)
+            a.set_upstream(&plain.family_id, 0, "v1.k.x", now)
                 .await
                 .unwrap(),
             UpstreamStored::Stale

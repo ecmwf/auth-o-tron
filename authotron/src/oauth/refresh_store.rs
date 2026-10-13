@@ -216,13 +216,13 @@ impl MemoryRefreshStore {
         inner.tokens.insert(next, (family_id.into(), idle_ms));
         Ok(Rotated::Rotated)
     }
-    /// Replaces the sealed upstream grant while `presented` is the family's current token
-    /// and `generation` its current upstream generation. Repeating a stored replacement
-    /// reports `Stored` again.
+    /// Replaces the sealed upstream grant of a live family while `generation` is its
+    /// upstream generation, whichever token is current: a client's rotation must not
+    /// discard an upstream token the provider has already rotated. Repeating a stored
+    /// replacement reports `Stored` again.
     pub async fn set_upstream(
         &self,
         family_id: &str,
-        presented: &[u8; 32],
         generation: u64,
         sealed: &str,
         now_ms: u64,
@@ -231,7 +231,7 @@ impl MemoryRefreshStore {
         let Some(family) = inner.families.get_mut(family_id) else {
             return Ok(UpstreamStored::Stale);
         };
-        if !family.live(now_ms) || family.current != *presented {
+        if !family.live(now_ms) {
             return Ok(UpstreamStored::Stale);
         }
         let Some(upstream) = &mut family.upstream else {
@@ -556,21 +556,30 @@ mod tests {
         let state = family.upstream.unwrap();
         assert_eq!((state.sealed.as_str(), state.generation), ("v1.k.first", 0));
         let id = family.family_id;
-        let set = |presented, generation, sealed: &'static str| {
-            let (store, id) = (&store, id.clone());
+        let set = |id: &str, generation, sealed: &'static str, now| {
+            let (store, id) = (&store, id.to_owned());
             async move {
                 store
-                    .set_upstream(&id, &presented, generation, sealed, NOW)
+                    .set_upstream(&id, generation, sealed, now)
                     .await
                     .unwrap()
             }
         };
-        assert_eq!(set([9; 32], 0, "v1.k.second").await, UpstreamStored::Stale);
-        assert_eq!(set([1; 32], 1, "v1.k.second").await, UpstreamStored::Stale);
-        assert_eq!(set([1; 32], 0, "v1.k.second").await, UpstreamStored::Stored);
+        assert_eq!(
+            set("other", 0, "v1.k.second", NOW).await,
+            UpstreamStored::Stale
+        );
+        assert_eq!(set(&id, 1, "v1.k.second", NOW).await, UpstreamStored::Stale);
+        assert_eq!(
+            set(&id, 0, "v1.k.second", NOW).await,
+            UpstreamStored::Stored
+        );
         // A repeated request after a lost answer is recognised as stored.
-        assert_eq!(set([1; 32], 0, "v1.k.second").await, UpstreamStored::Stored);
-        assert_eq!(set([1; 32], 0, "v1.k.other").await, UpstreamStored::Stale);
+        assert_eq!(
+            set(&id, 0, "v1.k.second", NOW).await,
+            UpstreamStored::Stored
+        );
+        assert_eq!(set(&id, 0, "v1.k.other", NOW).await, UpstreamStored::Stale);
         let state = current(store.lookup(&[1; 32], NOW).await.unwrap())
             .upstream
             .unwrap();
@@ -578,12 +587,16 @@ mod tests {
             (state.sealed.as_str(), state.generation),
             ("v1.k.second", 1)
         );
+        // The family's own rotation does not block a replacement for its generation.
         store
             .rotate(&id, &[1; 32], [2; 32], NOW, 600, NOW + 3_600_000)
             .await
             .unwrap();
-        assert_eq!(set([1; 32], 1, "v1.k.third").await, UpstreamStored::Stale);
-        assert_eq!(set([2; 32], 1, "v1.k.third").await, UpstreamStored::Stored);
+        assert_eq!(set(&id, 1, "v1.k.third", NOW).await, UpstreamStored::Stored);
+        assert_eq!(
+            set(&id, 2, "v1.k.fourth", NOW + 600_000).await,
+            UpstreamStored::Stale
+        );
         store
             .issue(&grant(), [5; 32], NOW, &policy(), None)
             .await
@@ -592,7 +605,7 @@ mod tests {
         assert!(plain.upstream.is_none());
         assert_eq!(
             store
-                .set_upstream(&plain.family_id, &[5; 32], 0, "v1.k.x", NOW)
+                .set_upstream(&plain.family_id, 0, "v1.k.x", NOW)
                 .await
                 .unwrap(),
             UpstreamStored::Stale

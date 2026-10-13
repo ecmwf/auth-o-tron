@@ -1,6 +1,6 @@
 -- Atomic refresh-token family operations on one primary. KEYS[1] is the presented or
--- issued token key; family, per-user index and other token keys derive from the fixed
--- prefix. A token key expires at the family idle deadline when it was issued or
+-- issued token key, except where an operation names another key; family, per-user
+-- index and other token keys derive from the fixed prefix. A token key expires at the family idle deadline when it was issued or
 -- rotated, and a family keeps at most ARGV[10] rotated hashes ("history", oldest first).
 -- A coupled family also holds a sealed upstream grant ("upstream") and its generation
 -- ("upstream_gen").
@@ -74,6 +74,18 @@ if op == 'issue' then
     return reply
 end
 
+-- Upstream replacement: KEYS[1] is the family key, ARGV[5] the expected generation.
+if op == 'set_upstream' then
+    if not live(token) then return {'stale'} end
+    local expected, sealed = tonumber(ARGV[5]), ARGV[6]
+    local stored, generation = redis.call('HGET', token, 'upstream'), tonumber(redis.call('HGET', token, 'upstream_gen'))
+    if not stored or not generation or not expected or expected < 0 or expected % 1 ~= 0 then return {'stale'} end
+    if generation == expected + 1 and stored == sealed then return {'stored'} end
+    if generation ~= expected then return {'stale'} end
+    redis.call('HSET', token, 'upstream', sealed, 'upstream_gen', decimal(generation + 1))
+    return {'stored'}
+end
+
 -- Upstream refresh lock: KEYS[1] is the family's lock key, ARGV[5] the holder.
 if op == 'lock' then
     local holder, expires = ARGV[5], tonumber(ARGV[6])
@@ -133,14 +145,5 @@ if op == 'rotate' then
     redis.call('PEXPIREAT', token, decimal(idle))
     redis.call('SET', next_token, id, 'PXAT', decimal(idle))
     return {'rotated'}
-end
-if op == 'set_upstream' then
-    local expected, sealed = tonumber(ARGV[7]), ARGV[8]
-    local stored, generation = redis.call('HGET', key, 'upstream'), tonumber(redis.call('HGET', key, 'upstream_gen'))
-    if id ~= ARGV[6] or current ~= hash or not stored or not generation or not expected or expected < 0 or expected % 1 ~= 0 then return {'stale'} end
-    if generation == expected + 1 and stored == sealed then return {'stored'} end
-    if generation ~= expected then return {'stale'} end
-    redis.call('HSET', key, 'upstream', sealed, 'upstream_gen', decimal(generation + 1))
-    return {'stored'}
 end
 return {'unavailable'}
