@@ -772,42 +772,6 @@ class RendererTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             renderer.signing_secret(path)
 
-    def test_sso_action_and_direct_key_login_coexist(self):
-        actions = [
-            {
-                "label": "Continue with demo SSO",
-                "start_url": "https://browser.example.org/oauth2/start?rd=%2Faccount",
-            }
-        ]
-        with patch.object(renderer.preview.subprocess, "run") as command:
-            command.return_value.stdout = yaml.safe_dump_all(self.helm_documents())
-            resources, _ = renderer.render_api_key(
-                self.project, self.project, HOST, IMAGE, TOKEN, actions
-            )
-        config_map = next(
-            doc for doc in resources if doc["kind"] == "ConfigMap" and "data" in doc
-        )
-        settings = yaml.safe_load(config_map["data"]["config.yaml"])
-        self.assertEqual(settings["ui"]["sso"], actions)
-        self.assertEqual(settings["providers"], [renderer.PROVIDER])
-
-    def test_all_three_choices_coexist_without_public_password(self):
-        actions = [
-            {"label": "Demo SSO", "start_url": "https://browser.example.org/start"}
-        ]
-        with patch.object(renderer.preview.subprocess, "run") as command:
-            command.return_value.stdout = yaml.safe_dump_all(self.helm_documents())
-            resources, _ = renderer.render_api_key(
-                self.project, self.project, HOST, IMAGE, TOKEN, actions, BASIC
-            )
-        config_map = next(
-            doc for doc in resources if doc["kind"] == "ConfigMap" and "data" in doc
-        )
-        settings = yaml.safe_load(config_map["data"]["config.yaml"])
-        self.assertEqual(settings["ui"]["sso"], actions)
-        self.assertEqual(settings["providers"][0]["users"], [])
-        self.assertEqual(settings["providers"][1], renderer.PROVIDER)
-
     def test_basic_cli_does_not_print_credentials(self):
         baseline, _ = self.baseline()
         secret_file = self.root / "signing.json"
@@ -886,8 +850,6 @@ class RendererTests(unittest.TestCase):
             "2Gi",
             "--valkey-storage-class",
             "fast-rwo",
-            "--browser-start-url",
-            "https://browser.example.org/oauth2/start?rd=%2Faccount",
         ]
         with (
             patch("sys.argv", arguments),
@@ -902,9 +864,6 @@ class RendererTests(unittest.TestCase):
             renderer.main()
         self.assertEqual(render.call_args.kwargs, options)
         self.assertEqual(render.call_args.args[-1], BASIC)
-        self.assertEqual(
-            render.call_args.args[-2][0]["label"], "Continue with demo SSO"
-        )
         self.assertIn("Validated 10 resources", str(printed.call_args_list))
         for password in (TOKEN, VALKEY_PASSWORD):
             self.assertNotIn(password, str(printed.call_args_list))

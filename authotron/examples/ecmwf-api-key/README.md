@@ -2,7 +2,7 @@
 
 This disposable renderer enables direct login at `/login`. API-key and optional
 Basic forms open in an accessible dialog without leaving the branded chooser;
-SSO remains a separate redirect. Standalone credential pages remain available as
+the optional demo SSO method redirects to Keycloak. Standalone credential pages remain available as
 a JavaScript-free fallback. Each provider with a `browser` block is a method at
 `/login/method/<id>`, keyed by its `browser.id`: the API key form is
 `/login/method/ecmwf-api-key` and, when Basic is enabled, the "Username and
@@ -28,11 +28,10 @@ browser:
 ```
 
 The provider URI is configuration authority, never a form input. Public origin is
-exactly `https://<validated-host>`. By default no browser sign-in link is added;
-`--browser-start-url` can preserve a separate approved SSO option alongside the
-direct API-key button. It never changes API-key validation or adds a Keycloak
-dependency to that path. The host-based browser cookie and backend origin
-checks use that origin. No ECMWF API key is placed in cluster configuration.
+exactly `https://<validated-host>`. By default no OIDC method is added; the
+`--sso-issuer` options below add the Keycloak demo SSO as a third method. It
+never changes API-key validation or adds a Keycloak dependency to that path. The
+host-based browser cookie and backend origin checks use that origin. No ECMWF API key is placed in cluster configuration.
 Both direct methods use the single `ui.browser_session` block for this origin and
 the session lifetime; each provider's `browser.id` fixes its URL and
 `browser.label` only names the chooser entry.
@@ -58,17 +57,26 @@ python3 authotron/examples/ecmwf-api-key/render_api_key.py \
   --output-dir /tmp/opencode/ecmwf-direct-playground
 ```
 
-To show both choices in the playground, add:
+To add the Keycloak demo SSO (`../browser-sso`) as an OIDC sign-in method, render
+the SSO stack first and then add, together with the OAuth profile below:
 
 ```bash
---browser-start-url 'https://aviso-browser-playground.lumi.apps.dte.destination-earth.eu/oauth2/start?rd=%2Faccount'
+--sso-issuer https://authotron-sso-playground.lumi.apps.dte.destination-earth.eu/realms/aviso-demo \
+--sso-secret-file /tmp/opencode/authotron-sso-secrets.json
 ```
 
-The configured URL must be an approved HTTPS browser-client start endpoint;
-request parameters do not choose it. Existing direct sessions do not hide the
-chooser when `ui.sso` entries are present.
+The two options go together and need `--oauth-secret-file`. The method is
+`demo-sso` ("Demo SSO (Keycloak)", realm `demo-sso`, client
+`authotron-playground`, scopes `profile` and `email`, `offline_access: true`);
+`render_sso.py` registers that client with the matching callback. The renderer
+reads only `authotron-client-secret` from the SSO bundle, which must already
+exist with mode `0600`, and never writes it. The secret goes into the existing
+Opaque Secret as `oidc-client-secret` and is mounted read-only (mode 0440) at
+`/run/secrets/oidc/client-secret`; the pod template carries
+`checksum/oidc-credentials` (a SHA-256 digest only). `demo-sso` joins every OAuth
+resource's `allowed_realms`.
 
-To add Basic login alongside the API-key button and optional SSO link, also add:
+To add Basic login alongside the API-key button and optional demo SSO, also add:
 
 ```bash
 --basic-secret-file /tmp/opencode/authotron-basic-demo.json
@@ -114,8 +122,9 @@ The Valkey file contains **only `valkey-password`**, a generated canonical
 43-character URL-safe encoding of 32 random bytes, reused on subsequent renders.
 It follows the signing/Basic file rules below. All credential file paths must be
 distinct, cannot overlap directory ancestry, and cannot collide with the output
-bundle or archived sources. The renderer never reads SSO password artifacts and
-does not reuse the SSO service or token store.
+bundle or archived sources. From the SSO stack the renderer reads only the
+Keycloak client secret for `demo-sso`, and it does not reuse the SSO service or
+token store.
 
 The shared `ui.browser_session` configuration is:
 

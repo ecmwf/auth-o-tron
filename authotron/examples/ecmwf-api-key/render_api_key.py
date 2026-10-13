@@ -163,6 +163,17 @@ MCP_CLIENTS = (
         ],
     },
 )
+# Keycloak demo SSO (../browser-sso): an OIDC sign-in method whose Keycloak client
+# render_sso.py registers with the same method id and client id.
+OIDC_METHOD_ID = "demo-sso"
+OIDC_LABEL = "Demo SSO (Keycloak)"
+OIDC_REALM = "demo-sso"
+OIDC_CLIENT_ID = "authotron-playground"
+# Key of the client secret in render_sso.py's private secret bundle.
+OIDC_BUNDLE_KEY = "authotron-client-secret"
+OIDC_DIR = "/run/secrets/oidc"
+OIDC_VOLUME = "oidc"
+OIDC_SECRET_KEYS = {"oidc-client-secret": "client-secret"}
 # Each client receives floor(cap / client_count) non-borrowable transaction slots.
 OAUTH_MAX_AUTHORIZATION_TRANSACTIONS = 1024
 OAUTH_LOOPBACK_HOSTS = ("127.0.0.1", "[::1]", "localhost")
@@ -672,6 +683,29 @@ def valkey_secret(path):
     )
 
 
+def sso_client_secret(path):
+    """Only `authotron-client-secret` from render_sso.py's existing private bundle; this
+    renderer never creates or changes that file."""
+    path = outside_git(path)
+    parent = directory_fd(path.parent)
+    try:
+        fd = private_fd(parent, path.name, os.O_RDONLY)
+    finally:
+        os.close(parent)
+    with os.fdopen(fd) as stream:
+        text = stream.read(4097)
+    try:
+        if len(text) > 4096:
+            raise ValueError
+        bundle = json.loads(text, object_pairs_hook=unique_json_object)
+        return checked_token(bundle[OIDC_BUNDLE_KEY])
+    except (ValueError, TypeError, KeyError):
+        raise ValueError(
+            "SSO secret file must be render_sso.py's bundle with "
+            f"{OIDC_BUNDLE_KEY}; render the SSO stack first"
+        ) from None
+
+
 def checked_oauth_key(payload):
     """Accept only a canonical unencrypted RSA-2048 PKCS8 PEM; return the PEM text."""
     if (
@@ -757,6 +791,47 @@ def checked_aviso_resource(value, oauth_enabled):
     ):
         raise ValueError("invalid Aviso OAuth resource URI")
     return value
+
+
+def checked_oidc_issuer(value):
+    """HTTPS issuer of the demo SSO realm, compared exactly with its discovery document.
+    Valid: https://sso.example.org/realms/aviso-demo. Invalid: http://sso.example.org/r,
+    https://sso.example.org/realms/a/, https://sso.example.org/r?x=1, https://sso/r."""
+    match = isinstance(value, str) and re.fullmatch(
+        r"https://([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+)"
+        r"((?:/[A-Za-z0-9._~-]+)+)",
+        value,
+    )
+    if not match or len(value) > 2048 or "/../" in value + "/" or "/./" in value + "/":
+        raise ValueError("invalid demo SSO issuer")
+    return value
+
+
+def checked_oidc(oidc, oauth_enabled):
+    """Demo SSO sign-in: the issuer and the Keycloak client secret. Like the playground's
+    other methods it serves the OAuth profile, which it needs."""
+    if oidc is None:
+        return None
+    if not oauth_enabled:
+        raise ValueError("the demo SSO method requires the OAuth profile")
+    if not isinstance(oidc, dict) or set(oidc) != {"issuer", "client_secret"}:
+        raise ValueError("unexpected demo SSO settings")
+    checked_oidc_issuer(oidc["issuer"])
+    checked_token(oidc["client_secret"])
+    return oidc
+
+
+def oidc_method(issuer):
+    return {
+        "id": OIDC_METHOD_ID,
+        "label": OIDC_LABEL,
+        "realm": OIDC_REALM,
+        "issuer": checked_oidc_issuer(issuer),
+        "client_id": OIDC_CLIENT_ID,
+        "client_secret_file": f"{OIDC_DIR}/{OIDC_SECRET_KEYS['oidc-client-secret']}",
+        "scopes": ["profile", "email"],
+        "offline_access": True,
+    }
 
 
 def checked_trusted_proxies(values, oauth_enabled):
@@ -886,6 +961,7 @@ def transform(
     oauth_trusted_proxies=(),
     valkey_storage_size="1Gi",
     valkey_storage_class=None,
+    oidc=None,
 ):
     checked_session_options(
         valkey_password, replicas, session_ttl_seconds, transaction_ttl_seconds
@@ -895,6 +971,7 @@ def transform(
     ecmwf_uids = checked_ecmwf_uids(oauth_allow_ecmwf_uids, oauth_key is not None)
     aviso = checked_aviso_resource(oauth_aviso_resource, oauth_key is not None)
     proxies = checked_trusted_proxies(oauth_trusted_proxies, oauth_key is not None)
+    oidc = checked_oidc(oidc, oauth_key is not None)
     checked_token(token)
     resources = copy.deepcopy(baseline)
     config_map = next(d for d in resources if d["kind"] == "ConfigMap" and "data" in d)
@@ -957,12 +1034,15 @@ def transform(
                 "augment": {"roles": [OAUTH_ROLE]},
             }
         )
+    if oidc is not None:
+        config["ui"]["oidc"] = [oidc_method(oidc["issuer"])]
     if oauth_key is not None:
         api_key = next(p for p in config["providers"] if p["type"] == PROVIDER["type"])
         api_key["browser"]["refresh_max_lifetime_seconds"] = (
             OAUTH_API_KEY_REFRESH_MAX_LIFETIME_SECONDS
         )
         realms = [p["realm"] for p in config["providers"] if p.get("browser")]
+        realms += [method["realm"] for method in config["ui"].get("oidc", [])]
         config["oauth"] = oauth_config(
             host, oauth_kid(oauth_key), realms, aviso, proxies
         )
@@ -1055,6 +1135,33 @@ def transform(
         template["metadata"]["annotations"]["checksum/oauth-signing-key"] = (
             hashlib.sha256(oauth_key.encode("ascii")).hexdigest()
         )
+    if oidc is not None:
+        values = {"oidc-client-secret": oidc["client_secret"]}
+        resources[-1]["data"].update(
+            {
+                key: base64.b64encode(value.encode("ascii")).decode("ascii")
+                for key, value in values.items()
+            }
+        )
+        template["spec"]["volumes"].append(
+            {
+                "name": OIDC_VOLUME,
+                "secret": {
+                    "secretName": SECRET_NAME,
+                    "defaultMode": 0o440,
+                    "items": [
+                        {"key": key, "path": path}
+                        for key, path in OIDC_SECRET_KEYS.items()
+                    ],
+                },
+            }
+        )
+        template["spec"]["containers"][0]["volumeMounts"].append(
+            {"name": OIDC_VOLUME, "mountPath": OIDC_DIR, "readOnly": True}
+        )
+        template["metadata"]["annotations"]["checksum/oidc-credentials"] = (
+            hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()
+        )
     if valkey_password is not None:
         secret = resources[-1]
         secret["data"].update(
@@ -1104,6 +1211,7 @@ def validate_resources(
     oauth_trusted_proxies=(),
     valkey_storage_size="1Gi",
     valkey_storage_class=None,
+    oidc=None,
 ):
     """Compare the full output to the narrowly transformed, validated prototype."""
     preview.validate_inputs(host, image)
@@ -1156,6 +1264,7 @@ def validate_resources(
             oauth_trusted_proxies=oauth_trusted_proxies,
             valkey_storage_size=valkey_storage_size,
             valkey_storage_class=valkey_storage_class,
+            oidc=oidc,
         )
     )
     if resource_map(resources) != expected:
@@ -1170,7 +1279,6 @@ def render_api_key(
     host,
     image,
     token,
-    sso=None,
     basic=None,
     *,
     valkey_password=None,
@@ -1183,6 +1291,7 @@ def render_api_key(
     oauth_trusted_proxies=(),
     valkey_storage_size="1Gi",
     valkey_storage_class=None,
+    oidc=None,
 ):
     preview.validate_inputs(host, image)
     checked_token(token)
@@ -1194,11 +1303,12 @@ def render_api_key(
     ecmwf_uids = checked_ecmwf_uids(oauth_allow_ecmwf_uids, oauth_key is not None)
     aviso = checked_aviso_resource(oauth_aviso_resource, oauth_key is not None)
     proxies = checked_trusted_proxies(oauth_trusted_proxies, oauth_key is not None)
+    checked_oidc(oidc, oauth_key is not None)
     if oauth_key is not None:
         checked_oauth_key({"private-key-pem": oauth_key})
     if basic is not None:
         checked_basic_credentials(basic)
-    baseline, archive = preview.render_preview(project, chart, host, image, sso)
+    baseline, archive = preview.render_preview(project, chart, host, image)
     options = dict(
         valkey_password=valkey_password,
         replicas=replicas,
@@ -1215,6 +1325,8 @@ def render_api_key(
         options["oauth_aviso_resource"] = aviso
     if proxies:
         options["oauth_trusted_proxies"] = proxies
+    if oidc is not None:
+        options["oidc"] = oidc
     resources = transform(baseline, host, token, basic, **options)
     validate_resources(resources, baseline, host, image, token, basic, **options)
     return resources, archive
@@ -1227,7 +1339,16 @@ def main():
     parser.add_argument("--build-image", required=True)
     parser.add_argument("--secret-file", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--browser-start-url")
+    parser.add_argument(
+        "--sso-issuer",
+        metavar="URL",
+        help="offer the Keycloak demo SSO realm at this issuer as an OIDC method",
+    )
+    parser.add_argument(
+        "--sso-secret-file",
+        type=Path,
+        help="render_sso.py's private bundle holding the Keycloak client secret",
+    )
     parser.add_argument("--basic-secret-file", type=Path)
     parser.add_argument("--valkey-secret-file", type=Path)
     parser.add_argument("--oauth-secret-file", type=Path)
@@ -1281,6 +1402,12 @@ def main():
     checked_ecmwf_uids(args.oauth_allow_ecmwf_uids, bool(args.oauth_secret_file))
     checked_aviso_resource(args.oauth_aviso_resource, bool(args.oauth_secret_file))
     checked_trusted_proxies(args.oauth_trusted_proxies, bool(args.oauth_secret_file))
+    if bool(args.sso_issuer) != bool(args.sso_secret_file):
+        raise ValueError("--sso-issuer and --sso-secret-file go together")
+    if args.sso_issuer:
+        checked_oidc_issuer(args.sso_issuer)
+        if not args.oauth_secret_file:
+            raise ValueError("the demo SSO method requires the OAuth profile")
     project = Path(__file__).resolve().parents[3]
     output_dir = checked_output_directory(args.output_dir, project)
     credential_paths = [
@@ -1290,6 +1417,7 @@ def main():
             args.basic_secret_file,
             args.valkey_secret_file,
             args.oauth_secret_file,
+            args.sso_secret_file,
         )
         if path
     ]
@@ -1307,29 +1435,6 @@ def main():
         for path in credential_paths
     ):
         raise ValueError("output must not overwrite a credential file")
-    actions = None
-    if args.browser_start_url:
-        value = args.browser_start_url
-        url = urlsplit(value)
-        if (
-            url.scheme != "https"
-            or not url.hostname
-            or url.username is not None
-            or url.password is not None
-            or url.fragment
-            or "\\" in value
-        ):
-            raise ValueError(
-                "browser start URL must be a configured HTTPS client endpoint"
-            )
-        if any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in value):
-            raise ValueError(
-                "browser start URL must not contain whitespace or controls"
-            )
-        preview.validate_inputs(url.hostname, args.build_image)
-        if url.port is not None and not 1 <= url.port <= 65535:
-            raise ValueError("invalid browser start URL port")
-        actions = [{"label": "Continue with demo SSO", "start_url": value}]
     token = signing_secret(args.secret_file)
     basic = (
         basic_credentials(args.basic_secret_file) if args.basic_secret_file else None
@@ -1348,13 +1453,17 @@ def main():
         oauth["oauth_aviso_resource"] = args.oauth_aviso_resource
     if args.oauth_trusted_proxies:
         oauth["oauth_trusted_proxies"] = tuple(args.oauth_trusted_proxies)
+    if args.sso_issuer:
+        oauth["oidc"] = {
+            "issuer": args.sso_issuer,
+            "client_secret": sso_client_secret(args.sso_secret_file),
+        }
     resources, _ = render_api_key(
         project,
         args.chart,
         args.host,
         args.build_image,
         token,
-        actions,
         basic,
         valkey_password=valkey_password,
         replicas=args.replicas,
@@ -1375,6 +1484,8 @@ def main():
     print(f"Direct login: https://{args.host}/login")
     if oauth:
         print(f"OAuth issuer: https://{args.host}/")
+    if args.sso_issuer:
+        print(f"Demo SSO issuer: {args.sso_issuer}")
 
 
 if __name__ == "__main__":
