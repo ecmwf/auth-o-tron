@@ -210,10 +210,11 @@ def source_archive(project):
     return compressed
 
 
-def validate_inputs(host, image):
+def validate_host(host):
     # Valid: preview.example.org. Invalid: a URL, wildcard or whitespace.
     if (
-        len(host) > 253
+        not isinstance(host, str)
+        or len(host) > 253
         or not re.fullmatch(
             r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+",
             host,
@@ -221,6 +222,10 @@ def validate_inputs(host, image):
         or any(len(label) > 63 for label in host.split("."))
     ):
         raise ValueError("host must be a concrete DNS hostname")
+
+
+def validate_inputs(host, image):
+    validate_host(host)
     if not re.fullmatch(r"docker\.io/library/rust@sha256:[0-9a-f]{64}", image):
         raise ValueError("build image must be the official Rust image pinned by digest")
 

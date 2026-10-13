@@ -31,7 +31,6 @@ preview = _load_module("ecmwf_login_preview", "kubernetes-login-preview/render.p
 private_paths = _load_module(
     "preview_private_paths", "kubernetes-login-preview/private_paths.py"
 )
-shared_images = _load_module("shared_images", "shared_images.py")
 NAMESPACE = preview.NAMESPACE
 SECRET_NAME = "authotron-ecmwf-browser"
 PROVIDER = {
@@ -46,7 +45,8 @@ BASIC_LABEL = "Username and password"
 BASIC_PROVIDER_NAME = "Playground Basic Provider"
 BASIC_USERNAME = "browser-demo"
 LOGO_PATH = "/static/aviso-logo.png"
-VALKEY_IMAGE = shared_images.VALKEY_IMAGE
+# Official Valkey 9.1.2-alpine multiarchitecture index.
+VALKEY_IMAGE = "docker.io/valkey/valkey@sha256:48332870af354a799964c0012ae1194a0bf2bf894eb508f945810596dc2d8d11"
 VALKEY_NAME = f"{preview.RELEASE}-browser-valkey"
 VALKEY_PASSWORD_ENV = "AOT_UI__BROWSER_SESSION__BACKEND__PASSWORD"
 BASIC_REALM = "browser-demo"
