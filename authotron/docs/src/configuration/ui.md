@@ -479,10 +479,11 @@ CSRF format rejects forms issued by earlier versions; Valkey form records carry 
 method-bound `flow` value `<kind>:<id>` (`basic:<id>` or `key:<id>`, at most 38
 bytes), and the Lua script rejects any other shape.
 
-Auth-O-Tron stores browser records under `<key_prefix>:v2:` (for example
-`authotron:browser:release:v2:form:<sid>`); the `v2` segment is the record format
-version owned by the server. Upgrading from a release that stored records directly
-under `<key_prefix>:` orphans those records: in-flight forms are rejected and
+Auth-O-Tron stores browser records under `<key_prefix>:v3:` (for example
+`authotron:browser:release:v3:form:<sid>`); the `v3` segment is the record format
+version owned by the server (`v3` sessions also hold the display name). Upgrading
+from a release that stored records under another segment orphans those records:
+in-flight forms are rejected and
 existing browser sessions are no longer found, so users sign in again. Orphaned
 keys expire with their original TTLs. Drain earlier-version replicas before
 upgrading, because mixed versions do not share forms, sessions, quotas or

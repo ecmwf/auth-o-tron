@@ -14,7 +14,7 @@
 use crate::{
     auth::Auth,
     metrics::Metrics,
-    oidc::method::OidcMethod,
+    oidc::{claims::display_text, method::OidcMethod},
     providers::{Provider, plain_provider::PlainAuthProvider},
 };
 use crate::{config::ConfigV2, models::user::User, providers::ecmwfapi_provider::EcmwfApiProvider};
@@ -55,7 +55,8 @@ pub(crate) const DISPLAY_ATTRIBUTES: [(&str, &str, usize); 3] = [
     ("display_name", "Display name", 256),
 ];
 
-/// The wire payload accepts only the browser projection, never arbitrary User fields.
+/// The wire payload accepts only the browser projection, never arbitrary User fields,
+/// and the display-only name kept beside it.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredIdentity {
@@ -64,31 +65,39 @@ struct StoredIdentity {
     realm: String,
     roles: Vec<String>,
     attributes: HashMap<String, String>,
+    display_name: Option<String>,
 }
 
 impl StoredIdentity {
-    fn from_user(user: User) -> Self {
+    fn from_user(user: User, display_name: Option<String>) -> Self {
         Self {
-            version: 1,
+            version: 2,
             username: user.username,
             realm: user.realm,
             roles: user.roles,
             attributes: user.attributes,
+            display_name,
         }
     }
-    fn into_user(self) -> Result<User, BrowserVerifyError> {
-        if self.version != 1 {
+    fn into_user(self) -> Result<(User, Option<String>), BrowserVerifyError> {
+        if self.version != 2 || !self.display_name.as_deref().is_none_or(stored_display_name) {
             return Err(BrowserVerifyError::Unavailable);
         }
-        Ok(User::new(
+        let user = User::new(
             self.realm,
             self.username,
             Some(self.roles),
             Some(self.attributes),
             None,
             None,
-        ))
+        );
+        Ok((user, self.display_name))
     }
+}
+
+/// A display name exactly as [`display_text`] keeps it.
+fn stored_display_name(name: &str) -> bool {
+    display_text(name) == Some(name)
 }
 
 /// Check borrowed data before copying only the bounded browser projection.
@@ -271,9 +280,18 @@ struct FormTransaction {
 #[derive(Clone)]
 pub struct BrowserSession {
     pub user: Arc<User>,
+    /// Display only, e.g. an OIDC method's `display_name_claim`; see [`Self::shown_name`].
+    pub display_name: Option<String>,
     pub expires_at: SystemTime,
     pub expires_at_utc: chrono::DateTime<chrono::Utc>,
     expires: Instant,
+}
+
+impl BrowserSession {
+    /// The name pages show: the display name, or else the username.
+    pub fn shown_name(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(&self.user.username)
+    }
 }
 
 #[derive(Default)]
@@ -550,16 +568,20 @@ impl BrowserLoginState {
         Ok(())
     }
 
+    /// Starts a session for `user`; an unusable `display_name` is dropped, and the
+    /// username is shown instead.
     pub async fn save_session(
         &self,
         user: User,
+        display_name: Option<String>,
         previous: Option<&str>,
     ) -> Result<String, BrowserVerifyError> {
         let user = browser_identity(&user)?;
+        let display_name = display_name.filter(|name| stored_display_name(name));
         let previous = previous.filter(|id| valid_id(id));
         if let Some(backend) = self.shared()? {
             let sid = opaque_id();
-            let payload = serde_json::to_string(&StoredIdentity::from_user(user))
+            let payload = serde_json::to_string(&StoredIdentity::from_user(user, display_name))
                 .map_err(|_| BrowserVerifyError::Rejected)?;
             if payload.len() > SESSION_WIRE_BYTES_LIMIT - SESSION_ENVELOPE_BYTES_RESERVE {
                 return Err(BrowserVerifyError::Rejected);
@@ -585,7 +607,7 @@ impl BrowserLoginState {
             }
             Ok(sid)
         } else {
-            self.memory_save_session(user, previous)
+            self.memory_save_session(user, display_name, previous)
         }
     }
 
@@ -619,7 +641,7 @@ impl BrowserLoginState {
             let stored: StoredIdentity =
                 serde_json::from_str(parts.next().ok_or(BrowserVerifyError::Unavailable)?)
                     .map_err(|_| BrowserVerifyError::Unavailable)?;
-            let user = stored.into_user()?;
+            let (user, display_name) = stored.into_user()?;
             let projection =
                 browser_identity(&user).map_err(|_| BrowserVerifyError::Unavailable)?;
             if user.attributes.len() != projection.attributes.len() {
@@ -630,6 +652,7 @@ impl BrowserLoginState {
                 .ok_or(BrowserVerifyError::Unavailable)?;
             Ok(Some(BrowserSession {
                 user: Arc::new(projection),
+                display_name,
                 expires_at,
                 expires_at_utc,
                 expires: Instant::now(),
@@ -967,6 +990,7 @@ impl BrowserLoginState {
     fn memory_save_session(
         &self,
         user: User,
+        display_name: Option<String>,
         previous: Option<&str>,
     ) -> Result<String, BrowserVerifyError> {
         // Enforce the invariant even for internal callers bypassing direct verification.
@@ -994,6 +1018,7 @@ impl BrowserLoginState {
             sid.clone(),
             BrowserSession {
                 user,
+                display_name,
                 expires: now + duration,
                 expires_at: SystemTime::now() + duration,
                 expires_at_utc: chrono::Utc::now() + chrono::Duration::seconds(self.ttl as i64),
@@ -1019,7 +1044,7 @@ impl BrowserLoginState {
 
     #[cfg(test)]
     fn create_session(&self, user: User, previous: Option<&str>) -> Option<String> {
-        self.memory_save_session(user, previous).ok()
+        self.memory_save_session(user, None, previous).ok()
     }
 
     #[cfg(test)]
@@ -1318,6 +1343,50 @@ mod tests {
         assert!(Arc::ptr_eq(&a.user, &b.user));
         assert!(!a.user.attributes.contains_key("secret"));
         assert!(a.user.scopes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn display_names_are_kept_beside_the_identity_and_checked_on_read() {
+        let state = state();
+        let shown = |name: Option<&str>| {
+            let state = &state;
+            let name = name.map(str::to_owned);
+            async move {
+                let sid = state.save_session(maximum_identity(), name, None).await;
+                state.session(&sid.unwrap()).unwrap()
+            }
+        };
+        let session = shown(Some("Ada <Lovelace>")).await;
+        assert_eq!(session.shown_name(), "Ada <Lovelace>");
+        assert_eq!(session.user.username, maximum_identity().username);
+        assert!(!session.user.attributes.values().any(|v| v.contains("Ada")));
+        // Unusable names are dropped: the username is shown.
+        for unusable in [None, Some(" padded "), Some("a\u{7}b"), Some("")] {
+            let session = shown(unusable).await;
+            assert_eq!(session.display_name, None, "{unusable:?}");
+            assert_eq!(session.shown_name(), maximum_identity().username);
+        }
+        // Stored records carry the name; older versions or unusable names fail closed.
+        let record = |version: u8, name: serde_json::Value| {
+            serde_json::from_value::<StoredIdentity>(serde_json::json!({
+                "version": version, "username": "alice", "realm": "r", "roles": [],
+                "attributes": {}, "display_name": name
+            }))
+            .unwrap()
+            .into_user()
+        };
+        let (user, name) = record(2, serde_json::json!("alice")).unwrap();
+        assert_eq!(
+            (user.username.as_str(), name.as_deref()),
+            ("alice", Some("alice"))
+        );
+        assert!(record(2, serde_json::Value::Null).unwrap().1.is_none());
+        for (version, name) in [(1, serde_json::Value::Null), (2, serde_json::json!("a\nb"))] {
+            assert!(matches!(
+                record(version, name),
+                Err(BrowserVerifyError::Unavailable)
+            ));
+        }
     }
 
     fn state() -> BrowserLoginState {

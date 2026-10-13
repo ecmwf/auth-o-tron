@@ -6,8 +6,8 @@ use std::time::Duration;
 
 /// Record format namespace appended to the operator `key_prefix`; bumping it
 /// orphans older records (forms, sessions, quotas, leases) until their TTL ends.
-/// Valid key: `authotron:browser:release:v2:form:<sid>`.
-const RECORD_NAMESPACE: &str = "v2";
+/// Valid key: `authotron:browser:release:v3:form:<sid>`.
+const RECORD_NAMESPACE: &str = "v3";
 
 #[derive(Clone)]
 pub(super) struct Valkey {
@@ -355,45 +355,53 @@ mod tests {
                 .unwrap()
         );
 
-        let (left, right) =
-            tokio::join!(a.save_session(user(), None), b.save_session(user(), None));
+        let (left, right) = tokio::join!(
+            a.save_session(user(), None, None),
+            b.save_session(user(), None, None)
+        );
         assert_ne!(left.is_ok(), right.is_ok(), "one atomic capacity winner");
         let winner = left.or(right).unwrap();
         let _: usize = command(
             backend,
             "DEL",
             &[
-                &format!("{prefix}:v2:session:{winner}"),
-                &format!("{prefix}:v2:sessions"),
+                &format!("{prefix}:v3:session:{winner}"),
+                &format!("{prefix}:v3:sessions"),
             ],
         )
         .await;
 
-        let sid = a.save_session(user(), None).await.unwrap();
+        let sid = a.save_session(user(), None, None).await.unwrap();
         let expiry = b.lookup(&sid).await.unwrap().unwrap().expires_at;
-        let ttl1: i64 = command(backend, "PTTL", &[&format!("{prefix}:v2:session:{sid}")]).await;
+        let ttl1: i64 = command(backend, "PTTL", &[&format!("{prefix}:v3:session:{sid}")]).await;
         tokio::time::sleep(Duration::from_millis(25)).await;
         assert_eq!(a.lookup(&sid).await.unwrap().unwrap().expires_at, expiry);
-        let ttl2: i64 = command(backend, "PTTL", &[&format!("{prefix}:v2:session:{sid}")]).await;
+        let ttl2: i64 = command(backend, "PTTL", &[&format!("{prefix}:v3:session:{sid}")]).await;
         assert!(ttl2 < ttl1, "reads never extend expiry");
         assert!(matches!(
-            b.save_session(user(), None).await,
+            b.save_session(user(), None, None).await,
             Err(BrowserVerifyError::Capacity)
         ));
         let mut oversized = user();
         oversized.username = "x".repeat(257);
-        assert!(b.save_session(oversized, Some(&sid)).await.is_err());
+        assert!(b.save_session(oversized, None, Some(&sid)).await.is_err());
         assert!(a.lookup(&sid).await.unwrap().is_some());
-        let rotated = b.save_session(user(), Some(&sid)).await.unwrap();
+        let shown = Some("Ada <Demo>".to_owned());
+        let rotated = b.save_session(user(), shown.clone(), Some(&sid)).await;
+        let rotated = rotated.unwrap();
         assert_ne!(rotated, sid);
         assert!(a.lookup(&sid).await.unwrap().is_none());
+        // The display name is stored with the session and read on the other replica.
+        let session = a.lookup(&rotated).await.unwrap().unwrap();
+        assert_eq!(session.display_name, shown);
 
         // Corrupt/hostile values are rejected, including STRLEN guarding the large value.
-        let key = format!("{prefix}:v2:session:{rotated}");
+        let key = format!("{prefix}:v3:session:{rotated}");
         for payload in [
             "2\n9999999999999\n{}".to_owned(),
             "1\n9999999999999\ninvalid-json".to_owned(),
-            "1\n9999999999999\n{\"version\":2,\"username\":\"alice\",\"realm\":\"fixture\",\"roles\":[],\"attributes\":{}}".to_owned(),
+            "1\n9999999999999\n{\"version\":3,\"username\":\"alice\",\"realm\":\"fixture\",\"roles\":[],\"attributes\":{},\"display_name\":null}".to_owned(),
+            "1\n9999999999999\n{\"version\":2,\"username\":\"alice\",\"realm\":\"fixture\",\"roles\":[],\"attributes\":{},\"display_name\":\"a\\nb\"}".to_owned(),
             "1\n9999999999999\n{\"version\":1,\"username\":\"alice\",\"realm\":\"fixture\",\"roles\":[],\"attributes\":{},\"password\":\"hostile\"}".to_owned(),
             "x".repeat(100000),
         ] {
@@ -495,14 +503,15 @@ mod tests {
                 "untagged or malformed flow {invalid:?} must be rejected"
             );
         }
-        let _: usize = command(backend, "DEL", &[&key, &format!("{prefix}:v2:sessions")]).await;
+        let _: usize = command(backend, "DEL", &[&key, &format!("{prefix}:v3:sessions")]).await;
         let short_session = opaque_id();
         backend
             .call(&[
                 "session".into(),
                 short_session.clone(),
                 "".into(),
-                serde_json::to_string(&super::super::StoredIdentity::from_user(user())).unwrap(),
+                serde_json::to_string(&super::super::StoredIdentity::from_user(user(), None))
+                    .unwrap(),
                 "40".into(),
                 "1".into(),
             ])
@@ -512,7 +521,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(70)).await;
         assert!(b.lookup(&short_session).await.unwrap().is_none());
         assert!(
-            a.save_session(user(), None).await.is_ok(),
+            a.save_session(user(), None, None).await.is_ok(),
             "pruning reclaims capacity"
         );
 
@@ -583,7 +592,7 @@ mod tests {
             }
             loop {
                 let count: Option<usize> =
-                    command(backend, "HGET", &["local-budgets:v2:verify-quota", "used"]).await;
+                    command(backend, "HGET", &["local-budgets:v3:verify-quota", "used"]).await;
                 if count == Some(2) {
                     break;
                 }
@@ -612,10 +621,10 @@ mod tests {
             l2.admitted(async { Ok(user()) }).await,
             Err(BrowserVerifyError::Limited)
         ));
-        let count: usize = command(backend, "EXISTS", &["local-budgets:v2:leases"]).await;
+        let count: usize = command(backend, "EXISTS", &["local-budgets:v3:leases"]).await;
         assert_eq!(count, 0);
         let count: usize =
-            command(backend, "HGET", &["local-budgets:v2:verify-quota", "used"]).await;
+            command(backend, "HGET", &["local-budgets:v3:verify-quota", "used"]).await;
         assert_eq!(count, 2);
         for task in tasks {
             task.abort();
@@ -730,7 +739,7 @@ mod tests {
             let a = a.clone();
             tokio::spawn(async move { a.admitted(std::future::pending()).await })
         };
-        let leases_key = format!("{prefix}:v2:leases");
+        let leases_key = format!("{prefix}:v3:leases");
         for _ in 0..100 {
             let count: usize = command(backend, "ZCARD", &[&leases_key]).await;
             if count == 1 {
@@ -780,7 +789,7 @@ mod tests {
         };
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                let count: usize = command(backend, "ZCARD", &["scale-down:v2:leases"]).await;
+                let count: usize = command(backend, "ZCARD", &["scale-down:v3:leases"]).await;
                 if count == 1 {
                     break;
                 }
@@ -798,7 +807,7 @@ mod tests {
         );
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                let count: usize = command(backend, "ZCARD", &["scale-down:v2:leases"]).await;
+                let count: usize = command(backend, "ZCARD", &["scale-down:v3:leases"]).await;
                 if count == 0 {
                     break;
                 }
@@ -845,7 +854,7 @@ mod tests {
                         let leases: Vec<(String, String)> = command(
                             timed_backend,
                             "ZRANGE",
-                            &["deadline:v2:leases", "0", "-1", "WITHSCORES"],
+                            &["deadline:v3:leases", "0", "-1", "WITHSCORES"],
                         )
                         .await;
                         assert_eq!(leases.len(), 1);
@@ -854,7 +863,7 @@ mod tests {
                         let _: usize = command(
                             timed_backend,
                             "ZADD",
-                            &["deadline:v2:leases", &expiry, "unrelated"],
+                            &["deadline:v3:leases", &expiry, "unrelated"],
                         )
                         .await;
                         captured = Some((id, expiry));
@@ -877,7 +886,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let score: Option<String> =
-                    command(timed_backend, "ZSCORE", &["deadline:v2:leases", &id]).await;
+                    command(timed_backend, "ZSCORE", &["deadline:v3:leases", &id]).await;
                 if score.is_none() {
                     break;
                 }
@@ -889,11 +898,11 @@ mod tests {
         let remaining: Vec<(String, String)> = command(
             timed_backend,
             "ZRANGE",
-            &["deadline:v2:leases", "0", "-1", "WITHSCORES"],
+            &["deadline:v3:leases", "0", "-1", "WITHSCORES"],
         )
         .await;
         assert_eq!(remaining, vec![("unrelated".into(), expiry)]);
-        let _: usize = command(timed_backend, "ZREM", &["deadline:v2:leases", "unrelated"]).await;
+        let _: usize = command(timed_backend, "ZREM", &["deadline:v3:leases", "unrelated"]).await;
 
         let mut disabled =
             BrowserLoginState::new(&config("redis://127.0.0.1:1/0", "disabled")).unwrap();
@@ -959,7 +968,7 @@ mod tests {
                     "session".into(),
                     orphan_sid.clone(),
                     "".into(),
-                    serde_json::to_string(&super::super::StoredIdentity::from_user(user()))
+                    serde_json::to_string(&super::super::StoredIdentity::from_user(user(), None))
                         .unwrap(),
                     "300000".into(),
                     "1".into()
@@ -970,7 +979,7 @@ mod tests {
         let count: usize = command(
             backend,
             "EXISTS",
-            &[&format!("{prefix}:v2:session:{orphan_sid}")],
+            &[&format!("{prefix}:v3:session:{orphan_sid}")],
         )
         .await;
         assert_eq!(count, 0);
@@ -1090,11 +1099,11 @@ mod tests {
                 .username,
             "alice"
         );
-        let corrupt = "1\n10000000000000000\n{\"version\":1,\"username\":\"alice\",\"realm\":\"fixture\",\"roles\":[],\"attributes\":{}}";
+        let corrupt = "1\n10000000000000000\n{\"version\":2,\"username\":\"alice\",\"realm\":\"fixture\",\"roles\":[],\"attributes\":{},\"display_name\":null}";
         let _: String = command(
             backend,
             "SET",
-            &[&format!("routes:v2:session:{session}"), corrupt],
+            &[&format!("routes:v3:session:{session}"), corrupt],
         )
         .await;
         let response = app
@@ -1113,17 +1122,21 @@ mod tests {
             let mut identity = user();
             identity.username = uid.into();
             assert!(matches!(
-                app_state.browser.save_session(identity.clone(), None).await,
+                app_state
+                    .browser
+                    .save_session(identity.clone(), None, None)
+                    .await,
                 Err(BrowserVerifyError::Rejected)
             ));
             let value = format!(
                 "1\n9999999999999\n{}",
-                serde_json::to_string(&super::super::StoredIdentity::from_user(identity)).unwrap()
+                serde_json::to_string(&super::super::StoredIdentity::from_user(identity, None))
+                    .unwrap()
             );
             let _: String = command(
                 backend,
                 "SET",
-                &[&format!("routes:v2:session:{session}"), &value],
+                &[&format!("routes:v3:session:{session}"), &value],
             )
             .await;
             assert!(matches!(

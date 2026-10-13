@@ -259,8 +259,8 @@ async fn complete(
             Some(&state.metrics),
         )
         .await;
-    let user = match verified {
-        Ok(Ok(user)) => user,
+    let (user, display_name) = match verified {
+        Ok(Ok(verified)) => verified,
         Ok(Err(error)) => return sign_in_failure(state, method, error, attempt),
         Err(error) => {
             attempt.outcome = error_outcome(&error);
@@ -268,7 +268,10 @@ async fn complete(
         }
     };
     let previous = cookie_value(headers, SESSION_COOKIE);
-    let sid = match state.browser.save_session(user, previous.as_deref()).await {
+    let session = state
+        .browser
+        .save_session(user, display_name, previous.as_deref());
+    let sid = match session.await {
         Ok(sid) => sid,
         Err(error) => {
             attempt.outcome = error_outcome(&error);
@@ -403,24 +406,27 @@ async fn oidc_verified(
     .map_err(|_| SignInError::Augmentation)
 }
 
-/// Provider verification, then the same best-effort augmentation as credential methods.
+/// Provider verification, then the same best-effort augmentation as credential methods;
+/// the display name stays outside augmentation.
 async fn verify(
     state: &AppState,
     oidc: &OidcMethod,
     iss: Option<&str>,
     code: &str,
     secrets: &FlowSecrets,
-) -> Result<User, SignInError> {
-    let user = oidc
+) -> Result<(User, Option<String>), SignInError> {
+    let SignIn {
+        user, display_name, ..
+    } = oidc
         .complete(iss, code, secrets)
         .await
-        .map_err(SignInError::Provider)?
-        .user;
-    state
+        .map_err(SignInError::Provider)?;
+    let user = state
         .auth
         .check_augmenters(user, &state.metrics)
         .await
-        .ok_or(SignInError::Augmentation)
+        .ok_or(SignInError::Augmentation)?;
+    Ok((user, display_name))
 }
 
 fn sign_in_failure(

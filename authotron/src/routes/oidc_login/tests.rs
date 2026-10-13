@@ -176,6 +176,7 @@ async fn browser_sign_in_starts_a_session_for_the_provider_subject() {
     jar.update(&response);
     let account = text(get(&fixture.app, "/login/account", &jar).await).await;
     assert!(account.contains(SUBJECT));
+    assert!(account.contains("<dt>Signed in as</dt><dd>alice</dd>"));
     assert!(account.contains("<dd>idp</dd>"));
     assert!(account.contains("alice@example.org"));
     assert!(attempts(&fixture.state, "success", 1));
@@ -183,6 +184,31 @@ async fn browser_sign_in_starts_a_session_for_the_provider_subject() {
     let replay = get(&fixture.app, &callback, &jar).await;
     assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
     assert!(text(replay).await.contains("Sign-in expired"));
+}
+
+#[tokio::test]
+async fn the_account_page_escapes_the_display_name_and_falls_back_to_the_username() {
+    let fixture = fixture(|_| {}).await;
+    for (claim, shown) in [
+        (json!("<b>Ada</b>"), "&lt;b&gt;Ada&lt;/b&gt;".to_owned()),
+        (json!("ada\u{1b}[31m"), SUBJECT.to_owned()),
+        (json!("a".repeat(65)), SUBJECT.to_owned()),
+    ] {
+        *fixture.idp.state.claims.lock().unwrap() = json!({"preferred_username": claim});
+        let mut jar = Jar::default();
+        let authorization = start(&fixture, &mut jar).await;
+        let callback = local(&fixture.idp.authorize(&authorization));
+        let response = get(&fixture.app, &callback, &jar).await;
+        assert_eq!(location(&response), "/login/account");
+        jar.update(&response);
+        let account = text(get(&fixture.app, "/login/account", &jar).await).await;
+        assert!(
+            account.contains(&format!("<dt>Signed in as</dt><dd>{shown}</dd>")),
+            "{claim}"
+        );
+        assert!(account.contains(&format!("<dt>Username</dt><dd>{SUBJECT}</dd>")));
+        assert!(!account.contains("<b>Ada</b>"));
+    }
 }
 
 #[tokio::test]

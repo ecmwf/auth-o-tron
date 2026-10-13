@@ -520,7 +520,11 @@ async fn submit_inner(
     };
     drop(payload);
     let previous = cookie_value(&headers, SESSION_COOKIE);
-    let sid = match state.browser.save_session(user, previous.as_deref()).await {
+    let sid = match state
+        .browser
+        .save_session(user, None, previous.as_deref())
+        .await
+    {
         Ok(sid) => sid,
         Err(error) => {
             attempt.outcome = error_outcome(&error);
@@ -627,6 +631,7 @@ async fn account(State(state): State<AppState>, headers: HeaderMap) -> Response 
         html! {
             h2 id="login-card-title" { "Verified identity" }
             dl {
+                dt { "Signed in as" } dd { (session.shown_name()) }
                 dt { "Username" } dd { (&session.user.username) }
                 dt { "Realm" } dd { (&session.user.realm) }
                 dt { "Roles" } dd {
