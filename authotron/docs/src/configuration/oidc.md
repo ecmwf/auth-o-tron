@@ -57,6 +57,7 @@ Require PKCE with `S256` at the provider when it supports that setting.
 | `id_token_algorithms` | `[RS256, PS256, ES256]` | Accepted ID token algorithms: `RS256/384/512`, `PS256/384/512`, `ES256`, `ES384`, `EdDSA` |
 | `username_claim` | `sub` | `sub`, `preferred_username`, or `email` |
 | `roles_claim` | none | Dotted path to a string-array claim of provider roles |
+| `display_name_claim` | `preferred_username` | Dotted path to the string claim shown as "Signed in as" on the account and consent pages; display only |
 | `role_map` | `{}` | Provider role → local role; only listed roles are kept |
 | `max_authentication_age_seconds` | none | 60–86400; sent as `max_age`, and the ID token's `auth_time` must be recent enough |
 | `prompt` | none | `login`, `consent`, or `select_account` |
@@ -75,9 +76,10 @@ Rules, checked at startup:
 - `scopes` are unique RFC 6749 scope tokens. `openid` is always sent and
   `offline_access` is not accepted here; it is requested through `offline_access`.
   Valid: `profile`, `api:read`. Invalid: `a b`, `offline_access`.
-- `roles_claim` and a non-empty `role_map` go together. `roles_claim` has 1–4
-  segments of letters, digits, `_` and `-`. Valid: `realm_access.roles`, `groups`.
-  Invalid: `a..b`, `$.roles`. `role_map` holds at most 64 roles of 1–128 bytes.
+- `roles_claim` and a non-empty `role_map` go together. `roles_claim` and
+  `display_name_claim` have 1–4 segments of letters, digits, `_` and `-`. Valid:
+  `realm_access.roles`, `groups`, `name`. Invalid: `a..b`, `$.roles`. `role_map`
+  holds at most 64 roles of 1–128 bytes.
 - `additional_endpoint_origins` entries are canonical origins. Valid:
   `https://keys.example.org`. Invalid: `https://keys.example.org/`,
   `https://keys.example.org/certs`.
@@ -177,6 +179,14 @@ method as a disabled "(temporarily unavailable)" button, and
 - **Attributes.** `email` (only when verified, at most 320 bytes) and `name` (as
   `display_name`, at most 256 bytes) are shown on the account page. Other claims
   are not kept.
+- **Display name.** The account page and the consent page say "Signed in as" the
+  string at `display_name_claim`, trimmed, when it has 1–64 characters and no
+  control characters; otherwise, or when the claim is missing, they show the
+  username. It is escaped like all page text. The display name is kept beside the
+  identity, never in it: it is not the username, does not reach augmenters, roles,
+  scope policy, codes or tokens, and is not refreshed. With the default `sub`
+  username and `preferred_username` display name, a Keycloak user is shown by login
+  name while the identity stays the stable `sub`.
 - **Augmentation.** Augmenters for the method's realm then run as for any
   browser method: best effort for browser sessions, strict for authorization
   requests. Scope policy for OAuth uses the augmented roles, so a resource must

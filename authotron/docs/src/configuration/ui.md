@@ -499,7 +499,9 @@ augmentation, and awaited shared-lease release;
 timeout creates no session. The resulting identity is checked and projected
 before session storage and redirecting to `/login/account`.
 
-The account view escapes username, realm, roles and displayed attribute values.
+The account view starts with "Signed in as": the display name of an OIDC sign-in
+([`display_name_claim`](oidc.md#identity)), or else the username. It escapes
+that name, username, realm, roles and displayed attribute values.
 Only `ecmwf-email`, `email` and `display_name` are displayed; arbitrary attributes
 and scopes are not rendered. These are operator-controlled display data, not
 verified-email claims. Do not put sensitive data in these display fields.
