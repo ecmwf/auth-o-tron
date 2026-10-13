@@ -74,6 +74,7 @@ async fn refresh_renews_the_upstream_grant_and_stores_its_rotation() {
 }
 
 #[tokio::test]
+#[tracing_test::traced_test]
 async fn a_refused_grant_ends_the_family_and_is_revoked_at_the_provider() {
     let coupled = coupled(|_| {}).await;
     let (token, upstream) = live_family(&coupled).await;
@@ -126,9 +127,14 @@ async fn a_refused_grant_ends_the_family_and_is_revoked_at_the_provider() {
     assert_eq!(coupled.idp.state.refresh_requests.load(Ordering::SeqCst), 1);
     assert_eq!(coupled.upstream_events("revocation_skipped"), 1);
     assert_eq!(coupled.idp.state.revoked.lock().unwrap().len(), 1);
+    for reason in ["upstream_invalid_grant", "upstream_unusable"] {
+        assert!(logs_contain(&format!("reason=\"{reason}\"")), "{reason}");
+    }
+    assert!(!logs_contain(&upstream));
 }
 
 #[tokio::test]
+#[tracing_test::traced_test]
 async fn a_changed_identity_ends_the_family_and_revokes_the_newest_grant() {
     let coupled = coupled(|_| {}).await;
     let (token, _) = live_family(&coupled).await;
@@ -146,6 +152,7 @@ async fn a_changed_identity_ends_the_family_and_revokes_the_newest_grant() {
         coupled.refresh(&token).await.err(),
         Some(RefreshGrantError::InvalidGrant)
     );
+    assert!(logs_contain("reason=\"identity_changed\""));
 }
 
 #[tokio::test]

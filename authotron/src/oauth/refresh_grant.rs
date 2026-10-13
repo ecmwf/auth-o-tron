@@ -587,6 +587,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[tracing_test::traced_test]
     async fn removed_password_account_or_method_revokes_the_family() {
         let (_file, config, runtime) = runtime().await;
         let metrics = Metrics::new();
@@ -631,6 +632,91 @@ mod tests {
         assert!(
             output.contains("authotron_oauth_refresh_tokens_total{event=\"family_revoked\"} 2")
         );
+        for reason in ["account_removed", "method_removed"] {
+            assert!(logs_contain(&format!("reason=\"{reason}\"")), "{reason}");
+        }
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn revoked_families_are_logged_with_their_reason_but_no_token() {
+        let (_file, config, runtime) = runtime().await;
+        let metrics = Metrics::new();
+        let browser = browser(&config);
+        let granting = auth(
+            &config,
+            serde_json::json!([{"type": "plain", "name": "r", "realm": "local", "roles": {"reader": ["alice"]}}]),
+        );
+        let next = |response: TokenResponse| {
+            serde_json::to_value(response).unwrap()["refresh_token"]
+                .as_str()
+                .map(|token| RefreshToken::parse(token).unwrap())
+                .unwrap()
+        };
+        let first = family(&runtime, &grant()).await;
+        let RefreshBackend::Memory(store) = runtime.refresh.as_ref().unwrap() else {
+            unreachable!()
+        };
+        let now = runtime.now().await.unwrap();
+        let Presented::Current(reused) = store.lookup(&first.hash(), now).await.unwrap() else {
+            panic!("expected the new family");
+        };
+        let second = runtime.refresh(request(&first), &granting, &browser, &metrics);
+        let second = next(second.await.unwrap());
+        let third = runtime.refresh(request(&second), &granting, &browser, &metrics);
+        next(third.await.unwrap());
+        // The first token is neither current nor the grace predecessor: reuse.
+        assert!(
+            runtime
+                .refresh(request(&first), &granting, &browser, &metrics)
+                .await
+                .is_err()
+        );
+        let revoked = family(&runtime, &grant()).await;
+        runtime
+            .revoke(revoked.as_secret_str(), "desktop", &browser, &metrics)
+            .await
+            .unwrap();
+        let reference = super::super::audit::family_ref(&reused.family_id);
+        logs_assert(|lines: &[&str]| {
+            let event = |reason: &str| {
+                lines
+                    .iter()
+                    .find(|line| {
+                        line.contains("oauth.refresh_token.family_revoked")
+                            && line.contains(&format!("reason=\"{reason}\""))
+                    })
+                    .copied()
+                    .ok_or(format!("no {reason} line"))
+            };
+            let reuse = event("reuse_detected")?;
+            let revoke = event("client_revoke")?;
+            for (line, level) in [(reuse, " WARN "), (revoke, " INFO ")] {
+                for field in [
+                    level,
+                    "client_id=desktop",
+                    "method=password",
+                    "realm=local",
+                    "username=alice",
+                ] {
+                    if !line.contains(field) {
+                        return Err(format!("{field} missing: {line}"));
+                    }
+                }
+            }
+            if !reuse.contains(&format!("family={reference}")) {
+                return Err(format!("family reference missing: {reuse}"));
+            }
+            Ok(())
+        });
+        for secret in [
+            first.as_secret_str(),
+            second.as_secret_str(),
+            revoked.as_secret_str(),
+            &reused.family_id,
+        ] {
+            assert!(!logs_contain(secret));
+        }
     }
 
     #[test]
