@@ -121,7 +121,7 @@ pub(super) async fn start(
         Err(error) => return unavailable(error),
     };
     let secrets = FlowSecrets::derive(&form_nonce, &sign_in_state);
-    let location = oidc.authorization_url(&metadata, &sign_in_state, &secrets);
+    let location = oidc.authorization_url(&metadata, &sign_in_state, &secrets, false);
     let mut response = private_response(Redirect::to(location.as_str()).into_response());
     set_cookie(
         &mut response,
@@ -290,7 +290,7 @@ async fn authorize(
         .admitted_with_metrics(
             async {
                 let user = match oidc.complete(iss, code, secrets).await {
-                    Ok(user) => user,
+                    Ok(signed_in) => signed_in.user,
                     Err(error) => return Ok(Err(SignInError::Provider(error))),
                 };
                 Ok(
@@ -327,7 +327,8 @@ async fn verify(
     let user = oidc
         .complete(iss, code, secrets)
         .await
-        .map_err(SignInError::Provider)?;
+        .map_err(SignInError::Provider)?
+        .user;
     state
         .auth
         .check_augmenters(user, &state.metrics)

@@ -99,15 +99,18 @@ impl FlowSecrets {
 }
 
 /// Authorization request for the code flow, appended to any query the endpoint has.
+/// `offline` adds the `offline_access` scope, asking for a refresh token.
 pub fn authorization_url(
     endpoint: &Url,
     config: &OidcMethodConfig,
     redirect_uri: &str,
     state: &str,
     secrets: &FlowSecrets,
+    offline: bool,
 ) -> Url {
     let scope = std::iter::once("openid")
         .chain(config.scopes.iter().map(String::as_str))
+        .chain(offline.then_some("offline_access"))
         .collect::<Vec<_>>()
         .join(" ");
     let mut url = endpoint.clone();
@@ -275,7 +278,7 @@ mod tests {
             "https://login.example.org/login/method/demo-sso/callback"
         );
         let secrets = FlowSecrets::derive(NONCE, STATE);
-        let url = authorization_url(&endpoint, &config, &redirect, STATE, &secrets);
+        let url = authorization_url(&endpoint, &config, &redirect, STATE, &secrets, false);
         let query: Vec<(String, String)> = url.query_pairs().into_owned().collect();
         let challenge = secrets.challenge();
         let expected = [
@@ -296,7 +299,13 @@ mod tests {
         assert!(!url.as_str().contains(secrets.verifier()));
         config.max_authentication_age_seconds = Some(600);
         config.prompt = Some(crate::config::OidcPrompt::Login);
-        let url = authorization_url(&endpoint, &config, &redirect, STATE, &secrets);
+        let url = authorization_url(&endpoint, &config, &redirect, STATE, &secrets, true);
+        let scope = url
+            .query_pairs()
+            .find(|(name, _)| name == "scope")
+            .unwrap()
+            .1;
+        assert_eq!(scope, "openid profile email offline_access");
         let tail: Vec<(String, String)> = url.query_pairs().into_owned().skip(9).collect();
         assert_eq!(
             tail,

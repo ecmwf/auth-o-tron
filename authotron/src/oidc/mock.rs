@@ -98,6 +98,8 @@ struct Grant {
     challenge: String,
     redirect_uri: String,
     subject: String,
+    /// The request asked for `offline_access`, so the code exchange issues a refresh token.
+    offline: bool,
 }
 
 /// Mutable behaviour and records of a [`MockIdp`].
@@ -195,6 +197,9 @@ impl MockIdp {
                 challenge: query["code_challenge"].clone(),
                 redirect_uri: query["redirect_uri"].clone(),
                 subject: self.state.subject.lock().unwrap().clone(),
+                offline: query["scope"]
+                    .split(' ')
+                    .any(|scope| scope == "offline_access"),
             },
         );
         self.callback(&query, &[("code", &code)])
@@ -226,6 +231,30 @@ impl MockIdp {
     }
 }
 
+fn form(body: &str) -> HashMap<String, String> {
+    url::form_urlencoded::parse(body.as_bytes())
+        .into_owned()
+        .collect()
+}
+
+/// The registered client, authenticated with either secret method.
+fn authenticated(headers: &HeaderMap, form: &HashMap<String, String>) -> bool {
+    let basic = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok()?.strip_prefix("Basic "))
+        .and_then(|value| String::from_utf8(STANDARD.decode(value).ok()?).ok());
+    basic
+        .map(|pair| pair == format!("{CLIENT_ID}:{CLIENT_SECRET}"))
+        .unwrap_or_else(|| {
+            form.get("client_id").map(String::as_str) == Some(CLIENT_ID)
+                && form.get("client_secret").map(String::as_str) == Some(CLIENT_SECRET)
+        })
+}
+
+fn error(status: StatusCode, code: &str) -> (StatusCode, Json<Value>) {
+    (status, Json(json!({"error": code})))
+}
+
 /// Token endpoint: one-use codes, exact redirect URI, S256 verifier and client secret.
 fn token(
     state: &MockState,
@@ -237,48 +266,52 @@ fn token(
     if let Some((status, answer)) = state.token_answer.lock().unwrap().clone() {
         return (StatusCode::from_u16(status).unwrap(), Json(answer));
     }
-    let form: HashMap<String, String> = url::form_urlencoded::parse(body.as_bytes())
-        .into_owned()
-        .collect();
-    let basic = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok()?.strip_prefix("Basic "))
-        .and_then(|value| String::from_utf8(STANDARD.decode(value).ok()?).ok());
-    let client = basic
-        .map(|pair| pair == format!("{CLIENT_ID}:{CLIENT_SECRET}"))
-        .unwrap_or_else(|| {
-            form.get("client_id").map(String::as_str) == Some(CLIENT_ID)
-                && form.get("client_secret").map(String::as_str) == Some(CLIENT_SECRET)
-        });
-    if !client {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "invalid_client"})),
-        );
+    let form = form(body);
+    if !authenticated(headers, &form) {
+        return error(StatusCode::UNAUTHORIZED, "invalid_client");
     }
+    match form.get("grant_type").map(String::as_str) {
+        Some("authorization_code") => exchange(state, issuer, &form),
+        _ => error(StatusCode::BAD_REQUEST, "unsupported_grant_type"),
+    }
+}
+
+fn exchange(
+    state: &MockState,
+    issuer: &str,
+    form: &HashMap<String, String>,
+) -> (StatusCode, Json<Value>) {
     let grant = form
         .get("code")
         .and_then(|code| state.grants.lock().unwrap().remove(code));
     let valid = grant.as_ref().filter(|grant| {
-        form.get("grant_type").map(String::as_str) == Some("authorization_code")
-            && form.get("redirect_uri") == Some(&grant.redirect_uri)
+        form.get("redirect_uri") == Some(&grant.redirect_uri)
             && form.get("code_verifier").is_some_and(|verifier| {
                 URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())) == grant.challenge
             })
     });
     let Some(grant) = valid else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "invalid_grant"})),
-        );
+        return error(StatusCode::BAD_REQUEST, "invalid_grant");
     };
+    let mut answer = json!({
+        "access_token": "mock-access-token", "token_type": "Bearer", "expires_in": 60,
+        "id_token": id_token(state, issuer, &grant.subject, &grant.nonce)
+    });
+    if grant.offline {
+        answer["refresh_token"] = json!(format!("offline-{}", uuid::Uuid::new_v4().simple()));
+    }
+    (StatusCode::OK, Json(answer))
+}
+
+/// An ID token for `subject` with the default claims and [`MockState::claims`] merged in.
+fn id_token(state: &MockState, issuer: &str, subject: &str, nonce: &str) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
     let mut claims = json!({
-        "iss": issuer, "sub": grant.subject, "aud": CLIENT_ID, "azp": CLIENT_ID,
-        "exp": now + 300, "iat": now, "auth_time": now, "nonce": grant.nonce,
+        "iss": issuer, "sub": subject, "aud": CLIENT_ID, "azp": CLIENT_ID,
+        "exp": now + 300, "iat": now, "auth_time": now, "nonce": nonce,
         "preferred_username": "alice", "email": "alice@example.org", "email_verified": true,
         "name": "Alice Demo", "realm_access": {"roles": ["mcp-demo", "offline_access"]}
     });
@@ -286,12 +319,5 @@ fn token(
         claims[name] = value.clone();
     }
     let (index, kid) = state.signer.lock().unwrap().clone();
-    let id_token = sign(&claims, Algorithm::RS256, Some(&kid), index);
-    (
-        StatusCode::OK,
-        Json(json!({
-            "access_token": "mock-access-token", "token_type": "Bearer", "expires_in": 60,
-            "refresh_token": "mock-refresh-token", "id_token": id_token
-        })),
-    )
+    sign(&claims, Algorithm::RS256, Some(&kid), index)
 }

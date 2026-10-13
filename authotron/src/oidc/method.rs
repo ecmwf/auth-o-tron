@@ -36,6 +36,14 @@ const MAX_SECRET_BYTES: usize = 4096;
 /// An ID token is issued during the code exchange, so it is at most this old (plus skew).
 const MAX_ISSUED_AGE_SECONDS: u64 = 600;
 
+/// A completed sign-in: the mapped identity (not yet augmented), the provider's `sub`
+/// and the refresh token, when the provider issued one. Deliberately not Debug.
+pub struct SignIn {
+    pub user: User,
+    pub subject: String,
+    pub refresh_token: Option<Zeroizing<String>>,
+}
+
 pub struct OidcMethod {
     config: OidcMethodConfig,
     secret: Option<Zeroizing<String>>,
@@ -88,11 +96,13 @@ impl OidcMethod {
         self.discovery.metadata(&self.http).await
     }
 
+    /// `offline` requests the `offline_access` scope.
     pub fn authorization_url(
         &self,
         metadata: &ProviderMetadata,
         state: &str,
         secrets: &FlowSecrets,
+        offline: bool,
     ) -> Url {
         authorization_url(
             &metadata.authorization_endpoint,
@@ -100,6 +110,7 @@ impl OidcMethod {
             &self.redirect_uri,
             state,
             secrets,
+            offline,
         )
     }
 
@@ -117,13 +128,13 @@ impl OidcMethod {
     }
 
     /// Checks the callback's `iss`, exchanges `code`, validates the ID token against the
-    /// state's `secrets` and maps its claims. The returned identity is not yet augmented.
+    /// state's `secrets` and maps its claims.
     pub async fn complete(
         &self,
         iss: Option<&str>,
         code: &str,
         secrets: &FlowSecrets,
-    ) -> Result<User, OidcError> {
+    ) -> Result<SignIn, OidcError> {
         let metadata = self.metadata().await?;
         if !issuer_parameter_valid(
             iss,
@@ -141,8 +152,8 @@ impl OidcMethod {
             secrets.verifier(),
         )
         .await?;
-        let token = tokens.id_token.ok_or(OidcError::InvalidResponse)?;
-        let (alg, kid) = inspect(&token, &self.config.id_token_algorithms)?;
+        let id_token = tokens.id_token.ok_or(OidcError::InvalidResponse)?;
+        let (alg, kid) = inspect(&id_token, &self.config.id_token_algorithms)?;
         let key = self
             .jwks
             .key(&self.http, &metadata.jwks_uri, kid.as_deref(), alg)
@@ -152,7 +163,7 @@ impl OidcMethod {
             .map_err(|_| OidcError::Unavailable)?
             .as_secs();
         let claims = verify(
-            &token,
+            &id_token,
             alg,
             &key,
             &Expected {
@@ -165,7 +176,12 @@ impl OidcMethod {
                 max_authentication_age_seconds: self.config.max_authentication_age_seconds,
             },
         )?;
-        map_identity(&self.config, &claims)
+        let user = map_identity(&self.config, &claims)?;
+        Ok(SignIn {
+            user,
+            subject: claims.sub,
+            refresh_token: tokens.refresh_token,
+        })
     }
 }
 
@@ -195,10 +211,16 @@ mod tests {
     }
 
     /// Runs the browser leg: authorization URL, provider sign-in, callback parameters.
-    async fn sign_in(idp: &MockIdp, method: &OidcMethod, state: &str) -> Result<User, OidcError> {
+    async fn sign_in(
+        idp: &MockIdp,
+        method: &OidcMethod,
+        state: &str,
+        offline: bool,
+    ) -> Result<SignIn, OidcError> {
         let secrets = FlowSecrets::derive(FORM_NONCE, state);
         let metadata = method.metadata().await?;
-        let callback = idp.authorize(&method.authorization_url(&metadata, state, &secrets));
+        let request = method.authorization_url(&metadata, state, &secrets, offline);
+        let callback = idp.authorize(&request);
         let query = url::Url::parse(&callback).unwrap();
         let callback =
             crate::oidc::flow::parse_callback(query.query().unwrap().as_bytes()).unwrap();
@@ -221,7 +243,10 @@ mod tests {
                 "https://login.example.org/login/method/demo-sso/callback"
             );
             assert_eq!(method.availability(), Availability::Unknown);
-            let user = sign_in(&idp, &method, "state-1").await.unwrap();
+            let signed_in = sign_in(&idp, &method, "state-1", false).await.unwrap();
+            assert_eq!(signed_in.subject, SUBJECT);
+            assert!(signed_in.refresh_token.is_none());
+            let user = signed_in.user;
             assert_eq!(
                 (user.realm.as_str(), user.username.as_str()),
                 ("idp", SUBJECT)
@@ -235,7 +260,10 @@ mod tests {
             json!({"username_claim": "preferred_username", "roles_claim": "realm_access.roles",
                 "role_map": {"mcp-demo": "mcp-demo"}}),
         );
-        let user = sign_in(&idp, &mapped, "state-2").await.unwrap();
+        let user = sign_in(&idp, &mapped, "state-2", false).await.unwrap().user;
+        // Requesting offline access yields the provider's refresh token.
+        let offline = sign_in(&idp, &mapped, "state-3", true).await.unwrap();
+        assert!(offline.refresh_token.unwrap().starts_with("offline-"));
         assert_eq!(user.username, "alice");
         assert_eq!(user.roles, ["mcp-demo"]);
     }
@@ -246,7 +274,8 @@ mod tests {
         let (_secret, method) = method(&idp, json!({}));
         let secrets = FlowSecrets::derive(FORM_NONCE, "state");
         let metadata = method.metadata().await.unwrap();
-        let callback = idp.authorize(&method.authorization_url(&metadata, "state", &secrets));
+        let callback =
+            idp.authorize(&method.authorization_url(&metadata, "state", &secrets, false));
         let code = url::Url::parse(&callback)
             .unwrap()
             .query_pairs()
@@ -281,21 +310,21 @@ mod tests {
         );
         *idp.state.claims.lock().unwrap() = json!({"nonce": "replayed"});
         assert_eq!(
-            sign_in(&idp, &method, "state-3").await.err(),
+            sign_in(&idp, &method, "state-3", false).await.err(),
             Some(OidcError::InvalidIdToken)
         );
         *idp.state.claims.lock().unwrap() = json!({"aud": "other-client"});
         assert_eq!(
-            sign_in(&idp, &method, "state-4").await.err(),
+            sign_in(&idp, &method, "state-4", false).await.err(),
             Some(OidcError::InvalidIdToken)
         );
         *idp.state.claims.lock().unwrap() = json!({});
         // Rotated signing key published under a new kid.
         *idp.state.signer.lock().unwrap() = (1, "k1".into());
-        assert!(sign_in(&idp, &method, "state-5").await.is_ok());
+        assert!(sign_in(&idp, &method, "state-5", false).await.is_ok());
         *idp.state.signer.lock().unwrap() = (1, "k0".into());
         assert_eq!(
-            sign_in(&idp, &method, "state-6").await.err(),
+            sign_in(&idp, &method, "state-6", false).await.err(),
             Some(OidcError::InvalidIdToken)
         );
     }
@@ -305,7 +334,7 @@ mod tests {
         let idp = MockIdp::start().await;
         idp.state.iss_parameter.store(false, Ordering::SeqCst);
         let (_secret, method) = method(&idp, json!({}));
-        assert!(sign_in(&idp, &method, "state").await.is_ok());
+        assert!(sign_in(&idp, &method, "state", false).await.is_ok());
         for (status, answer, expected) in [
             (500, json!({}), OidcError::Unavailable),
             (
@@ -320,7 +349,10 @@ mod tests {
             ),
         ] {
             *idp.state.token_answer.lock().unwrap() = Some((status, answer));
-            assert_eq!(sign_in(&idp, &method, "state").await.err(), Some(expected));
+            assert_eq!(
+                sign_in(&idp, &method, "state", false).await.err(),
+                Some(expected)
+            );
         }
         // A wrong client secret is refused by the provider.
         *idp.state.token_answer.lock().unwrap() = None;
@@ -330,7 +362,7 @@ mod tests {
         config.client_secret_file = Some(secret.path().to_owned());
         let wrong = OidcMethod::new(&config, ORIGIN).unwrap();
         assert_eq!(
-            sign_in(&idp, &wrong, "state").await.err(),
+            sign_in(&idp, &wrong, "state", false).await.err(),
             Some(OidcError::ClientRejected)
         );
     }
