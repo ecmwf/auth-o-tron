@@ -339,8 +339,11 @@ and `:oauth:authorization-codes:v3:`; code hashes contain exactly code_hash/issu
 Shared issuance atomically persists code while consuming consent; redemption compares
 all code fields/index score/effective deadline before atomic deletion and proof release.
 Expected failures preserve unexpired state. Unexpected write failures, OOM, cancellation
-or lost replies can leave ambiguous mutation outcomes: atomic execution is not rollback;
-there is no automatic replay or fallback. Memory is development-only, per-instance,
+or lost replies can leave ambiguous mutation outcomes: atomic execution is not rollback.
+A command whose connection was closed is sent once more on a new connection (see
+[Durable refresh-token storage](#durable-refresh-token-storage)); a second run of an
+issue, transition or redemption finds its snapshot consumed and fails as missing. There
+is no other replay and no fallback. Memory is development-only, per-instance,
 without restart persistence. Capacity bounds logical records, not total allocation;
 100000 96 KiB records alone permit about 9.15 GiB payload plus overhead.
 
@@ -515,9 +518,17 @@ let the check run, grant the backend user `+info`, which is read-only. The check
 the server at startup only. It does not notice persistence turned off later, and it
 cannot tell whether `/data` is on a persistent volume.
 
-A single Valkey with AOF on a persistent volume survives pod restarts. It is still a
-single point of failure. For production, choose a managed or replicated Valkey, or a
-future database backend, as an operations decision.
+A single Valkey with AOF on a persistent volume survives pod restarts. After a Valkey
+restart, the first request reconnects transparently: the first command on each replica
+finds its connection closed, reconnects and is sent once more, within
+`operation_timeout_ms`. Requests that arrive while Valkey is still down return 503 and
+leave the presented refresh token valid. The client cannot tell an unsent command from
+one whose reply was lost, so a rotation can run twice; the second run finds the token
+already rotated and the client gets `invalid_grant`, as for any rotated token. A
+rotation is never applied twice. Timeouts are never resent.
+
+A single Valkey is still a single point of failure. For production, choose a managed
+or replicated Valkey, or a future database backend, as an operations decision.
 
 ## Signing and deferred capabilities
 

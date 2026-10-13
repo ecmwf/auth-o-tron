@@ -393,10 +393,16 @@ backend failures return generic 503, never missing-session 401, redirect or loca
 fallback. Form/session capacity failures return 503; quota/admission failures
 return 429. None of these failures issue a new browser session cookie. The health
 endpoint remains process liveness and does not depend on Valkey.
-Later operations reconnect after a broken connection; interrupted mutations are
-never automatically replayed. A command timeout can have an ambiguous outcome
-(for example, a form consumed remotely before the response is lost); retry with
-a fresh form. Orphaned records and leases remain bounded by their expiry.
+When Valkey closes a connection (restart, `CLIENT KILL`, idle timeout), the
+command that finds it closed reconnects and is sent once more within the same
+`operation_timeout_ms`, so the first request after a Valkey restart succeeds. The
+client cannot tell an unsent command from one whose reply was lost, so the resend
+may run a script twice. Scripts are guarded so that a second run never applies a
+one-use step twice: a repeated form consumption finds the form gone (retry with a
+fresh form), session and lease writes rewrite the same record, and rate quotas may
+count one extra attempt. Timeouts and server error replies are never resent; a
+command timeout can have an ambiguous outcome. Orphaned records and leases remain
+bounded by their expiry.
 
 Scripts preflight mutation permissions with `redis.acl_check_cmd`, as well as key
 types, before writes. This requires Valkey/Redis support for that API (Valkey 8 is
