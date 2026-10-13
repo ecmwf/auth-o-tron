@@ -1040,7 +1040,6 @@ def transform(
     # Provider order is the chooser order: Basic (when enabled) precedes ECMWF.
     config["providers"] = [copy.deepcopy(PROVIDER)]
     config["jwt"]["secret"] = ""
-    config["ui"].setdefault("sso", [])
     config["ui"]["branding"]["logo_url"] = LOGO_PATH
     config["ui"]["browser_session"] = {
         "public_origin": f"https://{host}",

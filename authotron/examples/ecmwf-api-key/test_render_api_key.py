@@ -35,12 +35,12 @@ OTHER_OAUTH_KEY = renderer.oauth_pem(
 # (the only difference from the previous digests), and again when provider `browser`
 # blocks gained stable ids and the Valkey key_prefix dropped its `v1` segment, and
 # again whenever the source manifest gains modules (refresh tokens, rate limits,
-# OIDC sign-in), and again when every playground profile enabled the in-cluster
-# metrics port.
+# OIDC sign-in), again when every playground profile enabled the in-cluster
+# metrics port, and again when the configuration stopped carrying an empty `ui.sso`.
 PRE_OAUTH_DIGESTS = {
-    "plain": "a0b3f38fa8e90890436c4f166fe00631fadb3f2dd450fcc0013fb470955c5b9a",
-    "basic": "93c4174dfa6ca0716b64237c96eb87b57a74ac1fd8b22e2fa59531f5a4874c66",
-    "shared": "3d9f8a966309790b7a1ab0798fd6926f2c7c0cd777abb2404849e6be7d6d551e",
+    "plain": "74099f95bc87a9ed23eab7331fa81cb3bf98d9ad52bb3b18c0da561712b9eec2",
+    "basic": "29fee3b8115c5ef8a65a600e4ed945a8c5e88caf34c3376fd88ed53143829011",
+    "shared": "f1155b6258b9f3b4c93412fc42d7ad3caa27b3ea0b8585e767cafe51f8e99b72",
 }
 # One `/login/` Prefix replaces per-method Exact paths, independent of method count.
 API_KEY_PATH_RULES = [
@@ -231,7 +231,7 @@ class RendererTests(unittest.TestCase):
                 "backend": {"type": "memory"},
             },
         )
-        self.assertEqual(config["ui"]["sso"], [])
+        self.assertNotIn("oidc", config["ui"])
         self.assertEqual(config["ui"]["branding"]["logo_url"], renderer.LOGO_PATH)
         self.assertFalse(config["store"]["enabled"])
         self.assertEqual(config["services"], [])
@@ -988,7 +988,7 @@ class RendererTests(unittest.TestCase):
                 public_origin="https://other.example.org"
             ),
             lambda c: c["ui"]["browser_session"].update(session_ttl_seconds=301),
-            lambda c: c["ui"].update(sso=[{"href": "/sso"}]),
+            lambda c: c["ui"].update(oidc=[{"id": "demo-sso"}]),
             lambda c: c["store"].update(enabled=True),
             lambda c: c["jwt"].update(secret=TOKEN),
             lambda c: c.update(services=[{"callback": "https://other.example.org"}]),
