@@ -162,13 +162,20 @@ impl LoginFlow {
             kind: BrowserMethodKind::ApiKey,
         }
     }
+    #[cfg(test)]
+    pub fn oidc(method: &str) -> Self {
+        Self {
+            method: method.into(),
+            kind: BrowserMethodKind::Oidc,
+        }
+    }
     /// Fixed `flow` metric label per credential type.
     pub(crate) fn metric_label(&self) -> &'static str {
         self.kind.metric_label()
     }
     /// Stored transaction tag `<kind>:<id>`, at most 38 bytes for a 32-byte id.
-    /// Valid: `basic:password`, `key:ecmwf-api-key`. Invalid: `api-key:password`,
-    /// `basic:Password`, `basic:-x`.
+    /// Valid: `basic:password`, `key:ecmwf-api-key`, `oidc:demo-sso`. Invalid:
+    /// `api-key:password`, `basic:Password`, `basic:-x`.
     fn tag(&self) -> String {
         format!("{}:{}", self.kind.tag_prefix(), self.method)
     }
@@ -1331,6 +1338,7 @@ mod tests {
             LoginFlow::basic("password"),
             LoginFlow::basic("staff"),
             LoginFlow::api_key("guests"),
+            LoginFlow::oidc("guests"),
         ] {
             assert!(!state.consume(&sid, &csrf, &other).await.unwrap());
         }
@@ -1351,10 +1359,34 @@ mod tests {
                 LoginFlow::basic(&"a".repeat(32)),
                 format!("basic:{}", "a".repeat(32)),
             ),
+            (LoginFlow::oidc("demo-sso"), "oidc:demo-sso".to_owned()),
+            (
+                LoginFlow::oidc(&"a".repeat(32)),
+                format!("oidc:{}", "a".repeat(32)),
+            ),
         ] {
             assert_eq!(flow.tag(), tag);
             assert!(flow.tag().len() <= 38);
         }
+        let (sid, csrf) = state.form(&LoginFlow::oidc("guests")).await.unwrap();
+        assert!(
+            !state
+                .consume(&sid, &csrf, &LoginFlow::basic("guests"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            state
+                .consume(&sid, &csrf, &LoginFlow::oidc("guests"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            !state
+                .consume(&sid, &csrf, &LoginFlow::oidc("guests"))
+                .await
+                .unwrap()
+        );
     }
 
     #[test]

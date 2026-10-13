@@ -107,19 +107,22 @@ pub(super) fn browser_label<'de, D: serde::Deserializer<'de>>(
     Ok(label.to_owned())
 }
 
-/// Credential form offered by a browser method; follows the provider type.
+/// How a browser method verifies identity: a credential form following the provider
+/// type, or a redirect to an OpenID Connect provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserMethodKind {
     Basic,
     ApiKey,
+    Oidc,
 }
 
 impl BrowserMethodKind {
-    /// Provider `type` value that offers this credential form.
+    /// Configuration source of the method: the provider `type`, or `oidc` for `ui.oidc`.
     pub fn provider_type(self) -> &'static str {
         match self {
             Self::Basic => "plain",
             Self::ApiKey => "ecmwf-api",
+            Self::Oidc => "oidc",
         }
     }
 
@@ -128,14 +131,16 @@ impl BrowserMethodKind {
         match self {
             Self::Basic => "basic",
             Self::ApiKey => "key",
+            Self::Oidc => "oidc",
         }
     }
 
-    /// Fixed `flow` metric label per credential type.
+    /// Fixed `flow` metric label per method kind.
     pub fn metric_label(self) -> &'static str {
         match self {
             Self::Basic => "basic",
             Self::ApiKey => "ecmwf-api-key",
+            Self::Oidc => "oidc",
         }
     }
 }

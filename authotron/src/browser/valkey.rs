@@ -336,6 +336,24 @@ mod tests {
                 .await
                 .unwrap()
         );
+        // OIDC sign-in states share the form store under their own tag.
+        let oidc = LoginFlow::oidc("password");
+        let state_token = a.form_with_nonce(&oidc, &form_nonce).await.unwrap();
+        assert!(
+            !b.consume_with_nonce(&state_token, &form_nonce, &LoginFlow::basic("password"))
+                .await
+                .unwrap()
+        );
+        assert!(
+            b.consume_with_nonce(&state_token, &form_nonce, &oidc)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !a.consume_with_nonce(&state_token, &form_nonce, &oidc)
+                .await
+                .unwrap()
+        );
 
         let (left, right) =
             tokio::join!(a.save_session(user(), None), b.save_session(user(), None));
@@ -411,14 +429,17 @@ mod tests {
                 .unwrap()
         );
         // The script stores only method-bound flow tags: valid `basic:password`,
-        // `key:ecmwf-api-key` or a 32-byte id; invalid `basic` or `basic:-x`.
+        // `key:ecmwf-api-key`, `oidc:demo-sso` or a 32-byte id; invalid `basic` or
+        // `basic:-x`.
         let longest = "a".repeat(32);
         for valid in [
             "basic:password".to_owned(),
             "key:ecmwf-api-key".to_owned(),
+            "oidc:demo-sso".to_owned(),
             "basic:0".to_owned(),
             format!("key:{longest}"),
             format!("basic:{longest}"),
+            format!("oidc:{longest}"),
         ] {
             let sid = opaque_id();
             assert_eq!(
@@ -451,9 +472,11 @@ mod tests {
             "basic:-x".to_owned(),
             "basic:a_b".to_owned(),
             "basic:password:x".to_owned(),
-            "oidc:sso".to_owned(),
+            "saml:sso".to_owned(),
+            "Oidc:sso".to_owned(),
             format!("basic:{longest}a"),
             format!("key:{longest}a"),
+            format!("oidc:{longest}a"),
         ] {
             assert!(
                 backend

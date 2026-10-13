@@ -341,6 +341,10 @@ async fn submit(
         return not_found();
     };
     let flow = &method.flow;
+    // Redirect methods have no credential form to submit.
+    if flow.kind == BrowserMethodKind::Oidc {
+        return not_found();
+    }
     let payload = match payload {
         Ok(Form(form)) => form.submission(flow.kind).ok_or(PayloadError::Malformed),
         Err(error) if error.status() == StatusCode::PAYLOAD_TOO_LARGE => {
@@ -428,6 +432,7 @@ async fn submit_inner(
                 password: &payload.secret,
             }
         }
+        BrowserMethodKind::Oidc => return not_found(),
     };
     if let Some((id, binding)) = oauth_context {
         let Some(runtime) = &state.oauth else {
