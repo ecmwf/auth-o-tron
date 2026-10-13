@@ -138,6 +138,7 @@ SOURCE_FILES = (
     "authotron/src/routes/oidc_login.rs",
     "authotron/src/routes/oidc_login/authorization_tests.rs",
     "authotron/src/routes/oidc_login/keycloak_tests.rs",
+    "authotron/src/routes/oidc_login/offline_tests.rs",
     "authotron/src/routes/oidc_login/tests.rs",
     "authotron/src/routes/providers.rs",
     "authotron/src/routes/tokens.rs",

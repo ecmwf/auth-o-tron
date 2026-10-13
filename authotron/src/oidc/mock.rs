@@ -124,6 +124,8 @@ pub(crate) struct MockState {
     pub signer: Mutex<(usize, String)>,
     pub token_requests: AtomicUsize,
     pub discovery_requests: AtomicUsize,
+    /// Answer `offline_access` requests with a refresh token.
+    pub issue_offline_tokens: AtomicBool,
     /// Advertise the RFC 7009 revocation endpoint.
     pub revocation: AtomicBool,
     /// Refresh responses carry a new refresh token, invalidating the presented one.
@@ -153,6 +155,7 @@ impl MockIdp {
         let state = Arc::new(MockState::default());
         for flag in [
             &state.iss_parameter,
+            &state.issue_offline_tokens,
             &state.revocation,
             &state.rotate_refresh_tokens,
             &state.refresh_id_tokens,
@@ -339,7 +342,7 @@ fn exchange(
         "access_token": "mock-access-token", "token_type": "Bearer", "expires_in": 60,
         "id_token": id_token(state, issuer, &grant.subject, &grant.nonce)
     });
-    if grant.offline {
+    if grant.offline && state.issue_offline_tokens.load(Ordering::SeqCst) {
         answer["refresh_token"] = json!(state.issue_refresh_token(Offline {
             subject: grant.subject.clone(),
             nonce: grant.nonce.clone(),

@@ -13,6 +13,7 @@
 //! the provider's own offline-session expiry still ends the grant.
 
 use super::{
+    context::AuthenticatedAuthorization,
     refresh::{EndedUpstream, RefreshGrant},
     runtime::OAuthRuntime,
 };
@@ -21,7 +22,7 @@ use crate::{
     metrics::{Metrics, UpstreamTokenEvent},
     oidc::{
         method::OidcMethod,
-        upstream::{UpstreamBinding, UpstreamCipher},
+        upstream::{UpstreamBinding, UpstreamCipher, UpstreamGrant},
     },
 };
 use std::sync::Arc;
@@ -71,6 +72,21 @@ impl Upstream {
             revocations,
         }
     }
+    /// Queues a revocation; `false` when the queue is full.
+    fn queue(
+        &self,
+        method: &Arc<OidcMethod>,
+        refresh_token: Zeroizing<String>,
+        metrics: &Metrics,
+    ) -> bool {
+        self.revocations
+            .try_send(Revocation {
+                method: method.clone(),
+                refresh_token,
+                metrics: metrics.clone(),
+            })
+            .is_ok()
+    }
 }
 
 /// The context a family's sealed upstream grant is bound to.
@@ -85,6 +101,68 @@ pub(super) fn binding<'a>(grant: &'a RefreshGrant, method: &'a OidcMethod) -> Up
 }
 
 impl OAuthRuntime {
+    /// Whether a sign-in through `oidc` for `client_id` requests offline access: the
+    /// method allows it, the client opts in, and sealing keys are configured.
+    pub(crate) fn offline_access(&self, client_id: &str, oidc: &OidcMethod) -> bool {
+        oidc.config().offline_access
+            && self.upstream.is_some()
+            && self.config.clients.iter().any(|client| {
+                client.client_id == client_id
+                    && client.refresh_tokens.enabled
+                    && client.refresh_tokens.upstream_offline_access
+            })
+    }
+
+    /// Seals the upstream grant of a sign-in; `None` without keys or on failure.
+    pub(crate) fn seal_upstream(
+        &self,
+        binding: &UpstreamBinding<'_>,
+        grant: &UpstreamGrant,
+    ) -> Option<String> {
+        self.upstream.as_ref()?.cipher.seal(binding, grant).ok()
+    }
+
+    /// Queues revocation of an upstream refresh token that no family will hold.
+    pub(crate) fn revoke_upstream_token(
+        &self,
+        method: &Arc<OidcMethod>,
+        refresh_token: Zeroizing<String>,
+        metrics: &Metrics,
+    ) {
+        let queued = self
+            .upstream
+            .as_ref()
+            .is_some_and(|upstream| upstream.queue(method, refresh_token, metrics));
+        if !queued {
+            metrics.record_upstream_token(UpstreamTokenEvent::RevocationSkipped);
+        }
+    }
+
+    /// Revokes the upstream grant of an authorization that ends without a code.
+    pub(crate) fn end_authorization_upstream(
+        &self,
+        context: &AuthenticatedAuthorization,
+        browser: &BrowserLoginState,
+        metrics: &Metrics,
+    ) {
+        let Some(sealed) = context.upstream() else {
+            return;
+        };
+        let request = context.transaction().request();
+        let grant = RefreshGrant {
+            client_id: request.client_id().into(),
+            resource: request.resource().into(),
+            scopes: context.authorized_scopes().to_vec(),
+            username: context.as_user().username.clone(),
+            realm: context.as_user().realm.clone(),
+            provider_roles: context.provider_roles().to_vec(),
+            method: context.method().into(),
+            upstream_coupled: true,
+        };
+        let sealed = sealed.to_owned();
+        self.end_upstream([EndedUpstream { grant, sealed }], browser, metrics);
+    }
+
     /// Queues upstream revocation for each ended coupled family. A family whose method
     /// or key no longer opens its sealed grant is skipped and counted.
     pub(super) fn end_upstream(
@@ -107,14 +185,8 @@ impl OAuthRuntime {
                 else {
                     return false;
                 };
-                upstream
-                    .revocations
-                    .try_send(Revocation {
-                        method: method.clone(),
-                        refresh_token: Zeroizing::new(grant.refresh_token().to_owned()),
-                        metrics: metrics.clone(),
-                    })
-                    .is_ok()
+                let refresh_token = Zeroizing::new(grant.refresh_token().to_owned());
+                upstream.queue(method, refresh_token, metrics)
             });
             if !queued {
                 tracing::warn!(

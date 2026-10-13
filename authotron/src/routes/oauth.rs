@@ -422,7 +422,10 @@ async fn consent(
             code.state(),
             ("code", code.code().as_secret_str()),
         ),
-        CodeIssueOutcome::Denied => access_denied(runtime, context.transaction().request()),
+        CodeIssueOutcome::Denied => {
+            runtime.end_authorization_upstream(&context, &state.browser, &state.metrics);
+            access_denied(runtime, context.transaction().request())
+        }
     }
 }
 /// Builds the 303 to a callback already validated against the registered client,

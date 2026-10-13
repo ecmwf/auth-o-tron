@@ -22,11 +22,15 @@ use crate::{
     browser::{BrowserMethod, opaque_id, valid_id},
     metrics::{BrowserAttemptGuard, BrowserOutcome},
     models::user::User,
-    oauth::{authentication::oidc_identity, store::TransactionId},
+    oauth::{
+        authentication::{VerifiedOAuthIdentity, oidc_identity},
+        store::TransactionId,
+    },
     oidc::{
         OidcError,
         flow::{self, CallbackResult, FlowSecrets},
-        method::OidcMethod,
+        method::{OidcMethod, SignIn},
+        upstream::{UpstreamBinding, UpstreamGrant},
     },
     state::AppState,
 };
@@ -37,6 +41,8 @@ use axum::{
 };
 use maud::html;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use zeroize::Zeroizing;
 
 type Notice = (&'static str, &'static str);
 const EXPIRED: Notice = (
@@ -92,13 +98,19 @@ pub(super) async fn start(
             let Some(runtime) = &state.oauth else {
                 return super::oauth::local(StatusCode::FORBIDDEN);
             };
-            if let Err(error) = runtime.bound(&id, &browser).await {
-                return pending_failure(error).0;
-            }
-            Some(authorization_binding(&id, &browser))
+            let bound = match runtime.bound(&id, &browser).await {
+                Ok(bound) => bound,
+                Err(error) => return pending_failure(error).0,
+            };
+            let client_id = bound.transaction().request().client_id();
+            Some((
+                authorization_binding(&id, &browser),
+                runtime.offline_access(client_id, oidc),
+            ))
         }
         Err(status) => return super::oauth::local(status),
     };
+    let offline = authorization.is_some_and(|(_, offline)| offline);
     let metadata = match oidc.metadata().await {
         Ok(metadata) => metadata,
         Err(error) => {
@@ -115,13 +127,16 @@ pub(super) async fn start(
     let form_nonce = cookie_value(headers, FORM_COOKIE)
         .filter(|value| valid_id(value))
         .unwrap_or_else(opaque_id);
-    let binding = flow::binding(&form_nonce, authorization.as_ref());
+    let binding = flow::binding(
+        &form_nonce,
+        authorization.as_ref().map(|(binding, _)| binding),
+    );
     let sign_in_state = match state.browser.form_with_nonce(&method.flow, &binding).await {
         Ok(token) => token,
         Err(error) => return unavailable(error),
     };
     let secrets = FlowSecrets::derive(&form_nonce, &sign_in_state);
-    let location = oidc.authorization_url(&metadata, &sign_in_state, &secrets, false);
+    let location = oidc.authorization_url(&metadata, &sign_in_state, &secrets, offline);
     let mut response = private_response(Redirect::to(location.as_str()).into_response());
     set_cookie(
         &mut response,
@@ -137,6 +152,8 @@ enum SignInError {
     Provider(OidcError),
     /// Augmentation or identity bounds did not accept the identity.
     Augmentation,
+    /// Offline access was requested, but no refresh token arrived or it could not be sealed.
+    OfflineAccess,
 }
 
 pub(super) async fn callback(
@@ -169,7 +186,7 @@ async fn complete(
     state: &AppState,
     headers: &HeaderMap,
     method: &BrowserMethod,
-    oidc: &OidcMethod,
+    oidc: &Arc<OidcMethod>,
     query: Option<&str>,
     attempt: &mut BrowserAttemptGuard,
 ) -> Response {
@@ -264,11 +281,13 @@ async fn complete(
 }
 
 /// Continues a pending authorization: the transaction is confirmed before the code is
-/// exchanged, and the identity is strictly augmented, as for credential sign-in.
+/// exchanged, and the identity is strictly augmented, as for credential sign-in. With
+/// offline access the provider's refresh token is sealed into the identity; it is revoked
+/// at the provider if the authorization does not reach consent.
 async fn authorize(
     state: &AppState,
     method: &BrowserMethod,
-    oidc: &OidcMethod,
+    oidc: &Arc<OidcMethod>,
     (id, browser): (&TransactionId, &[u8; 32]),
     (iss, code, secrets): (Option<&str>, &str, &FlowSecrets),
     attempt: &mut BrowserAttemptGuard,
@@ -285,35 +304,94 @@ async fn authorize(
             return response;
         }
     };
+    let client_id = witness.transaction().request().client_id().to_owned();
+    let offline = runtime.offline_access(&client_id, oidc);
     let verified = state
         .browser
         .admitted_with_metrics(
             async {
-                let user = match oidc.complete(iss, code, secrets).await {
-                    Ok(signed_in) => signed_in.user,
-                    Err(error) => return Ok(Err(SignInError::Provider(error))),
+                let SignIn {
+                    user,
+                    subject,
+                    refresh_token,
+                } = match oidc.complete(iss, code, secrets).await {
+                    Ok(signed_in) => signed_in,
+                    Err(error) => return Ok((None, Err(SignInError::Provider(error)))),
                 };
-                Ok(
-                    oidc_identity(&method.flow.method, user, None, &state.auth, &state.metrics)
-                        .await
-                        .map_err(|_| SignInError::Augmentation),
-                )
+                // Without offline access a refresh token is dropped unused.
+                let Some(token) = refresh_token.filter(|_| offline) else {
+                    if offline {
+                        tracing::error!(
+                            event_name = "browser.oidc.offline_token_missing",
+                            event_domain = "browser",
+                            method = %method.flow.method,
+                            "the provider issued no refresh token although offline_access was requested"
+                        );
+                        return Ok((None, Err(SignInError::OfflineAccess)));
+                    }
+                    return Ok((None, oidc_verified(state, method, user, None).await));
+                };
+                let binding = UpstreamBinding {
+                    method: &method.flow.method,
+                    issuer: &oidc.config().issuer,
+                    client_id: &client_id,
+                    realm: &user.realm,
+                    username: &user.username,
+                };
+                let grant = UpstreamGrant::new(&subject, token.clone());
+                let Some(sealed) = runtime.seal_upstream(&binding, &grant) else {
+                    return Ok((Some(token), Err(SignInError::OfflineAccess)));
+                };
+                let identity = oidc_verified(state, method, user, Some(sealed)).await;
+                Ok((Some(token), identity))
             },
             Some(&state.metrics),
         )
         .await;
-    let identity = match verified {
-        Ok(Ok(identity)) => identity,
-        Ok(Err(error)) => return sign_in_failure(state, method, error, attempt),
+    let (token, identity) = match verified {
+        Ok(verified) => verified,
         Err(error) => {
             attempt.outcome = error_outcome(&error);
             return unavailable(error);
         }
     };
+    let unheld = |token: Option<Zeroizing<String>>| {
+        if let Some(token) = token {
+            runtime.revoke_upstream_token(oidc, token, &state.metrics);
+        }
+    };
+    let identity = match identity {
+        Ok(identity) => identity,
+        Err(error) => {
+            unheld(token);
+            return sign_in_failure(state, method, error, attempt);
+        }
+    };
     let (response, outcome) =
         finish_authorization_login(runtime, id, browser, witness, identity).await;
+    if !matches!(outcome, BrowserOutcome::Success) {
+        unheld(token);
+    }
     attempt.outcome = outcome;
     response
+}
+
+/// Strict augmentation of a provider identity carrying an optional sealed upstream grant.
+async fn oidc_verified(
+    state: &AppState,
+    method: &BrowserMethod,
+    user: User,
+    upstream: Option<String>,
+) -> Result<VerifiedOAuthIdentity, SignInError> {
+    oidc_identity(
+        &method.flow.method,
+        user,
+        upstream,
+        &state.auth,
+        &state.metrics,
+    )
+    .await
+    .map_err(|_| SignInError::Augmentation)
 }
 
 /// Provider verification, then the same best-effort augmentation as credential methods.
@@ -371,6 +449,12 @@ fn sign_in_failure(
             StatusCode::FORBIDDEN,
             NOT_PERMITTED,
         ),
+        SignInError::OfflineAccess => (
+            "offline_access",
+            BrowserOutcome::IdpUnavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+            NOT_COMPLETED,
+        ),
     };
     tracing::warn!(
         event_name = "browser.oidc.sign_in_failed",
@@ -387,5 +471,7 @@ fn sign_in_failure(
 mod authorization_tests;
 #[cfg(all(test, unix))]
 mod keycloak_tests;
+#[cfg(test)]
+mod offline_tests;
 #[cfg(test)]
 mod tests;

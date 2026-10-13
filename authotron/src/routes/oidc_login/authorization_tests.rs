@@ -21,15 +21,17 @@ use std::io::Write;
 use tower::ServiceExt;
 use url::Url;
 
-const CLIENT_CALLBACK: &str = "http://127.0.0.1:49152/callback";
-const RESOURCE: &str = "https://mcp.example.test/mcp";
-const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+pub(super) const CLIENT_CALLBACK: &str = "http://127.0.0.1:49152/callback";
+pub(super) const RESOURCE: &str = "https://mcp.example.test/mcp";
+pub(super) const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
 /// The OIDC method as the only sign-in method of an OAuth server whose `read` scope
 /// needs the `reader` role, granted only through the method's `role_map` from the
-/// provider role `mcp-demo`.
-async fn authorization_fixture() -> (Fixture, tempfile::NamedTempFile) {
+/// provider role `mcp-demo`. `edit` adjusts the JSON config afterwards.
+pub(super) async fn authorization_fixture_with(
+    edit: impl FnOnce(&mut Value),
+) -> (Fixture, tempfile::NamedTempFile) {
     let mut key = tempfile::NamedTempFile::new().unwrap();
     key.write_all(rsa_key(0).to_pkcs8_pem(LineEnding::LF).unwrap().as_bytes())
         .unwrap();
@@ -47,13 +49,18 @@ async fn authorization_fixture() -> (Fixture, tempfile::NamedTempFile) {
             "resources": [{"resource": RESOURCE, "allowed_realms": ["idp"],
                 "scopes": [{"name": "read", "required_roles": ["reader"]}]}]
         });
+        edit(config);
     })
     .await;
     (fixture, key)
 }
 
+async fn authorization_fixture() -> (Fixture, tempfile::NamedTempFile) {
+    authorization_fixture_with(|_| {}).await
+}
+
 /// Starts an authorization request from the client and returns the browser's cookies.
-async fn authorize(fixture: &Fixture) -> Jar {
+pub(super) async fn authorize(fixture: &Fixture) -> Jar {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
     for (name, value) in [
         ("client_id", "desktop"),
@@ -79,11 +86,11 @@ async fn authorize(fixture: &Fixture) -> Jar {
     jar
 }
 
-async fn send(fixture: &Fixture, request: Request<Body>) -> Response {
+pub(super) async fn send(fixture: &Fixture, request: Request<Body>) -> Response {
     fixture.app.clone().oneshot(request).await.unwrap()
 }
 
-fn form(fields: &[(&str, &str)]) -> Body {
+pub(super) fn form(fields: &[(&str, &str)]) -> Body {
     let mut form = url::form_urlencoded::Serializer::new(String::new());
     for (name, value) in fields {
         form.append_pair(name, value);
@@ -91,7 +98,7 @@ fn form(fields: &[(&str, &str)]) -> Body {
     Body::from(form.finish())
 }
 
-fn hidden(html: &str, name: &str) -> String {
+pub(super) fn hidden(html: &str, name: &str) -> String {
     html.split(&format!("name=\"{name}\" value=\""))
         .nth(1)
         .unwrap()
