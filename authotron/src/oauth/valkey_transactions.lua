@@ -1,4 +1,5 @@
--- Atomic execution does not imply rollback after an unexpected write failure.
+-- Atomic execution does not imply rollback after an unexpected write failure. A run
+-- resent after a lost reply collides (create) or no longer matches its snapshot ('missing').
 local index, key = KEYS[1], KEYS[2]
 local op, pending_limit, auth_limit, consent_limit = ARGV[1], tonumber(ARGV[2]), tonumber(ARGV[8]), tonumber(ARGV[11])
 local clock = redis.call('TIME')

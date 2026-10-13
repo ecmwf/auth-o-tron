@@ -2,6 +2,8 @@
 -- issued token key; family, per-user index and other token keys derive from the fixed
 -- prefix. A token key expires at the family idle deadline when it was issued or
 -- rotated, and a family keeps at most ARGV[10] rotated hashes ("history", oldest first).
+-- A run resent after a lost reply never applies twice: rotate finds the hash no longer
+-- current ('stale'), issue finds the token key present, and revocation is idempotent.
 local token = KEYS[1]
 local op, prefix, now, grace = ARGV[1], ARGV[2], tonumber(ARGV[3]), tonumber(ARGV[4])
 local function integer(n) return n and n > 0 and n <= 253402300799999 and n % 1 == 0 end

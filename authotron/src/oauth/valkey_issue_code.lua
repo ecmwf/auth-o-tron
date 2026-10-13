@@ -1,4 +1,5 @@
 -- Four explicit keys on one primary; atomic execution is not rollback on unexpected errors.
+-- A run resent after a lost reply finds the consent consumed and returns 'missing'.
 local si, source, ci, code = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
 local old_exp, old_payload, effective = tonumber(ARGV[1]), ARGV[2], tonumber(ARGV[3])
 local cap, expiry, hash, issuer, payload = tonumber(ARGV[4]), tonumber(ARGV[5]), ARGV[6], ARGV[7], ARGV[8]

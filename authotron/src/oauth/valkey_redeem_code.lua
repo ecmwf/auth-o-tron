@@ -1,4 +1,5 @@
--- Bounded read or exact-snapshot consume on one primary; no mutation replay or rollback.
+-- Bounded read or exact-snapshot consume on one primary; no rollback. A consume resent
+-- after a lost reply finds the code gone and returns 'missing'.
 local index, key = KEYS[1], KEYS[2]
 local op, limit = ARGV[1], tonumber(ARGV[2])
 local function integer(n) return n and n > 0 and n <= 253402300799999 and n % 1 == 0 end

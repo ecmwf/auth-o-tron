@@ -1,3 +1,5 @@
+-- A run resent after a lost reply never consumes a form twice ('missing'); form, session
+-- and lease writes rewrite the same keys, and quotas may count one extra attempt.
 local prefix = KEYS[1]
 local op = ARGV[1]
 local session_wire_bytes_limit = tonumber(ARGV[#ARGV - 1])
