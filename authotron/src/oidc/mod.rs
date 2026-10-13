@@ -12,6 +12,7 @@
 
 pub mod discovery;
 pub mod http;
+pub mod id_token;
 pub mod jwks;
 #[cfg(test)]
 pub(crate) mod mock;

@@ -10,7 +10,8 @@
 //! plain HTTP on a loopback port (accepted only in this crate's tests).
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use rsa::{RsaPrivateKey, rand_core::OsRng, traits::PublicKeyParts};
+use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey, rand_core::OsRng, traits::PublicKeyParts};
 use serde_json::{Value, json};
 use std::sync::OnceLock;
 
@@ -23,7 +24,13 @@ pub(crate) async fn serve(router: axum::Router) -> String {
     base
 }
 
-/// Public half of a disposable P-256 test key; it protects nothing.
+/// Disposable P-256 key generated for these tests only; it protects nothing.
+const EC_TEST_KEY: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgN0Nz+OaqMJoJZFbE
+VxKJ/ZQUmVe9JuldC6pImgBXAJGhRANCAATFclXBwSMvaWLNYFfnO3Ah93e44gEZ
+JuyF4vfhOTy/dmGSy/BPTYJlURPMuar3vhjrXFITvAdkVtFvhBWyNFaJ
+-----END PRIVATE KEY-----
+";
 const EC_TEST_X: &str = "xXJVwcEjL2lizWBX5ztwIfd3uOIBGSbsheL34Tk8v3Y";
 const EC_TEST_Y: &str = "YZLL8E9NgmVRE8y5qve-GOtcUhO8B2RW0W-EFbI0Vok";
 
@@ -49,4 +56,15 @@ pub(crate) fn rsa_jwk(index: usize, kid: &str, alg: Option<&str>) -> Value {
 
 pub(crate) fn ec_jwk(kid: &str) -> Value {
     json!({"kty": "EC", "use": "sig", "crv": "P-256", "kid": kid, "x": EC_TEST_X, "y": EC_TEST_Y})
+}
+
+/// Signs `claims` with RSA key `index` (RS*/PS*) or the P-256 key (ES256).
+pub(crate) fn sign(claims: &Value, alg: Algorithm, kid: Option<&str>, index: usize) -> String {
+    let key = match alg {
+        Algorithm::ES256 => EncodingKey::from_ec_pem(EC_TEST_KEY.as_bytes()).unwrap(),
+        _ => EncodingKey::from_rsa_der(rsa_key(index).to_pkcs1_der().unwrap().as_bytes()),
+    };
+    let mut header = Header::new(alg);
+    header.kid = kid.map(str::to_owned);
+    jsonwebtoken::encode(&header, claims, &key).unwrap()
 }
