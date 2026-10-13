@@ -17,8 +17,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
-/// Regex form of the `roles_claim` rule implemented by [`valid_roles_claim`].
-pub const ROLES_CLAIM_PATTERN: &str = r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+){0,3}$";
+/// Regex form of the claim-path rule of `roles_claim` and `display_name_claim`,
+/// implemented by [`valid_claim_path`].
+pub const CLAIM_PATH_PATTERN: &str = r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+){0,3}$";
 const MAX_SCOPES: usize = 16;
 const MAX_ROLE_MAP: usize = 64;
 const MAX_ENDPOINT_ORIGINS: usize = 8;
@@ -65,8 +66,14 @@ pub struct OidcMethodConfig {
     pub username_claim: UsernameClaim,
     /// Dotted path to a string-array claim of upstream roles, e.g. `realm_access.roles`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(regex(pattern = ROLES_CLAIM_PATTERN))]
+    #[schemars(regex(pattern = CLAIM_PATH_PATTERN))]
     pub roles_claim: Option<String>,
+    /// Dotted path to the string claim shown as the signed-in name on the account and
+    /// consent pages, e.g. `name`. Display only: it never becomes the username, roles or
+    /// token content, and a missing or unusable value shows the username instead.
+    #[serde(default = "default_display_name_claim")]
+    #[schemars(regex(pattern = CLAIM_PATH_PATTERN))]
+    pub display_name_claim: String,
     /// Upstream role to local role; upstream roles without an entry are dropped.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     #[schemars(extend("maxProperties" = 64))]
@@ -163,6 +170,9 @@ fn default_algorithms() -> Vec<IdTokenAlgorithm> {
 fn default_clock_skew() -> u64 {
     60
 }
+fn default_display_name_claim() -> String {
+    "preferred_username".into()
+}
 fn default_http_timeout() -> u64 {
     5000
 }
@@ -219,9 +229,9 @@ fn valid_scope(value: &str) -> bool {
             .all(|c| c == 0x21 || (0x23..=0x5B).contains(&c) || (0x5D..=0x7E).contains(&c))
 }
 
-/// Matches [`ROLES_CLAIM_PATTERN`]. Valid: `roles`, `realm_access.roles`.
+/// Matches [`CLAIM_PATH_PATTERN`]. Valid: `roles`, `realm_access.roles`.
 /// Invalid: `a..b`, `.roles`, `roles.`, `$.roles`, five segments.
-pub fn valid_roles_claim(value: &str) -> bool {
+pub fn valid_claim_path(value: &str) -> bool {
     let segments: Vec<&str> = value.split('.').collect();
     segments.len() <= 4
         && segments.iter().all(|segment| {
@@ -290,7 +300,7 @@ impl OidcMethodConfig {
             return Err("OIDC id_token_algorithms must list at least one algorithm, once each");
         }
         match &self.roles_claim {
-            Some(claim) if !valid_roles_claim(claim) => {
+            Some(claim) if !valid_claim_path(claim) => {
                 return Err(
                     "OIDC roles_claim must be a dotted path of 1-4 segments of letters, digits, '_' or '-'",
                 );
@@ -302,6 +312,11 @@ impl OidcMethodConfig {
                 return Err("OIDC role_map requires roles_claim");
             }
             _ => {}
+        }
+        if !valid_claim_path(&self.display_name_claim) {
+            return Err(
+                "OIDC display_name_claim must be a dotted path of 1-4 segments of letters, digits, '_' or '-'",
+            );
         }
         if self.role_map.len() > MAX_ROLE_MAP
             || !self

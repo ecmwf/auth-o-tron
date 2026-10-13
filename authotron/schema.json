@@ -946,6 +946,12 @@
           ],
           "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+){0,3}$"
         },
+        "display_name_claim": {
+          "description": "Dotted path to the string claim shown as the signed-in name on the account and\nconsent pages, e.g. `name`. Display only: it never becomes the username, roles or\ntoken content, and a missing or unusable value shows the username instead.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+){0,3}$",
+          "default": "preferred_username"
+        },
         "role_map": {
           "description": "Upstream role to local role; upstream roles without an entry are dropped.",
           "type": "object",

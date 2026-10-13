@@ -13,11 +13,11 @@
 
 use super::{
     OidcError,
-    claims::map_identity,
+    claims::{display_name, map_identity},
     discovery::{Availability, Discovery, ProviderMetadata},
     flow::{FlowSecrets, authorization_url, issuer_parameter_valid, redirect_uri},
     http::IdpHttp,
-    id_token::{Expected, inspect, verify},
+    id_token::{Expected, IdTokenClaims, inspect, verify},
     jwks::Jwks,
     token_client::{self, ClientCredentials, exchange_code},
 };
@@ -37,11 +37,13 @@ const MAX_SECRET_BYTES: usize = 4096;
 /// An ID token is issued during the code exchange, so it is at most this old (plus skew).
 const MAX_ISSUED_AGE_SECONDS: u64 = 600;
 
-/// A completed sign-in: the mapped identity (not yet augmented), the provider's `sub`
-/// and the refresh token, when the provider issued one. Deliberately not Debug.
+/// A completed sign-in: the mapped identity (not yet augmented), the provider's `sub`,
+/// the display-only name and the refresh token, when the provider issued one.
+/// Deliberately not Debug.
 pub struct SignIn {
     pub user: User,
     pub subject: String,
+    pub display_name: Option<String>,
     pub refresh_token: Option<Zeroizing<String>>,
 }
 
@@ -162,17 +164,19 @@ impl OidcMethod {
         )
         .await?;
         let id_token = tokens.id_token.ok_or(OidcError::InvalidResponse)?;
-        let (subject, user) = self
-            .identity(
+        let claims = self
+            .verified_claims(
                 &metadata,
                 &id_token,
                 Some(secrets.nonce()),
                 self.config.max_authentication_age_seconds,
             )
             .await?;
+        let user = map_identity(&self.config, &claims)?;
         Ok(SignIn {
             user,
-            subject,
+            display_name: display_name(&self.config, &claims),
+            subject: claims.sub,
             refresh_token: tokens.refresh_token,
         })
     }
@@ -190,7 +194,7 @@ impl OidcMethod {
         )
         .await?;
         let identity = match &tokens.id_token {
-            Some(token) => self.identity(&metadata, token, None, None).await.map(Some),
+            Some(token) => self.identity(&metadata, token).await.map(Some),
             None => Ok(None),
         };
         Ok(Refreshed {
@@ -216,9 +220,20 @@ impl OidcMethod {
         &self,
         metadata: &ProviderMetadata,
         token: &str,
+    ) -> Result<(String, User), OidcError> {
+        let claims = self.verified_claims(metadata, token, None, None).await?;
+        let user = map_identity(&self.config, &claims)?;
+        Ok((claims.sub, user))
+    }
+
+    /// Validates the signature and claims of `token`.
+    async fn verified_claims(
+        &self,
+        metadata: &ProviderMetadata,
+        token: &str,
         nonce: Option<&str>,
         max_authentication_age_seconds: Option<u64>,
-    ) -> Result<(String, User), OidcError> {
+    ) -> Result<IdTokenClaims, OidcError> {
         let (alg, kid) = inspect(token, &self.config.id_token_algorithms)?;
         let key = self
             .jwks
@@ -228,7 +243,7 @@ impl OidcMethod {
             .duration_since(UNIX_EPOCH)
             .map_err(|_| OidcError::Unavailable)?
             .as_secs();
-        let claims = verify(
+        verify(
             token,
             alg,
             &key,
@@ -241,9 +256,7 @@ impl OidcMethod {
                 max_issued_age_seconds: MAX_ISSUED_AGE_SECONDS,
                 max_authentication_age_seconds,
             },
-        )?;
-        let user = map_identity(&self.config, &claims)?;
-        Ok((claims.sub, user))
+        )
     }
 }
 

@@ -40,6 +40,7 @@ fn minimal_method_uses_documented_defaults() {
     assert_eq!(config.http_timeout_ms, 5000);
     assert!(config.scopes.is_empty() && config.role_map.is_empty());
     assert!(config.roles_claim.is_none() && config.prompt.is_none() && !config.offline_access);
+    assert_eq!(config.display_name_claim, "preferred_username");
     let round_trip: OidcMethodConfig =
         serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
     assert_eq!(round_trip, config);
@@ -53,6 +54,7 @@ fn full_method_validates() {
         ("scopes", json!(["profile", "email", "api:read"])),
         ("id_token_algorithms", json!(["ES384", "EdDSA", "PS512"])),
         ("username_claim", json!("preferred_username")),
+        ("display_name_claim", json!("profile.full_name")),
         ("roles_claim", json!("realm_access.roles")),
         (
             "role_map",
@@ -122,6 +124,9 @@ fn invalid_fields_are_rejected_without_echoing_values() {
         ("id_token_algorithms", json!(["RS256", "RS256"])),
         ("roles_claim", json!("realm_access.roles")),
         ("role_map", json!({"upstream": "local"})),
+        ("display_name_claim", json!("")),
+        ("display_name_claim", json!("$.name")),
+        ("display_name_claim", json!("a.b.c.d.e")),
         ("max_authentication_age_seconds", json!(59)),
         ("max_authentication_age_seconds", json!(86401)),
         (
@@ -167,7 +172,7 @@ fn roles_claim_and_role_map_are_bounded_and_required_together() {
         ("$.roles", false),
         ("", false),
     ] {
-        assert_eq!(valid_roles_claim(claim), valid, "{claim}");
+        assert_eq!(valid_claim_path(claim), valid, "{claim}");
         let mut value = base();
         value["roles_claim"] = json!(claim);
         value["role_map"] = json!({"upstream": "local"});
@@ -213,7 +218,11 @@ fn schema_bounds_agree_with_validation() {
     let schema = serde_json::to_value(schemars::schema_for!(OidcMethodConfig)).unwrap();
     let properties = &schema["properties"];
     assert_eq!(properties["id"]["pattern"], BROWSER_ID_PATTERN);
-    assert_eq!(properties["roles_claim"]["pattern"], ROLES_CLAIM_PATTERN);
+    assert_eq!(properties["roles_claim"]["pattern"], CLAIM_PATH_PATTERN);
+    assert_eq!(
+        properties["display_name_claim"]["pattern"],
+        CLAIM_PATH_PATTERN
+    );
     assert_eq!(properties["role_map"]["maxProperties"], MAX_ROLE_MAP);
     assert_eq!(properties["scopes"]["maxItems"], MAX_SCOPES);
     assert_eq!(

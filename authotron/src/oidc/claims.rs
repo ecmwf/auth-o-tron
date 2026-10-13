@@ -8,7 +8,8 @@
 
 //! Maps validated ID token claims to an Auth-O-Tron identity: the configured username
 //! claim, roles only through the explicit `role_map`, and the display attributes the
-//! account page shows. Augmentation runs afterwards, as for every browser method.
+//! account page shows. Augmentation runs afterwards, as for every browser method. The
+//! display name is kept apart from the identity.
 
 use super::{OidcError, id_token::IdTokenClaims};
 use crate::{
@@ -22,6 +23,8 @@ const USERNAME_BYTES: usize = 128;
 const EMAIL_BYTES: usize = 320;
 const DISPLAY_NAME_BYTES: usize = 256;
 const MAX_UPSTREAM_ROLES: usize = 256;
+/// Longest display name, in characters after trimming.
+pub const DISPLAY_NAME_CHARS: usize = 64;
 
 fn bounded(value: &str, limit: usize) -> bool {
     !value.trim().is_empty() && value.len() <= limit && !value.chars().any(char::is_control)
@@ -99,6 +102,26 @@ pub fn map_identity(config: &OidcMethodConfig, token: &IdTokenClaims) -> Result<
         None,
         None,
     ))
+}
+
+/// `value` trimmed, when it is 1-64 characters without control characters. Valid:
+/// `" alice "` (as `alice`), `"Ada <Lovelace>"` (escaped where shown). Invalid: `""`,
+/// `"a\u{7}b"`, `"a\nb"`, 65 characters.
+pub fn display_text(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let length = value.chars().count();
+    ((1..=DISPLAY_NAME_CHARS).contains(&length) && !value.chars().any(char::is_control))
+        .then_some(value)
+}
+
+/// The name shown for a sign-in: the string at `display_name_claim`, if it is a valid
+/// [`display_text`]; otherwise `None`, and pages show the username. It takes no part in
+/// authorization, roles, augmentation, tokens or the username.
+pub fn display_name(config: &OidcMethodConfig, token: &IdTokenClaims) -> Option<String> {
+    claim_at(&token.claims, &config.display_name_claim)
+        .and_then(Value::as_str)
+        .and_then(display_text)
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -223,6 +246,56 @@ mod tests {
                 Some(OidcError::InvalidIdentity)
             );
         }
+    }
+
+    #[test]
+    fn display_name_comes_from_its_claim_and_falls_back_when_unusable() {
+        let default = config(json!({}));
+        assert_eq!(
+            display_name(&default, &token(alice())).as_deref(),
+            Some("alice")
+        );
+        let full = config(json!({"display_name_claim": "name"}));
+        assert_eq!(
+            display_name(&full, &token(alice())).as_deref(),
+            Some("Alice Demo")
+        );
+        let nested = config(json!({"display_name_claim": "profile.short"}));
+        let mut claims = alice();
+        claims["profile"] = json!({"short": "  Ali  "});
+        assert_eq!(
+            display_name(&nested, &token(claims)).as_deref(),
+            Some("Ali")
+        );
+        // HTML is kept as text here and escaped where it is shown.
+        let mut claims = alice();
+        claims["preferred_username"] = json!("<b>alice</b>");
+        assert_eq!(
+            display_name(&default, &token(claims)).as_deref(),
+            Some("<b>alice</b>")
+        );
+        for unusable in [
+            json!("a\u{7}b"),
+            json!("line\nbreak"),
+            json!("   "),
+            json!("n".repeat(DISPLAY_NAME_CHARS + 1)),
+            json!(7),
+            json!(["alice"]),
+        ] {
+            let mut claims = alice();
+            claims["preferred_username"] = unusable.clone();
+            assert_eq!(display_name(&default, &token(claims)), None, "{unusable}");
+        }
+        let mut claims = alice();
+        claims.as_object_mut().unwrap().remove("preferred_username");
+        assert_eq!(display_name(&default, &token(claims.clone())), None);
+        // The display name never changes the mapped identity.
+        assert_eq!(
+            map_identity(&default, &token(claims)).unwrap().username,
+            map_identity(&default, &token(alice())).unwrap().username
+        );
+        let boundary = "é".repeat(DISPLAY_NAME_CHARS);
+        assert_eq!(display_text(&boundary), Some(boundary.as_str()));
     }
 
     #[test]

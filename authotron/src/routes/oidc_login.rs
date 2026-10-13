@@ -315,6 +315,7 @@ async fn authorize(
                     user,
                     subject,
                     refresh_token,
+                    ..
                 } = match oidc.complete(iss, code, secrets).await {
                     Ok(signed_in) => signed_in,
                     Err(error) => return Ok((None, Err(SignInError::Provider(error)))),
