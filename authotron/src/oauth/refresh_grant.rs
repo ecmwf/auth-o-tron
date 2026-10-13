@@ -12,8 +12,8 @@
 use super::{
     authentication::projection,
     refresh::{
-        Presented, RefreshGrant, RefreshStoreError, RefreshToken, Revocation, Rotated,
-        effective_absolute,
+        EndedUpstream, Presented, RefreshGrant, RefreshStoreError, RefreshToken, Revocation,
+        Rotated, effective_absolute,
     },
     refresh_store::MemoryRefreshStore,
     runtime::OAuthRuntime,
@@ -140,8 +140,9 @@ impl OAuthRuntime {
             .with_new_family(response, &grant, upstream.as_deref(), browser, metrics)
             .await)
     }
-    /// `upstream` is the sealed upstream grant of a coupled family.
-    async fn with_new_family(
+    /// `upstream` is the sealed upstream grant of a coupled family; it is revoked at the
+    /// provider when no family holds it.
+    pub(super) async fn with_new_family(
         &self,
         response: TokenResponse,
         grant: &RefreshGrant,
@@ -149,11 +150,18 @@ impl OAuthRuntime {
         browser: &BrowserLoginState,
         metrics: &Metrics,
     ) -> TokenResponse {
+        let unheld = || {
+            upstream.map(|sealed| EndedUpstream {
+                grant: grant.clone(),
+                sealed: sealed.to_owned(),
+            })
+        };
         let (Some(backend), Some(policy), Some(method)) = (
             &self.refresh,
             self.refresh_policy(&grant.client_id),
             browser.method(&grant.method),
         ) else {
+            self.end_upstream(unheld(), browser, metrics);
             return response;
         };
         let policy = &method_policy(policy, method);
@@ -163,11 +171,13 @@ impl OAuthRuntime {
                 .now()
                 .await
                 .map_err(|_| RefreshStoreError::Unavailable)?;
-            refresh_dispatch!(backend, issue(grant, token.hash(), now, policy, upstream))?;
-            Ok::<_, RefreshStoreError>(token)
+            let evicted =
+                refresh_dispatch!(backend, issue(grant, token.hash(), now, policy, upstream))?;
+            Ok::<_, RefreshStoreError>((token, evicted))
         };
         match issued.await {
-            Ok(token) => {
+            Ok((token, evicted)) => {
+                self.end_upstream(evicted, browser, metrics);
                 metrics.record_refresh_token(RefreshTokenEvent::Issued);
                 response.with_refresh_token(&token)
             }
@@ -179,6 +189,7 @@ impl OAuthRuntime {
                     "refresh token family not stored; returning the access token alone"
                 );
                 metrics.record_refresh_token(RefreshTokenEvent::IssueFailed);
+                self.end_upstream(unheld(), browser, metrics);
                 response
             }
         }
@@ -212,8 +223,9 @@ impl OAuthRuntime {
         }
         let family_id = family.family_id.clone();
         let revoke = move |reason: RefreshGrantError| async move {
-            refresh_dispatch!(backend, revoke_family(&family_id))?;
+            let ended = refresh_dispatch!(backend, revoke_family(&family_id))?;
             metrics.record_refresh_token(RefreshTokenEvent::FamilyRevoked);
+            self.end_upstream(ended, browser, metrics);
             Err::<TokenResponse, _>(reason)
         };
         // A removed login method or client opt-out ends the family.

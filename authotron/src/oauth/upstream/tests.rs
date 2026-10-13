@@ -12,9 +12,11 @@ use super::*;
 use crate::{
     auth::Auth,
     config::ConfigV2,
+    models::user::User,
     oauth::{
         refresh::RefreshToken,
         refresh_grant::{RefreshBackend, RefreshGrantError, RefreshRequest},
+        tokens::{TokenIssuer, TokenResponse},
     },
     oidc::{
         mock::{CLIENT_ID, CLIENT_SECRET, MockIdp, SUBJECT, rsa_key},
@@ -164,6 +166,14 @@ impl Coupled {
         }
         panic!("expected {count} upstream revocations");
     }
+    /// An access-token response for a new family of the signed-in user.
+    fn response(&self, now_ms: u64) -> TokenResponse {
+        let user = User::new("idp".into(), SUBJECT.into(), Some(vec![]), None, None, None);
+        TokenIssuer::new(&self.runtime.config, &self.runtime.keys)
+            .unwrap()
+            .issue_refreshed("desktop", RESOURCE, &["read".into()], &user, now_ms)
+            .unwrap()
+    }
     pub(in crate::oauth) fn upstream_events(&self, event: &str) -> u64 {
         let output = self.metrics.render().unwrap();
         let line = format!("authotron_oauth_upstream_tokens_total{{event=\"{event}\"}} ");
@@ -243,4 +253,63 @@ async fn unopenable_grants_are_skipped_and_unsupported_providers_counted() {
     }
     assert_eq!(coupled.upstream_events("revocation_unsupported"), 1);
     assert!(coupled.idp.state.revoked.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn lifetime_caps_evictions_and_unheld_grants_revoke_upstream() {
+    let coupled = coupled(|config| {
+        config["oauth"]["max_refresh_token_families_per_user"] = json!(1);
+        config["ui"]["oidc"][0]["refresh_max_lifetime_seconds"] = json!(300);
+    })
+    .await;
+    let now = coupled.runtime.now().await.unwrap();
+    // Older than the method's lifetime cap, though within the client's: policy ends it.
+    let capped = coupled.family_at("offline-capped", now - 301_000).await;
+    assert_eq!(
+        coupled.refresh(&capped).await.err(),
+        Some(RefreshGrantError::InvalidGrant)
+    );
+    assert_eq!(coupled.revoked(1).await, ["offline-capped"]);
+    // At the per-user cap of one, a new family evicts the previous one.
+    coupled.family("offline-evicted").await;
+    let grant = coupled.grant();
+    let sealed = coupled.seal(&grant, "offline-current");
+    let response = coupled
+        .runtime
+        .with_new_family(
+            coupled.response(now),
+            &grant,
+            Some(&sealed),
+            &coupled.browser,
+            &coupled.metrics,
+        )
+        .await;
+    assert!(serde_json::to_value(response).unwrap()["refresh_token"].is_string());
+    assert_eq!(coupled.revoked(2).await[1], "offline-evicted");
+    // A grant that no family holds, here for a client without refresh tokens, is revoked.
+    let mut unheld = coupled.grant();
+    unheld.client_id = "no-refresh".into();
+    let sealed = coupled.seal(&unheld, "offline-unheld");
+    let response = coupled
+        .runtime
+        .with_new_family(
+            coupled.response(now),
+            &unheld,
+            Some(&sealed),
+            &coupled.browser,
+            &coupled.metrics,
+        )
+        .await;
+    assert!(serde_json::to_value(response).unwrap()["refresh_token"].is_null());
+    assert_eq!(coupled.revoked(3).await[2], "offline-unheld");
+    assert!(
+        coupled
+            .idp
+            .state
+            .revoked
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|token| token != "offline-current")
+    );
 }
