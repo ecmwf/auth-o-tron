@@ -62,7 +62,24 @@ SECRET_KEYS = {
     "cookie-secret",
     "valkey-password",
     "demo-user-password",
+    "authotron-client-secret",
+    "e2e-admin-secret",
 }
+# Auth-O-Tron's OIDC sign-in method on the login playground; render_api_key.py
+# configures the same method id and client id (guarded by test_render_sso.py).
+AUTHOTRON_METHOD_ID = "demo-sso"
+AUTHOTRON_CLIENT_ID = "authotron-playground"
+# Fixed ids: `sub` of the demo user stays stable across Keycloak restarts, and the
+# e2e admin addresses the client's offline sessions without client lookups.
+AUTHOTRON_CLIENT_UUID = "c307be16-5d3f-43da-9130-f74645cdf791"
+DEMO_USER_ID = "cde07bd3-b04d-4390-b75c-e7bfb4135940"
+# Service account for end-to-end checks through `kubectl port-forward` only: the
+# admin API has no ingress route.
+E2E_ADMIN_CLIENT_ID = "authotron-e2e-admin"
+E2E_ADMIN_ROLES = ("manage-users", "view-users")
+# Offline sessions follow the playground's OAuth refresh-token lifetimes.
+OFFLINE_IDLE_SECONDS = 30 * 86400
+OFFLINE_MAX_SECONDS = 90 * 86400
 APP_PATHS = (
     ("/", "Exact"),
     ("/account", "Exact"),
@@ -135,6 +152,7 @@ class Profile:
             (base + "/.well-known/openid-configuration", "ImplementationSpecific"),
             (base + "/protocol/openid-connect/auth", "Exact"),
             (base + "/protocol/openid-connect/token", "Exact"),
+            (base + "/protocol/openid-connect/revoke", "Exact"),
             (base + "/protocol/openid-connect/certs", "Exact"),
             (base + "/protocol/openid-connect/userinfo", "Exact"),
             (base + "/login-actions/", "Prefix"),
@@ -144,6 +162,10 @@ class Profile:
     @property
     def callback(self):
         return f"https://{self.app_host}/oauth2/callback"
+
+    @property
+    def authotron_callback(self):
+        return f"{self.ui_origin}/login/method/{AUTHOTRON_METHOD_ID}/callback"
 
     @property
     def start_url(self):
@@ -186,6 +208,12 @@ def realm_config(profile):
         "ssoSessionMaxLifespan": SESSION_SECONDS,
         "clientSessionIdleTimeout": SESSION_SECONDS,
         "clientSessionMaxLifespan": SESSION_SECONDS,
+        # Every refresh rotates the refresh token and spends the old one.
+        "revokeRefreshToken": True,
+        "refreshTokenMaxReuse": 0,
+        "offlineSessionIdleTimeout": OFFLINE_IDLE_SECONDS,
+        "offlineSessionMaxLifespanEnabled": True,
+        "offlineSessionMaxLifespan": OFFLINE_MAX_SECONDS,
         "clients": [
             {
                 "clientId": profile.client_id,
@@ -214,10 +242,44 @@ def realm_config(profile):
                         },
                     }
                 ],
-            }
+            },
+            {
+                "id": AUTHOTRON_CLIENT_UUID,
+                "clientId": AUTHOTRON_CLIENT_ID,
+                "enabled": True,
+                "protocol": "openid-connect",
+                "publicClient": False,
+                "secret": "${AUTHOTRON_CLIENT_SECRET}",
+                "standardFlowEnabled": True,
+                "directAccessGrantsEnabled": False,
+                "implicitFlowEnabled": False,
+                "serviceAccountsEnabled": False,
+                "consentRequired": False,
+                "redirectUris": [profile.authotron_callback],
+                "webOrigins": [],
+                # `basic` provides `sub` and `auth_time`; offline access is optional.
+                "defaultClientScopes": ["basic", "profile", "email"],
+                "optionalClientScopes": ["offline_access"],
+                "attributes": {"pkce.code.challenge.method": "S256"},
+            },
+            {
+                "clientId": E2E_ADMIN_CLIENT_ID,
+                "enabled": True,
+                "protocol": "openid-connect",
+                "publicClient": False,
+                "secret": "${E2E_ADMIN_SECRET}",
+                "standardFlowEnabled": False,
+                "directAccessGrantsEnabled": False,
+                "implicitFlowEnabled": False,
+                "serviceAccountsEnabled": True,
+                "consentRequired": False,
+                "redirectUris": [],
+                "webOrigins": [],
+            },
         ],
         "users": [
             {
+                "id": DEMO_USER_ID,
                 "username": "alice",
                 "enabled": True,
                 "firstName": "Alice",
@@ -225,6 +287,7 @@ def realm_config(profile):
                 "email": "alice@example.org",
                 "emailVerified": True,
                 "requiredActions": [],
+                "realmRoles": [f"default-roles-{profile.realm}", "offline_access"],
                 "credentials": [
                     {
                         "type": "password",
@@ -232,7 +295,13 @@ def realm_config(profile):
                         "temporary": False,
                     }
                 ],
-            }
+            },
+            {
+                "username": "service-account-" + E2E_ADMIN_CLIENT_ID,
+                "enabled": True,
+                "serviceAccountClientId": E2E_ADMIN_CLIENT_ID,
+                "clientRoles": {"realm-management": list(E2E_ADMIN_ROLES)},
+            },
         ],
     }
 
@@ -499,6 +568,8 @@ def render_public_sso(profile, assets):
             ],
             env=[
                 secret_env("BROWSER_CLIENT_SECRET", "client-secret"),
+                secret_env("AUTHOTRON_CLIENT_SECRET", "authotron-client-secret"),
+                secret_env("E2E_ADMIN_SECRET", "e2e-admin-secret"),
                 secret_env("DEMO_USER_PASSWORD", "demo-user-password"),
                 {"name": "JAVA_OPTS_KC_HEAP", "value": "-Xms128m -Xmx512m"},
             ],
@@ -805,12 +876,17 @@ def load_or_create_secrets(path, *, project=None):
                 bundle = json.load(stream)
             except (ValueError, UnicodeError):
                 raise ValueError("invalid secret bundle file") from None
+        if not isinstance(bundle, dict) or not set(bundle) <= SECRET_KEYS:
+            raise ValueError("invalid secret bundle keys")
+        # A bundle from before a key was introduced gains only the missing keys.
+        missing = SECRET_KEYS - set(bundle)
+        bundle.update({key: secrets.token_urlsafe(32) for key in missing})
         validate_secrets(bundle)
         cookie_bytes = base64.b64decode(
             bundle["cookie-secret"], altchars=b"-_", validate=True
         )
         normalized = base64.urlsafe_b64encode(cookie_bytes).decode()
-        if bundle["cookie-secret"] != normalized:
+        if missing or bundle["cookie-secret"] != normalized:
             bundle["cookie-secret"] = normalized
             write_file(path, json.dumps(bundle, sort_keys=True) + "\n", private=True)
         return bundle

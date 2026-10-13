@@ -87,6 +87,8 @@ class RendererTests(unittest.TestCase):
     def test_credential_rotation_rolls_only_consuming_roles(self):
         consumers = {
             "client-secret": {"keycloak", "oauth2-proxy"},
+            "authotron-client-secret": {"keycloak"},
+            "e2e-admin-secret": {"keycloak"},
             "demo-user-password": {"keycloak"},
             "cookie-secret": {"oauth2-proxy"},
             "valkey-password": {"valkey", "oauth2-proxy"},
@@ -299,6 +301,63 @@ class RendererTests(unittest.TestCase):
         self.assertIn("https://ui.example.org/static/login.css", pages["account.html"])
         self.assertNotIn("{{", str(pages))
 
+    def test_authotron_client_offline_sessions_and_e2e_admin(self):
+        realm = renderer.realm_config(self.profile)
+        for key, value in {
+            "revokeRefreshToken": True,
+            "refreshTokenMaxReuse": 0,
+            "offlineSessionIdleTimeout": 30 * 86400,
+            "offlineSessionMaxLifespanEnabled": True,
+            "offlineSessionMaxLifespan": 90 * 86400,
+        }.items():
+            self.assertEqual(realm[key], value, key)
+        clients = {client["clientId"]: client for client in realm["clients"]}
+        authotron = clients["authotron-playground"]
+        self.assertEqual(authotron["id"], renderer.AUTHOTRON_CLIENT_UUID)
+        self.assertEqual(authotron["secret"], "${AUTHOTRON_CLIENT_SECRET}")
+        self.assertEqual(
+            authotron["redirectUris"],
+            ["https://ui.example.org/login/method/demo-sso/callback"],
+        )
+        self.assertEqual(
+            authotron["defaultClientScopes"], ["basic", "profile", "email"]
+        )
+        self.assertEqual(authotron["optionalClientScopes"], ["offline_access"])
+        self.assertEqual(authotron["attributes"]["pkce.code.challenge.method"], "S256")
+        self.assertTrue(authotron["standardFlowEnabled"])
+        for key in (
+            "publicClient",
+            "directAccessGrantsEnabled",
+            "serviceAccountsEnabled",
+        ):
+            self.assertFalse(authotron[key], key)
+        admin = clients["authotron-e2e-admin"]
+        self.assertEqual(admin["secret"], "${E2E_ADMIN_SECRET}")
+        self.assertTrue(admin["serviceAccountsEnabled"])
+        self.assertFalse(admin["standardFlowEnabled"] or admin["redirectUris"])
+        users = {user["username"]: user for user in realm["users"]}
+        self.assertEqual(users["alice"]["id"], renderer.DEMO_USER_ID)
+        self.assertEqual(
+            users["alice"]["realmRoles"], ["default-roles-aviso-demo", "offline_access"]
+        )
+        account = users["service-account-authotron-e2e-admin"]
+        self.assertEqual(account["serviceAccountClientId"], "authotron-e2e-admin")
+        self.assertEqual(
+            account["clientRoles"], {"realm-management": ["manage-users", "view-users"]}
+        )
+        self.assertNotIn("credentials", account)
+        env = {
+            item["name"]: item["valueFrom"]["secretKeyRef"]["key"]
+            for item in self.pod("keycloak")["containers"][0]["env"]
+            if "valueFrom" in item
+        }
+        self.assertEqual(env["AUTHOTRON_CLIENT_SECRET"], "authotron-client-secret")
+        self.assertEqual(env["E2E_ADMIN_SECRET"], "e2e-admin-secret")
+        self.assertIn(
+            ("/realms/aviso-demo/protocol/openid-connect/revoke", "Exact"),
+            self.profile.issuer_paths,
+        )
+
     def test_exact_scoped_ingresses_and_private_services(self):
         expected = {
             "keycloak": ("issuer.example.org", self.profile.issuer_paths),
@@ -440,6 +499,27 @@ class RendererTests(unittest.TestCase):
             bundle = dict(self.bundle, **{"cookie-secret": invalid})
             with self.assertRaises(ValueError):
                 renderer.secret_resource(bundle)
+
+    def test_older_bundles_gain_only_the_missing_keys(self):
+        path = self.root / "older-secrets.json"
+        older = {
+            key: value
+            for key, value in self.bundle.items()
+            if key not in ("authotron-client-secret", "e2e-admin-secret")
+        }
+        renderer.write_file(path, json.dumps(older), private=True)
+        loaded = renderer.load_or_create_secrets(path)
+        self.assertEqual(set(loaded), renderer.SECRET_KEYS)
+        for key, value in older.items():
+            self.assertEqual(loaded[key], value, key)
+        for key in ("authotron-client-secret", "e2e-admin-secret"):
+            self.assertRegex(loaded[key], r"^[A-Za-z0-9_-]{43}$")
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(json.loads(path.read_text()), loaded)
+        self.assertEqual(renderer.load_or_create_secrets(path), loaded)
+        path.write_text(json.dumps(dict(older, unexpected="fake-" + "x" * 32)))
+        with self.assertRaises(ValueError):
+            renderer.load_or_create_secrets(path)
 
     def test_cookie_secret_migrates_encoding_without_rotating_key_bytes(self):
         path = self.root / "cookie-secrets.json"

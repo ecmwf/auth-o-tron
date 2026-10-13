@@ -51,6 +51,33 @@ Failed loads clear previous identity. No logout is implemented: exclude the unsa
 GET logout endpoint from the demo's exposed routes. The Auth-O-Tron link is only
 navigation, not logout.
 
+## Auth-O-Tron OIDC sign-in and e2e admin
+
+The same realm also registers Auth-O-Tron itself as a relying party, used by the
+login playground's `demo-sso` method:
+
+- Client `authotron-playground`: confidential, PKCE S256, the single redirect URI
+  `https://<ui-host>/login/method/demo-sso/callback`, default scopes `basic`,
+  `profile` and `email`, optional scope `offline_access`. Its secret is the bundle
+  key `authotron-client-secret`; pass the bundle file to
+  `../ecmwf-api-key/render_api_key.py --sso-secret-file`.
+- Realm-wide strict refresh-token rotation (`revokeRefreshToken`, reuse 0) and
+  offline sessions of 30 days idle and at most 90 days, matching the playground's
+  OAuth refresh-token lifetimes.
+- User `alice` has a fixed id, so her `sub` (the Auth-O-Tron username) survives
+  Keycloak restarts, and the default roles, which include `offline_access`.
+- Client `authotron-e2e-admin`: a service account with `realm-management`
+  `manage-users` and `view-users`, secret `e2e-admin-secret`, for end-to-end
+  checks such as disabling `alice` or listing her offline sessions. The admin API
+  has no ingress route; reach it only through
+  `kubectl port-forward service/authotron-sso-keycloak`.
+
+Keycloak's database is ephemeral: a Keycloak restart ends every offline session,
+so Auth-O-Tron refresh-token families coupled to them end at their next refresh.
+Strict rotation applies to OAuth2-proxy's own refreshes too.
+
+Existing bundles gain the two new keys on the next render; other values are kept.
+
 ## Sessions and refresh
 
 OAuth tokens remain server-side in OAuth2-proxy's Valkey session store, with no
@@ -98,7 +125,8 @@ registration/proxy configuration derive from one immutable profile.
 ### Credential rotation and coordinated replacement
 
 Pod templates carry a SHA-256 checksum of only the Secret keys that each role
-consumes: Keycloak uses the client secret and demo password; OAuth2-proxy uses
+consumes: Keycloak uses both client secrets, the e2e admin secret and the demo
+password; OAuth2-proxy uses
 the client secret, cookie secret and Valkey password; Valkey uses its password.
 Only digests appear in annotations, never credential values. Keep generated,
 high-entropy credentials. The unchanged bundle renders identical checksums;
