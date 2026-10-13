@@ -185,3 +185,30 @@ async fn a_missing_offline_token_fails_the_sign_in() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(text(response).await.contains("Sign-in not completed"));
 }
+
+#[tokio::test]
+async fn denied_consent_and_policy_denial_revoke_the_upstream_grant() {
+    let (fixture, _files) = offline_fixture(true).await;
+    let mut jar = Jar::default();
+    sign_in(&fixture, &mut jar).await;
+    let redirect = decide(&fixture, &jar, "deny").await;
+    assert!(redirect.as_str().contains("error=access_denied"));
+    assert_eq!(revoked(&fixture, 1).await.len(), 1);
+    // Without the mapped role the scope policy denies the authorization at sign-in.
+    *fixture.idp.state.claims.lock().unwrap() = json!({"realm_access": {"roles": ["other"]}});
+    let (_, response) = sign_in(&fixture, &mut jar).await;
+    assert!(location(&response).contains("error=access_denied"));
+    let revoked = revoked(&fixture, 2).await;
+    assert!(!fixture.idp.state.refresh_token_live(&revoked[1]));
+}
+
+#[tokio::test]
+async fn clients_without_the_opt_in_never_request_offline_access() {
+    let (fixture, _files) = offline_fixture(false).await;
+    let mut jar = Jar::default();
+    let (request, _) = sign_in(&fixture, &mut jar).await;
+    assert_eq!(scope(&request), "openid");
+    let token = approve_and_exchange(&fixture, &jar).await;
+    assert_eq!(refresh(&fixture, &token).await.0, StatusCode::OK);
+    assert_eq!(fixture.idp.state.refresh_requests.load(Ordering::SeqCst), 0);
+}
