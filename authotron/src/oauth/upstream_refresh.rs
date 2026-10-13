@@ -40,7 +40,7 @@ enum Outcome {
     Unavailable,
     /// The upstream grant is gone or cannot be opened: end the family only.
     Dead,
-    /// The identity changed or failed validation: end the family and its upstream grant.
+    /// The identity changed: end the family and its upstream grant.
     Changed,
 }
 
@@ -191,8 +191,7 @@ impl OAuthRuntime {
             {
                 Outcome::Roles(user.roles)
             }
-            Ok(Some(_))
-            | Err(OidcError::InvalidIdToken | OidcError::InvalidIdentity | OidcError::Rejected) => {
+            Ok(Some(_)) | Err(OidcError::InvalidIdentity) => {
                 tracing::warn!(
                     event_name = "oauth.upstream.identity_changed",
                     event_domain = "oauth",
@@ -201,7 +200,17 @@ impl OAuthRuntime {
                 );
                 Outcome::Changed
             }
-            Err(_) => Outcome::Unavailable,
+            // An unverifiable ID token may stem from key rotation or clock skew.
+            Err(error) => {
+                tracing::warn!(
+                    event_name = "oauth.upstream.id_token_unverified",
+                    event_domain = "oauth",
+                    method = %grant.method,
+                    reason = error.label(),
+                    "refreshed ID token not verified"
+                );
+                Outcome::Unavailable
+            }
             // Without an ID token only a `sub` username and no mapped roles stay valid.
             Ok(None)
                 if oidc.config().username_claim == UsernameClaim::Sub

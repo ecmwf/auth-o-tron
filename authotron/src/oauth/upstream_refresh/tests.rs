@@ -222,3 +222,19 @@ async fn a_held_lock_makes_the_refresh_unavailable() {
         .unwrap();
     coupled.refresh(&token).await.unwrap();
 }
+
+#[tokio::test]
+async fn an_unverified_refreshed_id_token_keeps_the_family_and_its_rotation() {
+    let coupled = coupled(|_| {}).await;
+    let (token, original) = live_family(&coupled).await;
+    *coupled.idp.state.claims.lock().unwrap() = json!({"aud": "other-client"});
+    assert_eq!(
+        coupled.refresh(&token).await.err(),
+        Some(RefreshGrantError::Unavailable)
+    );
+    let rotated = held(&coupled, &token).await;
+    assert_ne!(rotated, original);
+    assert!(coupled.idp.state.refresh_token_live(&rotated));
+    *coupled.idp.state.claims.lock().unwrap() = json!({});
+    coupled.refresh(&token).await.unwrap();
+}

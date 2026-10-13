@@ -269,8 +269,8 @@ clients never request it.
 | Provider refreshed the grant | as for other families | rotated | stored (rotated if the provider rotated it) |
 | Provider answers `invalid_grant` (expired, revoked, account disabled) | 400 `invalid_grant` | revoked | not revoked |
 | Sealed grant cannot be opened (key removed, other binding) | 400 `invalid_grant` | revoked | not revoked |
-| `sub` or username changed, refreshed ID token invalid | 400 `invalid_grant` | revoked | revoked |
-| Provider unavailable, client refused, malformed answer, ID token needed but missing, lock still held, rotated token not stored | 503 `server_error` | kept | kept |
+| `sub` or username changed, refreshed claims unusable | 400 `invalid_grant` | revoked | revoked |
+| Provider unavailable, client refused, malformed answer, refreshed ID token not verified, ID token needed but missing, lock still held, rotated token not stored | 503 `server_error` | kept | kept |
 
 **Keys.** Each key file holds 32 random bytes in standard Base64 (44 characters);
 up to four keys may be listed. New grants are sealed with `active_kid`; older keys
