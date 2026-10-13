@@ -33,7 +33,7 @@ pub struct OAuthSigningKey {
     pub public_key_file: Option<PathBuf>,
 }
 
-fn valid_kid(value: &str) -> bool {
+pub(super) fn valid_kid(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
         && value
