@@ -149,6 +149,7 @@ async fn chooser_offers_oidc_methods_as_plain_navigation() {
     assert!(
         html.contains("href=\"/login/method/password\" data-login-dialog=\"method\">Password</a>")
     );
+    assert!(oidc_up(&fixture.state, 1).await);
 }
 
 #[tokio::test]
@@ -299,6 +300,19 @@ async fn unreachable_providers_are_refused_and_shown_unavailable() {
         "<button class=\"login-action\" type=\"button\" disabled>Demo SSO (temporarily unavailable)</button>"
     ));
     assert!(!html.contains("href=\"/login/method/demo-sso\""));
+    assert!(oidc_up(&fixture.state, 0).await);
+}
+
+/// Waits for the discovery task to report `authotron_oidc_up` as `value`.
+async fn oidc_up(state: &AppState, value: u8) -> bool {
+    let line = format!("authotron_oidc_up{{method=\"demo-sso\"}} {value}");
+    for _ in 0..200 {
+        if state.metrics.render().unwrap().contains(&line) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    false
 }
 
 #[tokio::test]

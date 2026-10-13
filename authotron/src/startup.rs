@@ -37,7 +37,6 @@ pub async fn build_app(
     let browser = Arc::new(browser);
     if direct_login {
         browser.start_cleanup_task();
-        browser.start_oidc_discovery_task();
         let methods: Vec<String> = browser
             .methods()
             .iter()
@@ -62,6 +61,9 @@ pub async fn build_app(
     ));
 
     let metrics = Metrics::new();
+    if direct_login {
+        browser.start_oidc_discovery_task(metrics.clone());
+    }
 
     // Pre-initialise per-provider/augmenter/realm series at zero from the
     // configured set so alert rules evaluate against existing series.

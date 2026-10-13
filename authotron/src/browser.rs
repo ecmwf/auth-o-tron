@@ -912,7 +912,8 @@ impl BrowserLoginState {
 
     /// Fetches OIDC provider metadata now and then periodically, so the chooser reflects
     /// provider availability and a recovered provider becomes usable without a click.
-    pub(crate) fn start_oidc_discovery_task(self: &Arc<Self>) {
+    /// Each method's availability is reported as `authotron_oidc_up`.
+    pub(crate) fn start_oidc_discovery_task(self: &Arc<Self>, metrics: Metrics) {
         if self.methods.iter().all(|method| method.oidc().is_none()) {
             return;
         }
@@ -929,15 +930,20 @@ impl BrowserLoginState {
                     let Some(oidc) = method.oidc() else {
                         continue;
                     };
-                    if let Err(error) = oidc.metadata().await {
-                        tracing::warn!(
-                            event_name = "browser.oidc.discovery_failed",
-                            event_domain = "browser",
-                            method = %method.flow.method,
-                            reason = error.label(),
-                            "OIDC provider metadata unavailable"
-                        );
-                    }
+                    let up = match oidc.metadata().await {
+                        Ok(_) => true,
+                        Err(error) => {
+                            tracing::warn!(
+                                event_name = "browser.oidc.discovery_failed",
+                                event_domain = "browser",
+                                method = %method.flow.method,
+                                reason = error.label(),
+                                "OIDC provider metadata unavailable"
+                            );
+                            false
+                        }
+                    };
+                    metrics.set_oidc_up(&method.flow.method, up);
                 }
             }
         });

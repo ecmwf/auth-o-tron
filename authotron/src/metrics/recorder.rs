@@ -177,6 +177,7 @@ pub struct Metrics {
     browser_duration: HistogramVec,
     oauth_refresh_tokens: IntCounterVec,
     oauth_upstream_tokens: IntCounterVec,
+    oidc_up: IntGaugeVec,
 }
 
 /// Bounded `event` label values for refresh-token lifecycle counters.
@@ -435,6 +436,15 @@ impl Metrics {
         for event in UpstreamTokenEvent::ALL {
             oauth_upstream_tokens.with_label_values(&[event.label()]);
         }
+        let oidc_up = register_int_gauge_vec_with_registry!(
+            Opts::new(
+                "authotron_oidc_up",
+                "1 while an OIDC sign-in method's provider metadata is available, else 0",
+            ),
+            &["method"],
+            registry.clone()
+        )
+        .expect("register OIDC availability");
         Metrics {
             registry,
             auth_requests_total,
@@ -451,6 +461,7 @@ impl Metrics {
             browser_duration,
             oauth_refresh_tokens,
             oauth_upstream_tokens,
+            oidc_up,
         }
     }
 
@@ -458,6 +469,11 @@ impl Metrics {
         self.oauth_refresh_tokens
             .with_label_values(&[event.label()])
             .inc();
+    }
+
+    /// `method` is a configured OIDC method id, so the label set stays bounded.
+    pub fn set_oidc_up(&self, method: &str, up: bool) {
+        self.oidc_up.with_label_values(&[method]).set(i64::from(up));
     }
 
     pub fn record_upstream_token(&self, event: UpstreamTokenEvent) {
