@@ -14,7 +14,8 @@
 //! username; its mapped roles replace the family's provider roles for this refresh.
 
 use super::{
-    refresh::{EndedUpstream, Presented, RefreshFamily, UpstreamStored, random_id},
+    audit::FamilyEnd,
+    refresh::{EndedFamily, Presented, RefreshFamily, UpstreamStored, random_id},
     refresh_grant::{RefreshBackend, RefreshGrantError, refresh_dispatch},
     runtime::OAuthRuntime,
     upstream::binding,
@@ -43,12 +44,11 @@ enum Outcome {
     Unavailable,
     /// Another refresh of the family held the lock for the whole wait.
     Busy,
-    /// The provider refused the grant, or it is gone or cannot be opened.
-    Dead,
-    /// The identity changed.
-    Changed,
+    /// The provider refused the grant, the grant is gone or cannot be opened, or the
+    /// identity changed: end the family.
+    Ended(FamilyEnd),
     /// The presented token turned out to be reused; the store ended the family.
-    Reused(Option<EndedUpstream>),
+    Reused(Box<EndedFamily>),
 }
 
 impl OAuthRuntime {
@@ -78,8 +78,10 @@ impl OAuthRuntime {
             Ok(Outcome::Unavailable | Outcome::Busy) | Err(Unavailable) => {
                 Some(UpstreamTokenEvent::Unavailable)
             }
-            Ok(Outcome::Dead) => Some(UpstreamTokenEvent::InvalidGrant),
-            Ok(Outcome::Changed) => Some(UpstreamTokenEvent::IdentityChanged),
+            Ok(Outcome::Ended(FamilyEnd::IdentityChanged)) => {
+                Some(UpstreamTokenEvent::IdentityChanged)
+            }
+            Ok(Outcome::Ended(_)) => Some(UpstreamTokenEvent::InvalidGrant),
             Ok(Outcome::Reused(_)) | Err(_) => None,
         };
         if let Some(event) = event {
@@ -99,14 +101,12 @@ impl OAuthRuntime {
             }
             Outcome::Reused(ended) => {
                 metrics.record_refresh_token(RefreshTokenEvent::ReuseDetected);
-                metrics.record_refresh_token(RefreshTokenEvent::FamilyRevoked);
-                self.end_upstream(ended, browser, metrics);
+                self.families_ended([*ended], FamilyEnd::ReuseDetected, browser, metrics);
                 Err(InvalidGrant)
             }
-            Outcome::Dead | Outcome::Changed => {
+            Outcome::Ended(reason) => {
                 let revoked = refresh_dispatch!(backend, revoke_family(&family.family_id))?;
-                metrics.record_refresh_token(RefreshTokenEvent::FamilyRevoked);
-                self.end_upstream(revoked, browser, metrics);
+                self.families_ended(revoked, reason, browser, metrics);
                 Err(InvalidGrant)
             }
         }
@@ -156,15 +156,13 @@ impl OAuthRuntime {
         // Another holder may have refreshed meanwhile: use the newest sealed grant.
         let current = match refresh_dispatch!(backend, lookup(presented, now))? {
             Presented::Current(current) if current.family_id == id => current,
-            Presented::Reused { ended, .. } => {
-                return Ok(Outcome::Reused(ended.map(|ended| *ended)));
-            }
+            Presented::Reused(ended) => return Ok(Outcome::Reused(ended)),
             _ => return Err(RefreshGrantError::InvalidGrant),
         };
         let grant = &current.grant;
         let binding = binding(grant, oidc);
         let (Some(upstream), Some(state)) = (&self.upstream, &current.upstream) else {
-            return Ok(Outcome::Dead);
+            return Ok(Outcome::Ended(FamilyEnd::UpstreamUnusable));
         };
         let Ok(opened) = upstream.cipher.open(&binding, &state.sealed) else {
             tracing::warn!(
@@ -173,11 +171,11 @@ impl OAuthRuntime {
                 method = %grant.method,
                 "sealed upstream grant cannot be opened with the configured keys"
             );
-            return Ok(Outcome::Dead);
+            return Ok(Outcome::Ended(FamilyEnd::UpstreamUnusable));
         };
         let refreshed = match oidc.refresh(opened.refresh_token()).await {
             Ok(refreshed) => refreshed,
-            Err(OidcError::Rejected) => return Ok(Outcome::Dead),
+            Err(OidcError::Rejected) => return Ok(Outcome::Ended(FamilyEnd::UpstreamInvalidGrant)),
             Err(error) => {
                 tracing::warn!(
                     event_name = "oauth.upstream.refresh_unavailable",
@@ -227,7 +225,7 @@ impl OAuthRuntime {
                     method = %grant.method,
                     "refreshed identity does not match the family"
                 );
-                Outcome::Changed
+                Outcome::Ended(FamilyEnd::IdentityChanged)
             }
             // An unverifiable ID token may stem from key rotation or clock skew.
             Err(error) => {

@@ -9,7 +9,7 @@
 //! Shared refresh-token families in Valkey; every mutation is one atomic Lua script.
 
 use super::refresh::{
-    EndedUpstream, MAX_ROTATED_HASHES, Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant,
+    EndedFamily, MAX_ROTATED_HASHES, Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant,
     RefreshStoreError, Revocation, Rotated, UpstreamState, UpstreamStored, deadline,
     initial_expiry, random_id,
 };
@@ -37,24 +37,26 @@ fn number(bytes: &[u8]) -> Result<u64, RefreshStoreError> {
 fn text(bytes: &[u8]) -> Result<String, RefreshStoreError> {
     String::from_utf8(bytes.to_vec()).map_err(|_| RefreshStoreError::Unavailable)
 }
-/// The `grant, sealed` pairs a reply appends for each ended coupled family.
-fn ended(values: &[Vec<u8>]) -> Result<Vec<EndedUpstream>, RefreshStoreError> {
-    let (pairs, rest) = values.as_chunks::<2>();
+/// The `id, grant, sealed` triples a reply appends for each ended family; `sealed` is
+/// empty for a family without an upstream grant.
+fn ended(values: &[Vec<u8>]) -> Result<Vec<EndedFamily>, RefreshStoreError> {
+    let (triples, rest) = values.as_chunks::<3>();
     if !rest.is_empty() {
         return Err(RefreshStoreError::Unavailable);
     }
-    pairs
+    triples
         .iter()
-        .map(|[grant, sealed]| {
-            Ok(EndedUpstream {
+        .map(|[id, grant, sealed]| {
+            Ok(EndedFamily {
+                family_id: text(id)?,
                 grant: RefreshGrant::decode(grant)?,
-                sealed: text(sealed)?,
+                sealed: (!sealed.is_empty()).then(|| text(sealed)).transpose()?,
             })
         })
         .collect()
 }
 /// At most one ended family, for replies that end a single family.
-fn ended_one(values: &[Vec<u8>]) -> Result<Option<EndedUpstream>, RefreshStoreError> {
+fn ended_one(values: &[Vec<u8>]) -> Result<Option<EndedFamily>, RefreshStoreError> {
     let mut all = ended(values)?;
     if all.len() > 1 {
         return Err(RefreshStoreError::Unavailable);
@@ -129,7 +131,7 @@ impl ValkeyRefreshStore {
         }
     }
     /// Starts a family, coupled when `upstream` holds a sealed upstream grant; at the
-    /// per-user cap the user's oldest families are revoked and the coupled ones returned.
+    /// per-user cap the user's oldest families are revoked and returned.
     pub async fn issue(
         &self,
         grant: &RefreshGrant,
@@ -137,7 +139,7 @@ impl ValkeyRefreshStore {
         now_ms: u64,
         policy: &RefreshTokenPolicy,
         upstream: Option<&str>,
-    ) -> Result<Vec<EndedUpstream>, RefreshStoreError> {
+    ) -> Result<Vec<EndedFamily>, RefreshStoreError> {
         let (absolute, idle) =
             initial_expiry(now_ms, policy).ok_or(RefreshStoreError::Unavailable)?;
         let payload = grant.encode()?;
@@ -200,10 +202,9 @@ impl ValkeyRefreshStore {
                 }))
             }
             [status] if status == b"grace" => Presented::Grace,
-            [status, client, rest @ ..] if status == b"reused" => Presented::Reused {
-                client_id: text(client)?,
-                ended: ended_one(rest)?.map(Box::new),
-            },
+            [status, rest @ ..] if status == b"reused" => Presented::Reused(Box::new(
+                ended_one(rest)?.ok_or(RefreshStoreError::Unavailable)?,
+            )),
             [status] if status == b"missing" => Presented::Missing,
             _ => return Err(RefreshStoreError::Unavailable),
         })
@@ -309,7 +310,7 @@ impl ValkeyRefreshStore {
     pub async fn revoke_family(
         &self,
         family_id: &str,
-    ) -> Result<Option<EndedUpstream>, RefreshStoreError> {
+    ) -> Result<Option<EndedFamily>, RefreshStoreError> {
         // The token key is unused by this operation; any key in the namespace routes it.
         let reply = self
             .run(
@@ -339,7 +340,9 @@ impl ValkeyRefreshStore {
             )
             .await?;
         match reply.as_slice() {
-            [status, rest @ ..] if status == b"ok" => Ok(Revocation::Revoked(ended_one(rest)?)),
+            [status, rest @ ..] if status == b"ok" => Ok(Revocation::Revoked(Box::new(
+                ended_one(rest)?.ok_or(RefreshStoreError::Unavailable)?,
+            ))),
             [status] if status == b"missing" => Ok(Revocation::NotFound),
             _ => Err(RefreshStoreError::Unavailable),
         }
@@ -502,7 +505,7 @@ mod tests {
         family(a.lookup(&[2; 32], now + 2).await.unwrap());
         assert!(matches!(
             a.lookup(&[1; 32], now + 1 + REUSE_GRACE_MS).await.unwrap(),
-            Presented::Reused { client_id, ended: None } if client_id == "desktop"
+            Presented::Reused(ended) if ended.grant.client_id == "desktop" && ended.sealed.is_none()
         ));
         assert!(matches!(
             a.lookup(&[2; 32], now + 3).await.unwrap(),
@@ -518,14 +521,14 @@ mod tests {
             b.lookup(&[4; 32], now + 5).await.unwrap(),
             Presented::Missing
         ));
-        family(b.lookup(&[5; 32], now + 5).await.unwrap());
+        let id = family(b.lookup(&[5; 32], now + 5).await.unwrap()).family_id;
         assert!(matches!(
             b.revoke_token(&[5; 32], "other").await.unwrap(),
             Revocation::NotFound
         ));
         assert!(matches!(
             b.revoke_token(&[5; 32], "desktop").await.unwrap(),
-            Revocation::Revoked(None)
+            Revocation::Revoked(ended) if ended.family_id == id && ended.sealed.is_none()
         ));
         assert!(matches!(
             b.revoke_token(&[5; 32], "desktop").await.unwrap(),
@@ -712,7 +715,7 @@ mod tests {
     /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
     #[tokio::test]
     #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
-    async fn disposable_valkey_ending_coupled_families_returns_sealed_grants() {
+    async fn disposable_valkey_ended_families_carry_id_grant_and_sealed_grant() {
         let (_fixture, backend, a) = disposable(2).await;
         let b = ValkeyRefreshStore::new(&backend, 2).await.unwrap();
         let now = server_now(&a).await;
@@ -721,13 +724,14 @@ mod tests {
             method: format!("sso-{n}"),
             ..grant()
         };
-        let named = |ended: EndedUpstream| (ended.grant.method, ended.sealed);
-        let expected = |n: u8| (format!("sso-{n}"), format!("v1.k.{n}"));
+        let named = |ended: EndedFamily| (ended.grant.method, ended.sealed);
+        let expected = |n: u8| (format!("sso-{n}"), Some(format!("v1.k.{n}")));
         for n in [1, 2, 4, 6] {
             if n == 4 {
+                let id = family(a.lookup(&[3; 32], now + 3).await.unwrap()).family_id;
                 assert!(matches!(
                     b.revoke_token(&[3; 32], "desktop").await.unwrap(),
-                    Revocation::Revoked(None)
+                    Revocation::Revoked(ended) if ended.family_id == id && ended.sealed.is_none()
                 ));
             }
             let evicted = a
@@ -751,7 +755,7 @@ mod tests {
                     [expected(1)]
                 );
                 match b.revoke_token(&[2; 32], "desktop").await.unwrap() {
-                    Revocation::Revoked(Some(ended)) => assert_eq!(named(ended), expected(2)),
+                    Revocation::Revoked(ended) => assert_eq!(named(*ended), expected(2)),
                     other => panic!("{other:?}"),
                 }
             }
@@ -761,9 +765,7 @@ mod tests {
             .await
             .unwrap();
         match b.lookup(&[4; 32], now + 4 + REUSE_GRACE_MS).await.unwrap() {
-            Presented::Reused {
-                ended: Some(ended), ..
-            } => assert_eq!(named(*ended), expected(4)),
+            Presented::Reused(ended) => assert_eq!(named(*ended), expected(4)),
             other => panic!("{other:?}"),
         }
         let id = family(a.lookup(&[6; 32], now).await.unwrap()).family_id;

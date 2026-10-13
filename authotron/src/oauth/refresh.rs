@@ -136,19 +136,17 @@ pub enum Presented {
     /// The immediate predecessor within [`REUSE_GRACE_MS`]: rejected, family kept.
     Grace,
     /// Any other rotated token: the store has already revoked the family.
-    Reused {
-        client_id: String,
-        ended: Option<Box<EndedUpstream>>,
-    },
+    Reused(Box<EndedFamily>),
     Missing,
 }
 
-/// A coupled family that revocation, reuse detection or the per-user cap ended, with the
-/// grant needed to open its sealed upstream grant for upstream revocation.
+/// A family that revocation, reuse detection or the per-user cap ended: its id and grant
+/// for the audit log and, for a coupled family, the sealed upstream grant to revoke.
 #[derive(Debug)]
-pub struct EndedUpstream {
+pub struct EndedFamily {
+    pub family_id: String,
     pub grant: RefreshGrant,
-    pub sealed: String,
+    pub sealed: Option<String>,
 }
 
 /// Outcome of revoking a presented token for its client (RFC 7009).
@@ -156,7 +154,7 @@ pub struct EndedUpstream {
 pub enum Revocation {
     /// Unknown token, or a family of another client: nothing changed.
     NotFound,
-    Revoked(Option<EndedUpstream>),
+    Revoked(Box<EndedFamily>),
 }
 
 #[derive(Debug, PartialEq, Eq)]

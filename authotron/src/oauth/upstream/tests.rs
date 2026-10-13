@@ -223,11 +223,9 @@ async fn unopenable_grants_are_skipped_and_unsupported_providers_counted() {
     let mut grant = coupled.grant();
     grant.client_id = "other".into();
     let sealed = coupled.seal(&grant, "offline-foreign");
-    coupled.runtime.end_upstream(
-        [EndedUpstream {
-            grant: coupled.grant(),
-            sealed,
-        }],
+    coupled.runtime.revoke_sealed(
+        &coupled.grant(),
+        &sealed,
         &coupled.browser,
         &coupled.metrics,
     );

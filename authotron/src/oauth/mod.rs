@@ -1,6 +1,7 @@
 //! OAuth authorization-server runtime, initialized at startup only when OAuth is enabled.
 //! HTTP routes enforce request parsing and browser-origin checks before domain transitions.
 
+mod audit;
 pub mod authentication;
 pub mod authorization;
 pub mod code_grant;

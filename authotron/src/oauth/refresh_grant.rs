@@ -10,10 +10,11 @@
 //! revocation. Every refresh re-runs augmentation and current policy before rotating.
 
 use super::{
+    audit::FamilyEnd,
     authentication::projection,
     refresh::{
-        EndedUpstream, Presented, RefreshGrant, RefreshStoreError, RefreshToken, Revocation,
-        Rotated, effective_absolute,
+        Presented, RefreshGrant, RefreshStoreError, RefreshToken, Revocation, Rotated,
+        effective_absolute,
     },
     refresh_store::MemoryRefreshStore,
     runtime::OAuthRuntime,
@@ -153,17 +154,16 @@ impl OAuthRuntime {
         metrics: &Metrics,
     ) -> TokenResponse {
         let unheld = || {
-            upstream.map(|sealed| EndedUpstream {
-                grant: grant.clone(),
-                sealed: sealed.to_owned(),
-            })
+            if let Some(sealed) = upstream {
+                self.revoke_sealed(grant, sealed, browser, metrics);
+            }
         };
         let (Some(backend), Some(policy), Some(method)) = (
             &self.refresh,
             self.refresh_policy(&grant.client_id),
             browser.method(&grant.method),
         ) else {
-            self.end_upstream(unheld(), browser, metrics);
+            unheld();
             return response;
         };
         let policy = &method_policy(policy, method);
@@ -179,7 +179,7 @@ impl OAuthRuntime {
         };
         match issued.await {
             Ok((token, evicted)) => {
-                self.end_upstream(evicted, browser, metrics);
+                self.families_ended(evicted, FamilyEnd::PerUserCap, browser, metrics);
                 metrics.record_refresh_token(RefreshTokenEvent::Issued);
                 response.with_refresh_token(&token)
             }
@@ -191,7 +191,7 @@ impl OAuthRuntime {
                     "refresh token family not stored; returning the access token alone"
                 );
                 metrics.record_refresh_token(RefreshTokenEvent::IssueFailed);
-                self.end_upstream(unheld(), browser, metrics);
+                unheld();
                 response
             }
         }
@@ -211,10 +211,9 @@ impl OAuthRuntime {
         let now = self.now().await.map_err(|_| Unavailable)?;
         let family = match refresh_dispatch!(backend, lookup(&hash, now))? {
             Presented::Current(family) => family,
-            Presented::Reused { ended, .. } => {
+            Presented::Reused(ended) => {
                 metrics.record_refresh_token(RefreshTokenEvent::ReuseDetected);
-                metrics.record_refresh_token(RefreshTokenEvent::FamilyRevoked);
-                self.end_upstream(ended.map(|ended| *ended), browser, metrics);
+                self.families_ended([*ended], FamilyEnd::ReuseDetected, browser, metrics);
                 return Err(InvalidGrant);
             }
             Presented::Grace | Presented::Missing => return Err(InvalidGrant),
@@ -224,33 +223,27 @@ impl OAuthRuntime {
             return Err(InvalidGrant);
         }
         let family_id = family.family_id.clone();
-        let revoke = move |reason: RefreshGrantError| async move {
+        let revoke = move |reason: FamilyEnd| async move {
             let ended = refresh_dispatch!(backend, revoke_family(&family_id))?;
-            metrics.record_refresh_token(RefreshTokenEvent::FamilyRevoked);
-            self.end_upstream(ended, browser, metrics);
-            Err::<TokenResponse, _>(reason)
+            self.families_ended(ended, reason, browser, metrics);
+            Err::<TokenResponse, _>(InvalidGrant)
         };
-        // A removed login method or client opt-out ends the family.
-        let (Some(policy), Some(method)) = (
-            self.refresh_policy(request.client_id),
-            browser.method(&family.grant.method),
-        ) else {
-            return revoke(InvalidGrant).await;
+        // A client opt-out or a removed login method ends the family.
+        let Some(policy) = self.refresh_policy(request.client_id) else {
+            return revoke(FamilyEnd::ClientDisabled).await;
+        };
+        let Some(method) = browser.method(&family.grant.method) else {
+            return revoke(FamilyEnd::MethodRemoved).await;
         };
         let policy = &method_policy(policy, method);
         let ceiling =
             match effective_absolute(family.created_at_ms, family.absolute_expires_at_ms, policy) {
                 Some(ceiling) if now < ceiling => ceiling,
-                _ => return revoke(InvalidGrant).await,
+                _ => return revoke(FamilyEnd::LifetimeExceeded).await,
             };
         // Providers that can tell (plain password users) end families of removed accounts.
         if method.account_still_exists(&family.grant.username) == Some(false) {
-            tracing::info!(
-                event_name = "oauth.refresh_token.account_removed",
-                method = %family.grant.method,
-                "refresh token family revoked: account no longer configured"
-            );
-            return revoke(InvalidGrant).await;
+            return revoke(FamilyEnd::AccountRemoved).await;
         }
         if request
             .resource
@@ -262,7 +255,7 @@ impl OAuthRuntime {
         // A coupled family renews its upstream grant and takes the refreshed roles.
         let provider_roles = if family.grant.upstream_coupled {
             let Some(oidc) = method.oidc() else {
-                return revoke(InvalidGrant).await;
+                return revoke(FamilyEnd::MethodRemoved).await;
             };
             self.refresh_upstream(backend, &family, &hash, oidc, browser, metrics)
                 .await?
@@ -333,8 +326,7 @@ impl OAuthRuntime {
         if let Revocation::Revoked(ended) =
             refresh_dispatch!(backend, revoke_token(&token.hash(), client_id))?
         {
-            metrics.record_refresh_token(RefreshTokenEvent::FamilyRevoked);
-            self.end_upstream(ended, browser, metrics);
+            self.families_ended([*ended], FamilyEnd::ClientRevoke, browser, metrics);
         }
         Ok(())
     }

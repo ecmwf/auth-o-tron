@@ -12,11 +12,7 @@
 //! wait for the provider. When the queue is full a revocation is skipped and counted;
 //! the provider's own offline-session expiry still ends the grant.
 
-use super::{
-    context::AuthenticatedAuthorization,
-    refresh::{EndedUpstream, RefreshGrant},
-    runtime::OAuthRuntime,
-};
+use super::{context::AuthenticatedAuthorization, refresh::RefreshGrant, runtime::OAuthRuntime};
 use crate::{
     browser::BrowserLoginState,
     metrics::{Metrics, UpstreamTokenEvent},
@@ -159,44 +155,39 @@ impl OAuthRuntime {
             method: context.method().into(),
             upstream_coupled: true,
         };
-        let sealed = sealed.to_owned();
-        self.end_upstream([EndedUpstream { grant, sealed }], browser, metrics);
+        self.revoke_sealed(&grant, sealed, browser, metrics);
     }
 
-    /// Queues upstream revocation for each ended coupled family. A family whose method
-    /// or key no longer opens its sealed grant is skipped and counted.
-    pub(super) fn end_upstream(
+    /// Queues upstream revocation of the sealed grant of `grant`, which no family holds
+    /// any more. A grant whose method or key no longer opens it is skipped and counted.
+    pub(super) fn revoke_sealed(
         &self,
-        ended: impl IntoIterator<Item = EndedUpstream>,
+        grant: &RefreshGrant,
+        sealed: &str,
         browser: &BrowserLoginState,
         metrics: &Metrics,
     ) {
-        for family in ended {
-            let queued = self.upstream.as_ref().is_some_and(|upstream| {
-                let Some(method) = browser
-                    .method(&family.grant.method)
-                    .and_then(|method| method.oidc())
-                else {
-                    return false;
-                };
-                let Ok(grant) = upstream
-                    .cipher
-                    .open(&binding(&family.grant, method), &family.sealed)
-                else {
-                    return false;
-                };
-                let refresh_token = Zeroizing::new(grant.refresh_token().to_owned());
-                upstream.queue(method, refresh_token, metrics)
-            });
-            if !queued {
-                tracing::warn!(
-                    event_name = "oauth.upstream.revocation_skipped",
-                    event_domain = "oauth",
-                    method = %family.grant.method,
-                    "upstream refresh token of an ended family not revoked"
-                );
-                metrics.record_upstream_token(UpstreamTokenEvent::RevocationSkipped);
-            }
+        let queued = self.upstream.as_ref().is_some_and(|upstream| {
+            let Some(method) = browser
+                .method(&grant.method)
+                .and_then(|method| method.oidc())
+            else {
+                return false;
+            };
+            let Ok(opened) = upstream.cipher.open(&binding(grant, method), sealed) else {
+                return false;
+            };
+            let refresh_token = Zeroizing::new(opened.refresh_token().to_owned());
+            upstream.queue(method, refresh_token, metrics)
+        });
+        if !queued {
+            tracing::warn!(
+                event_name = "oauth.upstream.revocation_skipped",
+                event_domain = "oauth",
+                method = %grant.method,
+                "upstream refresh token of an ended family not revoked"
+            );
+            metrics.record_upstream_token(UpstreamTokenEvent::RevocationSkipped);
         }
     }
 }

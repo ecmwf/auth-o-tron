@@ -4,8 +4,9 @@
 -- rotated, and a family keeps at most ARGV[10] rotated hashes ("history", oldest first).
 -- A coupled family also holds a sealed upstream grant ("upstream") and its generation
 -- ("upstream_gen").
--- Replies that end coupled families append each one's grant and sealed upstream grant,
--- so the caller can revoke it upstream; families removed after expiry are not reported.
+-- Replies that end families append each one's id, grant and sealed upstream grant (empty
+-- unless coupled), for the audit log and upstream revocation; families removed after
+-- expiry are not reported.
 -- A run resent after a lost reply never applies twice: rotate finds the hash no longer
 -- current ('stale'), issue finds the token key present, set_upstream recognises its own
 -- replacement, and revocation is idempotent.
@@ -22,7 +23,7 @@ local function history(key)
     for hash in string.gmatch(redis.call('HGET', key, 'history') or '', '%S+') do hashes[#hashes + 1] = hash end
     return hashes
 end
--- Returns {grant, sealed upstream grant} for a coupled family, otherwise {}.
+-- Returns {id, grant, sealed upstream grant or ''} for a stored family, otherwise {}.
 local function revoke(id)
     local key = family_key(id)
     local ended = {}
@@ -30,8 +31,8 @@ local function revoke(id)
         local current = redis.call('HGET', key, 'current')
         if current then redis.call('DEL', token_key(current)) end
         for _, hash in ipairs(history(key)) do redis.call('DEL', token_key(hash)) end
-        local grant, upstream = redis.call('HGET', key, 'grant'), redis.call('HGET', key, 'upstream')
-        if grant and upstream then ended = {grant, upstream} end
+        local grant = redis.call('HGET', key, 'grant')
+        if grant then ended = {id, grant, redis.call('HGET', key, 'upstream') or ''} end
     end
     local user = redis.call('HGET', key, 'user')
     redis.call('DEL', key)
@@ -126,8 +127,7 @@ if op == 'lookup' then
     end
     local rotated = tonumber(redis.call('HGET', key, 'rotated'))
     if redis.call('HGET', key, 'previous') == hash and rotated and now < rotated + grace then return {'grace'} end
-    local client = redis.call('HGET', key, 'client')
-    return append({'reused', client}, revoke(id))
+    return append({'reused'}, revoke(id))
 end
 if op == 'rotate' then
     local next_hash, next_token, idle, ceiling = ARGV[6], KEYS[2], tonumber(ARGV[7]), tonumber(ARGV[8])

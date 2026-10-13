@@ -9,7 +9,7 @@
 //! Process-local refresh-token families for single-replica deployments.
 
 use super::refresh::{
-    EndedUpstream, MAX_ROTATED_HASHES, Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant,
+    EndedFamily, MAX_ROTATED_HASHES, Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant,
     RefreshStoreError, Revocation, Rotated, UpstreamState, UpstreamStored, deadline,
     initial_expiry, random_id,
 };
@@ -35,12 +35,12 @@ impl Family {
     fn live(&self, now_ms: u64) -> bool {
         now_ms < self.idle_ms && now_ms < self.absolute_ms
     }
-    fn ended(self) -> Option<EndedUpstream> {
-        let grant = self.grant;
-        self.upstream.map(|upstream| EndedUpstream {
-            grant,
-            sealed: upstream.sealed,
-        })
+    fn ended(self, family_id: String) -> EndedFamily {
+        EndedFamily {
+            family_id,
+            grant: self.grant,
+            sealed: self.upstream.map(|upstream| upstream.sealed),
+        }
     }
 }
 
@@ -82,7 +82,7 @@ impl MemoryRefreshStore {
             .map_err(|_| RefreshStoreError::Unavailable)
     }
     /// Starts a family, coupled when `upstream` holds a sealed upstream grant; at the
-    /// per-user cap the user's oldest families are revoked and the coupled ones returned.
+    /// per-user cap the user's oldest families are revoked and returned.
     pub async fn issue(
         &self,
         grant: &RefreshGrant,
@@ -90,7 +90,7 @@ impl MemoryRefreshStore {
         now_ms: u64,
         policy: &RefreshTokenPolicy,
         upstream: Option<&str>,
-    ) -> Result<Vec<EndedUpstream>, RefreshStoreError> {
+    ) -> Result<Vec<EndedFamily>, RefreshStoreError> {
         let (absolute_ms, idle_ms) =
             initial_expiry(now_ms, policy).ok_or(RefreshStoreError::Unavailable)?;
         grant.encode()?;
@@ -112,7 +112,7 @@ impl MemoryRefreshStore {
         let evicted = owned
             .into_iter()
             .take(excess)
-            .filter_map(|(_, id)| inner.families.remove(&id)?.ended())
+            .filter_map(|(_, id)| Some(inner.families.remove(&id)?.ended(id)))
             .collect();
         inner
             .tokens
@@ -172,12 +172,10 @@ impl MemoryRefreshStore {
         }) {
             return Ok(Presented::Grace);
         }
-        let client_id = family.grant.client_id.clone();
-        let ended = inner.families.remove(&id).and_then(Family::ended);
-        Ok(Presented::Reused {
-            client_id,
-            ended: ended.map(Box::new),
-        })
+        let Some(family) = inner.families.remove(&id) else {
+            return Ok(Presented::Missing);
+        };
+        Ok(Presented::Reused(Box::new(family.ended(id))))
     }
     /// Compare-and-swap from `presented` to `next`; `ceiling` is the current absolute expiry.
     pub async fn rotate(
@@ -290,12 +288,12 @@ impl MemoryRefreshStore {
     pub async fn revoke_family(
         &self,
         family_id: &str,
-    ) -> Result<Option<EndedUpstream>, RefreshStoreError> {
+    ) -> Result<Option<EndedFamily>, RefreshStoreError> {
         Ok(self
             .lock()?
             .families
             .remove(family_id)
-            .and_then(Family::ended))
+            .map(|family| family.ended(family_id.to_owned())))
     }
     /// RFC 7009: any token of a family revokes it, but only for the owning client.
     pub async fn revoke_token(
@@ -311,9 +309,9 @@ impl MemoryRefreshStore {
             .families
             .get(&id)
             .is_some_and(|family| family.grant.client_id == client_id)
+            && let Some(family) = inner.families.remove(&id)
         {
-            let ended = inner.families.remove(&id).and_then(Family::ended);
-            return Ok(Revocation::Revoked(ended));
+            return Ok(Revocation::Revoked(Box::new(family.ended(id))));
         }
         Ok(Revocation::NotFound)
     }
@@ -370,7 +368,7 @@ mod tests {
         current(store.lookup(&[2; 32], NOW + 2).await.unwrap());
         assert!(matches!(
             store.lookup(&[1; 32], NOW + 1 + REUSE_GRACE_MS).await.unwrap(),
-            Presented::Reused { client_id, ended: None } if client_id == "desktop"
+            Presented::Reused(ended) if ended.grant.client_id == "desktop" && ended.sealed.is_none()
         ));
         assert!(matches!(
             store.lookup(&[2; 32], NOW + 3).await.unwrap(),
@@ -679,10 +677,10 @@ mod tests {
             store.revoke_token(&[7; 32], "desktop").await.unwrap(),
             Revocation::NotFound
         ));
-        current(store.lookup(&[2; 32], NOW).await.unwrap());
+        let id = current(store.lookup(&[2; 32], NOW).await.unwrap()).family_id;
         assert!(matches!(
             store.revoke_token(&[1; 32], "desktop").await.unwrap(),
-            Revocation::Revoked(None)
+            Revocation::Revoked(ended) if ended.family_id == id && ended.sealed.is_none()
         ));
         assert!(matches!(
             store.lookup(&[2; 32], NOW).await.unwrap(),
@@ -705,7 +703,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ending_coupled_families_returns_their_sealed_upstream_grants() {
+    async fn ended_families_carry_their_id_grant_and_sealed_upstream_grant() {
         let store = MemoryRefreshStore::new(2);
         let coupled = |n: u8| RefreshGrant {
             upstream_coupled: true,
@@ -727,8 +725,8 @@ mod tests {
                     .unwrap()
             }
         };
-        let named = |ended: EndedUpstream| (ended.grant.method, ended.sealed);
-        let expected = |n: u8| (format!("sso-{n}"), format!("v1.k.{n}"));
+        let named = |ended: EndedFamily| (ended.grant.method, ended.sealed);
+        let expected = |n: u8| (format!("sso-{n}"), Some(format!("v1.k.{n}")));
         assert!(issue(1).await.is_empty() && issue(2).await.is_empty());
         // The per-user cap evicts the oldest family, which is coupled.
         let evicted = store
@@ -740,13 +738,17 @@ mod tests {
             [expected(1)]
         );
         match store.revoke_token(&[2; 32], "desktop").await.unwrap() {
-            Revocation::Revoked(Some(ended)) => assert_eq!(named(ended), expected(2)),
+            Revocation::Revoked(ended) => assert_eq!(named(*ended), expected(2)),
             other => panic!("{other:?}"),
         }
-        assert!(matches!(
-            store.revoke_token(&[3; 32], "desktop").await.unwrap(),
-            Revocation::Revoked(None)
-        ));
+        // An uncoupled family is reported without a sealed grant.
+        let id = current(store.lookup(&[3; 32], NOW + 3).await.unwrap()).family_id;
+        match store.revoke_token(&[3; 32], "desktop").await.unwrap() {
+            Revocation::Revoked(ended) => {
+                assert_eq!((ended.family_id, ended.sealed), (id, None));
+            }
+            other => panic!("{other:?}"),
+        }
         issue(4).await;
         let id = current(store.lookup(&[4; 32], NOW).await.unwrap()).family_id;
         store
@@ -758,9 +760,7 @@ mod tests {
             .await
             .unwrap()
         {
-            Presented::Reused {
-                ended: Some(ended), ..
-            } => assert_eq!(named(*ended), expected(4)),
+            Presented::Reused(ended) => assert_eq!(named(*ended), expected(4)),
             other => panic!("{other:?}"),
         }
         issue(6).await;
