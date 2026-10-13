@@ -16,6 +16,13 @@ use crate::{
     },
     config::{BrowserMethodKind, UiConfig},
     metrics::{BrowserAttemptGuard, BrowserOutcome},
+    oauth::{
+        authentication::VerifiedOAuthIdentity,
+        context::{AuthenticatedAuthorization, ContextError},
+        records::BoundAuthorizationTransaction,
+        runtime::OAuthRuntime,
+        store::{StoreError, TransactionId},
+    },
     state::AppState,
 };
 use axum::{
@@ -449,16 +456,9 @@ async fn submit_inner(
         let witness = match runtime.bound(&id, &binding).await {
             Ok(witness) => witness,
             Err(error) => {
-                attempt.outcome = if error == crate::oauth::store::StoreError::Missing {
-                    BrowserOutcome::Csrf
-                } else {
-                    BrowserOutcome::BackendUnavailable
-                };
-                return super::oauth::local(if error == crate::oauth::store::StoreError::Missing {
-                    StatusCode::BAD_REQUEST
-                } else {
-                    StatusCode::SERVICE_UNAVAILABLE
-                });
+                let (response, outcome) = pending_failure(error);
+                attempt.outcome = outcome;
+                return response;
             }
         };
         let identity = match crate::oauth::authentication::verify_identity(
@@ -488,56 +488,9 @@ async fn submit_inner(
                 };
             }
         };
-        let now = match runtime.now().await {
-            Ok(now) => now,
-            Err(_) => {
-                attempt.outcome = BrowserOutcome::BackendUnavailable;
-                return super::oauth::local(StatusCode::SERVICE_UNAVAILABLE);
-            }
-        };
-        let context = match crate::oauth::context::AuthenticatedAuthorization::new_bound(
-            witness,
-            identity,
-            &binding,
-            &runtime.config,
-            now,
-        ) {
-            Ok(context) => context,
-            Err(crate::oauth::context::ContextError::AccessDenied) => {
-                // Valid credentials, but the identity fails scope policy. The request was
-                // validated at /oauth/authorize, so per RFC 6749 §4.1.2.1 the transaction
-                // is consumed atomically and the registered callback gets access_denied.
-                let consumed = runtime.consume_pending(&id, &binding).await;
-                attempt.outcome = policy_denial_outcome(&consumed);
-                return match consumed {
-                    Ok(transaction) => super::oauth::access_denied(runtime, transaction.request()),
-                    Err(crate::oauth::store::StoreError::Missing) => {
-                        super::oauth::local(StatusCode::BAD_REQUEST)
-                    }
-                    Err(_) => super::oauth::local(StatusCode::SERVICE_UNAVAILABLE),
-                };
-            }
-            Err(error) => {
-                use crate::oauth::context::ContextError::*;
-                let status = match error {
-                    Configuration | InvalidTime => StatusCode::SERVICE_UNAVAILABLE,
-                    InvalidTransaction | Binding => StatusCode::BAD_REQUEST,
-                    _ => StatusCode::FORBIDDEN,
-                };
-                attempt.outcome = if status == StatusCode::SERVICE_UNAVAILABLE {
-                    BrowserOutcome::BackendUnavailable
-                } else {
-                    BrowserOutcome::Rejected
-                };
-                return super::oauth::local(status);
-            }
-        };
-        if runtime.promote(&id, &binding, context).await.is_err() {
-            attempt.outcome = BrowserOutcome::BackendUnavailable;
-            return super::oauth::local(StatusCode::SERVICE_UNAVAILABLE);
-        }
-        let response = private_response(Redirect::to("/oauth/continue").into_response());
-        attempt.outcome = BrowserOutcome::Success;
+        let (response, outcome) =
+            finish_authorization_login(runtime, &id, &binding, witness, identity).await;
+        attempt.outcome = outcome;
         return response;
     }
     let user = match state
@@ -578,6 +531,88 @@ async fn submit_inner(
     set_cookie(&mut response, SESSION_COOKIE, sid, state.browser.ttl);
     attempt.outcome = BrowserOutcome::Success;
     response
+}
+
+/// Response for a failed lookup of the pending authorization bound to this browser: a
+/// missing transaction is a 400 counted as `csrf`; backend failures are 503.
+pub(super) fn pending_failure(error: StoreError) -> (Response, BrowserOutcome) {
+    if error == StoreError::Missing {
+        (
+            super::oauth::local(StatusCode::BAD_REQUEST),
+            BrowserOutcome::Csrf,
+        )
+    } else {
+        (
+            super::oauth::local(StatusCode::SERVICE_UNAVAILABLE),
+            BrowserOutcome::BackendUnavailable,
+        )
+    }
+}
+
+/// Binds a freshly verified identity to its pending authorization and continues to
+/// consent; an identity the scope policy denies ends the flow with `access_denied`.
+pub(super) async fn finish_authorization_login(
+    runtime: &OAuthRuntime,
+    id: &TransactionId,
+    binding: &[u8; 32],
+    witness: BoundAuthorizationTransaction,
+    identity: VerifiedOAuthIdentity,
+) -> (Response, BrowserOutcome) {
+    let now = match runtime.now().await {
+        Ok(now) => now,
+        Err(_) => {
+            return (
+                super::oauth::local(StatusCode::SERVICE_UNAVAILABLE),
+                BrowserOutcome::BackendUnavailable,
+            );
+        }
+    };
+    let context = match AuthenticatedAuthorization::new_bound(
+        witness,
+        identity,
+        binding,
+        &runtime.config,
+        now,
+    ) {
+        Ok(context) => context,
+        Err(ContextError::AccessDenied) => {
+            // A verified identity that fails scope policy. The request was validated at
+            // /oauth/authorize, so per RFC 6749 §4.1.2.1 the transaction is consumed
+            // atomically and the registered callback gets access_denied.
+            let consumed = runtime.consume_pending(id, binding).await;
+            let outcome = policy_denial_outcome(&consumed);
+            let response = match consumed {
+                Ok(transaction) => super::oauth::access_denied(runtime, transaction.request()),
+                Err(StoreError::Missing) => super::oauth::local(StatusCode::BAD_REQUEST),
+                Err(_) => super::oauth::local(StatusCode::SERVICE_UNAVAILABLE),
+            };
+            return (response, outcome);
+        }
+        Err(error) => {
+            use ContextError::*;
+            let status = match error {
+                Configuration | InvalidTime => StatusCode::SERVICE_UNAVAILABLE,
+                InvalidTransaction | Binding => StatusCode::BAD_REQUEST,
+                _ => StatusCode::FORBIDDEN,
+            };
+            let outcome = if status == StatusCode::SERVICE_UNAVAILABLE {
+                BrowserOutcome::BackendUnavailable
+            } else {
+                BrowserOutcome::Rejected
+            };
+            return (super::oauth::local(status), outcome);
+        }
+    };
+    if runtime.promote(id, binding, context).await.is_err() {
+        return (
+            super::oauth::local(StatusCode::SERVICE_UNAVAILABLE),
+            BrowserOutcome::BackendUnavailable,
+        );
+    }
+    (
+        private_response(Redirect::to("/oauth/continue").into_response()),
+        BrowserOutcome::Success,
+    )
 }
 
 async fn account(State(state): State<AppState>, headers: HeaderMap) -> Response {
