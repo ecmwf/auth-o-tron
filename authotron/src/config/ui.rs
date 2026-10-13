@@ -76,11 +76,13 @@ pub fn valid_browser_id(id: &str) -> bool {
         && !RESERVED_BROWSER_IDS.contains(&id)
 }
 
-fn browser_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+pub(super) fn browser_id<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
     let id = String::deserialize(deserializer)?;
     if !valid_browser_id(&id) {
         return Err(serde::de::Error::custom(format!(
-            "provider browser id must match {BROWSER_ID_PATTERN} and not be {}",
+            "browser method id must match {BROWSER_ID_PATTERN} and not be {}",
             RESERVED_BROWSER_IDS.join(", ")
         )));
     }
@@ -89,7 +91,9 @@ fn browser_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Strin
 
 /// Valid: `"  Staff login "` (stored as `Staff login`). Invalid: `"   "`,
 /// `"Line\nbreak"`, or a label longer than 64 characters after trimming.
-fn browser_label<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+pub(super) fn browser_label<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
     let label = String::deserialize(deserializer)?;
     let label = label.trim();
     if label.is_empty()
@@ -97,7 +101,7 @@ fn browser_label<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<St
         || label.chars().any(char::is_control)
     {
         return Err(serde::de::Error::custom(
-            "provider browser label must be 1-64 characters after trimming, without control characters",
+            "browser method label must be 1-64 characters after trimming, without control characters",
         ));
     }
     Ok(label.to_owned())

@@ -64,6 +64,8 @@ SOURCE_FILES = (
     "authotron/src/config/oauth.rs",
     "authotron/src/config/oauth_policy.rs",
     "authotron/src/config/oauth_signing.rs",
+    "authotron/src/config/oidc.rs",
+    "authotron/src/config/oidc/tests.rs",
     "authotron/src/config/store.rs",
     "authotron/src/config/types.rs",
     "authotron/src/config/ui.rs",
