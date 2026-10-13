@@ -122,3 +122,103 @@ async fn a_refused_grant_ends_the_family_without_contacting_the_provider_again()
     );
     assert_eq!(coupled.idp.state.refresh_requests.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn a_changed_identity_ends_the_family_and_revokes_the_newest_grant() {
+    let coupled = coupled(|_| {}).await;
+    let (token, _) = live_family(&coupled).await;
+    *coupled.idp.state.claims.lock().unwrap() = json!({"sub": "another-user"});
+    assert_eq!(
+        coupled.refresh(&token).await.err(),
+        Some(RefreshGrantError::InvalidGrant)
+    );
+    // The provider rotated before the identity was checked: that rotation is revoked.
+    let revoked = coupled.revoked(1).await;
+    assert!(revoked[0].starts_with("offline-"));
+    assert!(!coupled.idp.state.refresh_token_live(&revoked[0]));
+    assert_eq!(coupled.upstream_events("identity_changed"), 1);
+    assert_eq!(
+        coupled.refresh(&token).await.err(),
+        Some(RefreshGrantError::InvalidGrant)
+    );
+}
+
+#[tokio::test]
+async fn refreshed_roles_replace_the_family_roles_and_need_an_id_token() {
+    let coupled = coupled(|config| {
+        let method = &mut config["ui"]["oidc"][0];
+        method["roles_claim"] = json!("realm_access.roles");
+        method["role_map"] = json!({"mcp-demo": "reader"});
+        config["oauth"]["resources"][0]["scopes"][0]["required_roles"] = json!(["reader"]);
+    })
+    .await;
+    let (token, _) = live_family(&coupled).await;
+    let token = coupled.refresh(&token).await.unwrap();
+    // Without an ID token the mapped roles cannot be re-checked: 503, family kept.
+    coupled
+        .idp
+        .state
+        .refresh_id_tokens
+        .store(false, Ordering::SeqCst);
+    assert_eq!(
+        coupled.refresh(&token).await.err(),
+        Some(RefreshGrantError::Unavailable)
+    );
+    coupled
+        .idp
+        .state
+        .refresh_id_tokens
+        .store(true, Ordering::SeqCst);
+    // The role was removed upstream: current policy now denies the scope.
+    *coupled.idp.state.claims.lock().unwrap() = json!({"realm_access": {"roles": []}});
+    assert_eq!(
+        coupled.refresh(&token).await.err(),
+        Some(RefreshGrantError::InvalidGrant)
+    );
+}
+
+#[tokio::test]
+async fn concurrent_refreshes_renew_one_after_the_other_with_the_newest_grant() {
+    let coupled = coupled(|_| {}).await;
+    let (token, _) = live_family(&coupled).await;
+    let (a, b) = tokio::join!(coupled.refresh(&token), coupled.refresh(&token));
+    // One client rotation wins; the provider never saw a spent token.
+    let winner = match (a, b) {
+        (Ok(next), Err(RefreshGrantError::InvalidGrant))
+        | (Err(RefreshGrantError::InvalidGrant), Ok(next)) => next,
+        _ => panic!("expected exactly one successful refresh"),
+    };
+    assert_eq!(coupled.upstream_events("invalid_grant"), 0);
+    let held = held(&coupled, &winner).await;
+    assert!(coupled.idp.state.refresh_token_live(&held));
+    coupled.refresh(&winner).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_held_lock_makes_the_refresh_unavailable() {
+    let coupled = coupled(|_| {}).await;
+    let (token, _) = live_family(&coupled).await;
+    let Some(RefreshBackend::Memory(store)) = &coupled.runtime.refresh else {
+        unreachable!()
+    };
+    let now = coupled.runtime.now().await.unwrap();
+    let Presented::Current(family) = store.lookup(&token.hash(), now).await.unwrap() else {
+        panic!("expected a live family");
+    };
+    assert!(
+        store
+            .lock_upstream(&family.family_id, "other-replica", now, now + 60_000)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        coupled.refresh(&token).await.err(),
+        Some(RefreshGrantError::Unavailable)
+    );
+    assert_eq!(coupled.idp.state.refresh_requests.load(Ordering::SeqCst), 0);
+    store
+        .unlock_upstream(&family.family_id, "other-replica")
+        .await
+        .unwrap();
+    coupled.refresh(&token).await.unwrap();
+}
