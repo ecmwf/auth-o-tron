@@ -371,7 +371,12 @@ oauth:
         enabled: true
         idle_ttl_seconds: 2592000      # 30 days without use; default 30 days
         absolute_ttl_seconds: 7776000  # 90 days after login; default 90 days
+        upstream_offline_access: false # couple OIDC sign-ins to the provider; default false
 ```
+
+With `upstream_offline_access`, families started by an OIDC sign-in follow the
+provider's offline session; it needs `oauth.upstream_token_encryption`. See
+[Upstream offline access](oidc.md#upstream-offline-access).
 
 Both lifetimes must be between 300 seconds and 400 days (34560000 seconds), and
 `idle_ttl_seconds` must not exceed `absolute_ttl_seconds`; startup rejects other values.
@@ -393,7 +398,9 @@ Memory (development, per process, lost on restart) or Valkey under
 keys expire at the family's idle deadline. Moving from the `v1` namespace drops existing families, and
 users must log in again. Restricted ACLs must allow `EVAL`, `GET`,
 `SET`, `DEL`, `EXISTS`, `TYPE`, the hash commands `HSET`/`HGET`, the sorted-set commands
-`ZADD`/`ZRANGE`/`ZREM`/`ZCARD`, and `PEXPIREAT`/`PEXPIRETIME` under that prefix.
+`ZADD`/`ZRANGE`/`ZREM`/`ZCARD`, and `PEXPIREAT`/`PEXPIRETIME` under that prefix. A family
+coupled to an OIDC offline session also keeps its sealed upstream grant in the family
+hash, and an upstream refresh holds a short-lived `lock:<family>` key.
 
 **Lifetimes.** A family expires `idle_ttl_seconds` after its last use, and never later
 than `absolute_ttl_seconds` after login. A refresh moves the idle deadline but never the
@@ -432,7 +439,9 @@ On every refresh the server:
 1. Checks that the client still exists and still has refresh tokens enabled, that the
    login method is still configured, and that the absolute lifetime has not passed.
    For `plain` (password) methods, it also checks that the user is still listed in
-   the provider's `users`.
+   the provider's `users`. A family coupled to an OIDC offline session then renews it
+   at the provider and takes the refreshed roles
+   ([details](oidc.md#upstream-offline-access)).
 2. Re-runs **strict** augmentation, starting from the stored provider roles. Roles
    that the augmenters no longer grant are dropped.
 3. Re-evaluates the current client/resource/scope policy.
@@ -484,7 +493,8 @@ their `exp`.
 - With the Memory backend, families are per process. A refresh token works only on the
   replica that issued it and is lost on restart. Multi-replica deployments need Valkey.
 - Metrics: `authotron_oauth_refresh_tokens_total{event}` with `issued`, `rotated`,
-  `reuse_detected`, `family_revoked` and `issue_failed`.
+  `reuse_detected`, `family_revoked` and `issue_failed`, and
+  `authotron_oauth_upstream_tokens_total{event}` for coupled families.
 
 ### Durable refresh-token storage
 

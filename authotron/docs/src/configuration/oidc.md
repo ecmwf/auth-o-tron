@@ -64,6 +64,7 @@ Require PKCE with `S256` at the provider when it supports that setting.
 | `clock_skew_seconds` | `60` | 0–300; tolerance for `exp`, `iat`, `nbf` and `auth_time` |
 | `http_timeout_ms` | `5000` | 500–30000; bound on each provider request including the body |
 | `refresh_max_lifetime_seconds` | none | 300–34560000; caps OAuth refresh-token families started by this method, as for provider methods |
+| `offline_access` | `false` | Request `offline_access` for OAuth clients with `refresh_tokens.upstream_offline_access`; see [Upstream offline access](#upstream-offline-access) |
 
 Rules, checked at startup:
 
@@ -72,8 +73,8 @@ Rules, checked at startup:
   `http://idp.example.org`, `https://user@idp.example.org/r`,
   `https://idp.example.org/r?x=1`.
 - `scopes` are unique RFC 6749 scope tokens. `openid` is always sent and
-  `offline_access` is not accepted. Valid: `profile`, `api:read`. Invalid: `a b`,
-  `offline_access`.
+  `offline_access` is not accepted here; it is requested through `offline_access`.
+  Valid: `profile`, `api:read`. Invalid: `a b`, `offline_access`.
 - `roles_claim` and a non-empty `role_map` go together. `roles_claim` has 1–4
   segments of letters, digits, `_` and `-`. Valid: `realm_access.roles`, `groups`.
   Invalid: `a..b`, `$.roles`. `role_map` holds at most 64 roles of 1–128 bytes.
@@ -135,8 +136,9 @@ and augmentation.
   with `clock_skew_seconds`; `iat` must be at most 10 minutes old; `nonce` must
   match. With `max_authentication_age_seconds`, `auth_time` is required and must
   be recent enough. `sub` is 1–255 bytes. Tokens over 16 KiB are rejected.
-- **Token response.** Only the ID token is read. Access and refresh tokens in the
-  response are discarded without being stored.
+- **Token response.** The ID token is read, and the refresh token only when offline
+  access was requested. Access tokens, and refresh tokens of other sign-ins, are
+  discarded without being stored.
 
 ## Provider metadata and keys
 
@@ -197,25 +199,120 @@ descriptions, codes and tokens are never shown or logged.
 | Wrong `iss`, rejected code, invalid ID token | 400 "Sign-in could not be verified" |
 | Claims do not form an acceptable identity, or augmentation rejects it | 403 "Sign-in not permitted" |
 | Provider unreachable or answering a server error, client authentication refused, malformed answer | 503 "Sign-in temporarily unavailable" |
+| Offline access requested but no refresh token issued | 503 "Sign-in not completed", logged as `browser.oidc.offline_token_missing` |
 | Admission quota or concurrency exhausted, backend unavailable | 429 / 503 as for credential methods |
 | Identity denied by OAuth scope policy | 303 `access_denied` to the client's callback |
 
 Logs record the method id and a fixed reason (`unavailable`, `invalid_response`,
 `rejected`, `client_rejected`, `invalid_id_token`, `invalid_identity`,
-`augmentation`). Callbacks are counted in the
+`augmentation`, `offline_access`). Callbacks are counted in the
 [browser login metrics](../reference/metrics.md#browser-login-and-hpa) with flow
 `oidc`.
+
+## Upstream offline access
+
+By default an OAuth refresh-token family started by an OIDC sign-in re-runs
+augmentation and policy on every refresh, as for other methods, but does not
+consult the provider: a disabled provider account keeps refreshing until the
+family ends. Opting a client into upstream offline access couples its families to
+the provider's offline session instead:
+
+```yaml
+ui:
+  oidc:
+    - id: demo-sso
+      # ...
+      offline_access: true
+oauth:
+  upstream_token_encryption:
+    active_kid: upstream-2026-10
+    keys:
+      - kid: upstream-2026-10
+        key_file: /run/secrets/oidc/upstream-2026-10.key # openssl rand -base64 32
+  clients:
+    - client_id: mcp-cli
+      # ...
+      refresh_tokens:
+        enabled: true
+        upstream_offline_access: true
+```
+
+`upstream_offline_access` requires `enabled` and `oauth.upstream_token_encryption`.
+Offline access is requested only for an authorization request of an opted-in
+client through a method with `offline_access: true`; browser sessions and other
+clients never request it.
+
+- **Sign-in.** The authorization request adds the `offline_access` scope. The
+  provider's refresh token is sealed with AES-256-GCM under the active key and
+  carried through consent and the code exchange into the new family. Without a
+  refresh token the sign-in fails (503 "Sign-in not completed" and an error log);
+  this usually means the provider does not allow `offline_access` for the client
+  or user. If the authorization ends without a code (consent denied, scope policy
+  denies the identity, strict augmentation rejects it, the code exchange cannot
+  store the family, or the client has no refresh tokens), the upstream token is
+  revoked at the provider.
+- **Refresh.** After the local checks, the refresh takes a per-family lock
+  (waiting up to 2 seconds), refreshes the upstream grant at the provider's token
+  endpoint and stores a rotated upstream token before anything else can fail. A
+  refreshed ID token is validated like the sign-in's, except for the nonce and
+  authentication age; its `sub` and username must be unchanged, and its mapped
+  roles replace the family's stored provider roles. Without an ID token, only a
+  method with `username_claim: sub` and no `roles_claim` can refresh. Then
+  augmentation, policy and the family's own rotation follow as usual.
+- **Revocation.** When a coupled family ends through `/oauth/revoke`, reuse
+  detection, the per-user cap or a policy check at refresh, its upstream token is
+  revoked at the provider's RFC 7009 endpoint, if it advertises one. Revocations
+  run on a background queue of 256; a full queue skips and counts them.
+
+| Refresh situation | Response | Family | Upstream token |
+|-------------------|----------|--------|----------------|
+| Provider refreshed the grant | as for other families | rotated | stored (rotated if the provider rotated it) |
+| Provider answers `invalid_grant` (expired, revoked, account disabled) | 400 `invalid_grant` | revoked | not revoked |
+| Sealed grant cannot be opened (key removed, other binding) | 400 `invalid_grant` | revoked | not revoked |
+| `sub` or username changed, refreshed ID token invalid | 400 `invalid_grant` | revoked | revoked |
+| Provider unavailable, client refused, malformed answer, ID token needed but missing, lock still held, rotated token not stored | 503 `server_error` | kept | kept |
+
+**Keys.** Each key file holds 32 random bytes in standard Base64 (44 characters);
+up to four keys may be listed. New grants are sealed with `active_kid`; older keys
+keep opening grants sealed before a rotation, which are re-sealed with the active
+key at their next upstream rotation. Keep a key until the families it sealed have
+ended, or they end at their next refresh. A sealed grant is bound to its key id,
+method, issuer, OAuth client, realm and username, so it cannot be moved to another
+family's user or client; Valkey holds only ciphertext.
+
+**Keycloak.** Give the client the optional client scope `offline_access` and
+users the `offline_access` realm role (part of the default roles). With "Revoke
+Refresh Token" enabled and "Refresh Token Max Reuse" 0, every upstream refresh
+rotates the offline token; the lock and the stored generation keep concurrent
+refreshes from using a spent token. Set "Offline Session Idle" no shorter than the
+client's `idle_ttl_seconds`, so an idle family does not outlive its offline
+session.
+
+Not covered:
+
+- Families that expire, or that are lost with backend data, are not revoked
+  upstream; the provider's offline session idle timeout ends them. The same holds
+  for a sign-in whose authorization is abandoned before a code is issued, or whose
+  code is never exchanged.
+- After `invalid_grant` the upstream token is not revoked. Keycloak keeps a
+  disabled account's offline session; if the account is enabled again, that
+  session lasts until its idle timeout, though no family holds its token.
+- If the provider rotates the token but the new one cannot be stored, or the lock
+  expires while a refresh is stalled, the rotated token is lost and the family
+  fails at its next refresh. The lock lives for `http_timeout_ms` plus 5 seconds.
+
+Metrics: `authotron_oauth_upstream_tokens_total{event}` (see
+[metrics](../reference/metrics.md#metric-families)).
 
 ## Limitations
 
 - **Sessions are not federated.** Signing out at the provider does not end an
   Auth-O-Tron browser session; it expires after `session_ttl_seconds`.
   Auth-O-Tron has no logout endpoint of its own.
-- **Refresh tokens are not re-verified at the provider.** OAuth refresh-token
-  families started by an OIDC sign-in re-run augmentation and policy on every
-  refresh, as for other methods, but do not consult the provider; a disabled
-  provider account keeps refreshing until the family ends. Use
-  `refresh_max_lifetime_seconds` on the method to bound this.
+- **Refresh tokens of uncoupled families are not re-verified at the provider.**
+  Use [upstream offline access](#upstream-offline-access) or
+  `refresh_max_lifetime_seconds` on the method to bound how long a disabled
+  provider account keeps refreshing.
 - **Client authentication** with `private_key_jwt` and the `form_post` response
   mode are not supported.
 
