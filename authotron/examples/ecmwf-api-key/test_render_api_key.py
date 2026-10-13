@@ -38,9 +38,9 @@ OTHER_OAUTH_KEY = renderer.oauth_pem(
 # OIDC sign-in), and again when every playground profile enabled the in-cluster
 # metrics port.
 PRE_OAUTH_DIGESTS = {
-    "plain": "828db68826e2ebc802b54ea7e3f604b23b94bf57835f4f0a7cfb33a050c1d458",
-    "basic": "0d25b7f8bc3ab6f4706f6646248a94cfd89ebb329bce0b53182357f2067437c0",
-    "shared": "f953ce06200a816eed4acc1ff8e619d97f176f1348887954926bbf1c22bd045a",
+    "plain": "6c409ad156619e872ba980a28e5393837536328cd7c61219a2ce5b7d5e122c4b",
+    "basic": "140a524638422a2b64fc8daf9d27371802e5b2b37a82a9bce6572094dfe194e7",
+    "shared": "f03b5cbedc9feb4877ee66a2b675dd806ad6e2deb10f5f57c970861367006bcd",
 }
 # One `/login/` Prefix replaces per-method Exact paths, independent of method count.
 API_KEY_PATH_RULES = [

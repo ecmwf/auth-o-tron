@@ -103,6 +103,7 @@ SOURCE_FILES = (
     "authotron/src/oauth/valkey_transactions.rs",
     "authotron/src/oidc/discovery.rs",
     "authotron/src/oidc/http.rs",
+    "authotron/src/oidc/jwks.rs",
     "authotron/src/oidc/mock.rs",
     "authotron/src/oidc/mod.rs",
     "authotron/src/providers/base.rs",
