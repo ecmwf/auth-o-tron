@@ -42,7 +42,7 @@ fn valid_kid(value: &str) -> bool {
 }
 
 /// Valid: `/run/secrets/oauth/active.pem`. Invalid: `keys/active.pem` or a control character.
-fn valid_path(path: &Path) -> bool {
+pub(super) fn valid_path(path: &Path) -> bool {
     path.is_absolute()
         && path.file_name().is_some()
         && path
