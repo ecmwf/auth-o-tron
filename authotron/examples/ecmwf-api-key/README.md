@@ -62,19 +62,31 @@ the SSO stack first and then add, together with the OAuth profile below:
 
 ```bash
 --sso-issuer https://authotron-sso-playground.lumi.apps.dte.destination-earth.eu/realms/aviso-demo \
---sso-secret-file /tmp/opencode/authotron-sso-secrets.json
+--sso-secret-file /tmp/opencode/authotron-sso-secrets.json \
+--upstream-key-file /tmp/opencode/authotron-upstream-key.json
 ```
 
-The two options go together and need `--oauth-secret-file`. The method is
+The three options go together and need `--oauth-secret-file`. The method is
 `demo-sso` ("Demo SSO (Keycloak)", realm `demo-sso`, client
 `authotron-playground`, scopes `profile` and `email`, `offline_access: true`);
 `render_sso.py` registers that client with the matching callback. The renderer
 reads only `authotron-client-secret` from the SSO bundle, which must already
-exist with mode `0600`, and never writes it. The secret goes into the existing
-Opaque Secret as `oidc-client-secret` and is mounted read-only (mode 0440) at
-`/run/secrets/oidc/client-secret`; the pod template carries
-`checksum/oidc-credentials` (a SHA-256 digest only). `demo-sso` joins every OAuth
-resource's `allowed_realms`.
+exist with mode `0600`, and never writes it. The upstream key file holds only
+`upstream-key`, 32 random bytes in standard Base64, generated on first use with
+mode `0600` under the same private-file rules as the other credential files.
+Both values go into the existing Opaque Secret as `oidc-client-secret` and
+`oidc-upstream.key` and are mounted read-only (mode 0440) at
+`/run/secrets/oidc/client-secret` and `/run/secrets/oidc/upstream.key`; the pod
+template carries `checksum/oidc-credentials` (a SHA-256 digest only).
+
+The OAuth configuration then gains `upstream_token_encryption` (key id
+`upstream-<first 16 hex of SHA-256(key)>`), `demo-sso` joins every resource's
+`allowed_realms`, and every pre-registered MCP client (not `mcp-local`) sets
+`refresh_tokens.upstream_offline_access: true`: a sign-in through demo SSO
+requests `offline_access`, and that client's refresh-token family follows
+alice's Keycloak offline session. Disabling her in Keycloak ends the family at
+its next refresh, and revoking the client's refresh token revokes the offline
+session. Password and API-key sign-ins are unaffected.
 
 To add Basic login alongside the API-key button and optional demo SSO, also add:
 
@@ -280,15 +292,21 @@ oauth:
           scopes: [mcp:read]
         - resource: <--oauth-aviso-resource> # only with the flag
           scopes: [aviso:read]
-      refresh_tokens: { enabled: true, idle_ttl_seconds: 2592000, absolute_ttl_seconds: 7776000 }
+      refresh_tokens: { enabled: true, idle_ttl_seconds: 2592000, absolute_ttl_seconds: 7776000,
+                        upstream_offline_access: true } # upstream only with --sso-issuer
+  upstream_token_encryption: # only with --sso-issuer
+    active_kid: upstream-<sha256-prefix>
+    keys:
+      - kid: upstream-<sha256-prefix>
+        key_file: /run/secrets/oidc/upstream.key
   resources:
     - resource: https://127.0.0.1:8444/mcp
-      allowed_realms: [browser-demo, ecmwf] # browser-demo only with Basic
+      allowed_realms: [browser-demo, ecmwf, demo-sso] # browser-demo with Basic, demo-sso with SSO
       scopes:
         - name: mcp:read
           required_roles: [mcp-demo]
     - resource: <--oauth-aviso-resource> # only with the flag
-      allowed_realms: [browser-demo, ecmwf] # browser-demo only with Basic
+      allowed_realms: [browser-demo, ecmwf, demo-sso] # browser-demo with Basic, demo-sso with SSO
       scopes:
         - name: aviso:read
           required_roles: []
@@ -327,7 +345,7 @@ explicitly to 1024; the server splits it into non-borrowable per-client shares
 (113–114 slots for each of the 9 clients). Other OAuth settings keep server defaults.
 
 **OAuth policy.** `aviso:read` requires no role: any user who signs in through a
-playground browser method (realms `browser-demo`, `ecmwf`) may obtain it, the same
+playground browser method (realms `browser-demo`, `ecmwf`, `demo-sso`) may obtain it, the same
 audience as the Aviso playground. `mcp:read` requires role `mcp-demo`. `allowed_realms` stays
 derived from the browser providers, so realm membership alone is not enough:
 

@@ -164,7 +164,8 @@ MCP_CLIENTS = (
     },
 )
 # Keycloak demo SSO (../browser-sso): an OIDC sign-in method whose Keycloak client
-# render_sso.py registers with the same method id and client id.
+# render_sso.py registers with the same method id and client id. With it, refresh
+# families of the MCP_CLIENTS follow alice's Keycloak offline session.
 OIDC_METHOD_ID = "demo-sso"
 OIDC_LABEL = "Demo SSO (Keycloak)"
 OIDC_REALM = "demo-sso"
@@ -173,7 +174,10 @@ OIDC_CLIENT_ID = "authotron-playground"
 OIDC_BUNDLE_KEY = "authotron-client-secret"
 OIDC_DIR = "/run/secrets/oidc"
 OIDC_VOLUME = "oidc"
-OIDC_SECRET_KEYS = {"oidc-client-secret": "client-secret"}
+OIDC_SECRET_KEYS = {
+    "oidc-client-secret": "client-secret",
+    "oidc-upstream.key": "upstream.key",
+}
 # Each client receives floor(cap / client_count) non-borrowable transaction slots.
 OAUTH_MAX_AUTHORIZATION_TRANSACTIONS = 1024
 OAUTH_LOOPBACK_HOSTS = ("127.0.0.1", "[::1]", "localhost")
@@ -334,11 +338,10 @@ def checked_mcp_client(client):
 
 def checked_refresh_tokens(policy):
     """Mirror of the server's per-client refresh-token policy rules."""
-    if not isinstance(policy, dict) or set(policy) != {
-        "enabled",
-        "idle_ttl_seconds",
-        "absolute_ttl_seconds",
-    }:
+    required = {"enabled", "idle_ttl_seconds", "absolute_ttl_seconds"}
+    if not isinstance(policy, dict) or not (
+        required <= set(policy) <= required | {"upstream_offline_access"}
+    ):
         raise ValueError("unexpected OAuth refresh_tokens fields")
     idle, absolute = policy["idle_ttl_seconds"], policy["absolute_ttl_seconds"]
     if (
@@ -349,6 +352,9 @@ def checked_refresh_tokens(policy):
         or idle > absolute
     ):
         raise ValueError("invalid OAuth refresh_tokens lifetimes")
+    upstream = policy.get("upstream_offline_access", False)
+    if not isinstance(upstream, bool) or (upstream and not policy["enabled"]):
+        raise ValueError("upstream_offline_access requires enabled refresh tokens")
     return policy
 
 
@@ -683,6 +689,21 @@ def valkey_secret(path):
     )
 
 
+def upstream_key(path):
+    """The key sealing upstream refresh tokens, generated on first use."""
+
+    def validate(payload):
+        if not isinstance(payload, dict) or set(payload) != {"upstream-key"}:
+            raise ValueError("upstream key file must contain only upstream-key")
+        return checked_upstream_key(payload["upstream-key"])
+
+    return private_json(
+        path,
+        lambda: {"upstream-key": base64.b64encode(secrets.token_bytes(32)).decode()},
+        validate,
+    )
+
+
 def sso_client_secret(path):
     """Only `authotron-client-secret` from render_sso.py's existing private bundle; this
     renderer never creates or changes that file."""
@@ -807,18 +828,43 @@ def checked_oidc_issuer(value):
     return value
 
 
+def checked_upstream_key(value):
+    """32 random bytes in canonical standard Base64, as the server's key files hold.
+    Valid: the 44 characters `openssl rand -base64 32` writes. Invalid: unpadded or
+    URL-safe text, or a 16-byte key."""
+    try:
+        raw = base64.b64decode(value, validate=True) if isinstance(value, str) else b""
+    except ValueError:
+        raw = b""
+    if len(raw) != 32 or base64.b64encode(raw).decode() != value:
+        raise ValueError("expected a generated 32-byte upstream token key")
+    return value
+
+
 def checked_oidc(oidc, oauth_enabled):
-    """Demo SSO sign-in: the issuer and the Keycloak client secret. Like the playground's
-    other methods it serves the OAuth profile, which it needs."""
+    """Demo SSO sign-in: the issuer, the Keycloak client secret and the key sealing
+    upstream refresh tokens. It needs the OAuth profile, whose clients it couples."""
     if oidc is None:
         return None
     if not oauth_enabled:
         raise ValueError("the demo SSO method requires the OAuth profile")
-    if not isinstance(oidc, dict) or set(oidc) != {"issuer", "client_secret"}:
+    if not isinstance(oidc, dict) or set(oidc) != {
+        "issuer",
+        "client_secret",
+        "upstream_key",
+    }:
         raise ValueError("unexpected demo SSO settings")
     checked_oidc_issuer(oidc["issuer"])
     checked_token(oidc["client_secret"])
+    checked_upstream_key(oidc["upstream_key"])
     return oidc
+
+
+def upstream_kid(key):
+    """Key id derived from the key, e.g. upstream-0123456789abcdef: a new key gets a
+    new id."""
+    checked_upstream_key(key)
+    return f"upstream-{hashlib.sha256(base64.b64decode(key)).hexdigest()[:16]}"
 
 
 def oidc_method(issuer):
@@ -855,26 +901,33 @@ def checked_trusted_proxies(values, oauth_enabled):
     return values
 
 
-def oauth_clients(aviso_resource=None):
+def oauth_clients(aviso_resource=None, upstream=False):
     """mcp-local first (its fixed callback and local-only binding are unchanged),
-    then the MCP client table bound to the local and optional Aviso resources."""
+    then the MCP client table bound to the local and optional Aviso resources. With
+    `upstream`, the table clients (long-lived tools and agents) couple their refresh
+    families to the demo SSO offline session."""
     bindings = [{"resource": OAUTH_RESOURCE, "scopes": [OAUTH_SCOPE]}]
     if aviso_resource is not None:
         bindings.append({"resource": aviso_resource, "scopes": [OAUTH_AVISO_SCOPE]})
+    refresh = dict(OAUTH_REFRESH_TOKENS)
+    if upstream:
+        refresh["upstream_offline_access"] = True
     return checked_mcp_clients(
         [copy.deepcopy(OAUTH_CLIENT)]
         + [
             {
                 **copy.deepcopy(c),
                 "resources": copy.deepcopy(bindings),
-                "refresh_tokens": dict(OAUTH_REFRESH_TOKENS),
+                "refresh_tokens": dict(refresh),
             }
             for c in MCP_CLIENTS
         ]
     )
 
 
-def oauth_config(host, kid, realms, aviso_resource=None, trusted_proxies=()):
+def oauth_config(
+    host, kid, realms, aviso_resource=None, trusted_proxies=(), upstream_kid=None
+):
     realms = list(dict.fromkeys(realms))
     resources = [
         {
@@ -904,11 +957,17 @@ def oauth_config(host, kid, realms, aviso_resource=None, trusted_proxies=()):
                 {"kid": kid, "private_key_file": f"{OAUTH_KEY_DIR}/{OAUTH_KEY_NAME}"}
             ],
         },
-        "clients": oauth_clients(aviso_resource),
+        "clients": oauth_clients(aviso_resource, upstream_kid is not None),
         "resources": resources,
     }
     if trusted_proxies:
         config["endpoint_rate_limit"] = {"trusted_proxies": list(trusted_proxies)}
+    if upstream_kid is not None:
+        key_file = f"{OIDC_DIR}/{OIDC_SECRET_KEYS['oidc-upstream.key']}"
+        config["upstream_token_encryption"] = {
+            "active_kid": upstream_kid,
+            "keys": [{"kid": upstream_kid, "key_file": key_file}],
+        }
     return config
 
 
@@ -1044,7 +1103,12 @@ def transform(
         realms = [p["realm"] for p in config["providers"] if p.get("browser")]
         realms += [method["realm"] for method in config["ui"].get("oidc", [])]
         config["oauth"] = oauth_config(
-            host, oauth_kid(oauth_key), realms, aviso, proxies
+            host,
+            oauth_kid(oauth_key),
+            realms,
+            aviso,
+            proxies,
+            None if oidc is None else upstream_kid(oidc["upstream_key"]),
         )
     config["metrics"] = {"enabled": True, "port": METRICS_PORT}
     config_map["data"]["config.yaml"] = yaml.safe_dump(config)
@@ -1136,7 +1200,10 @@ def transform(
             hashlib.sha256(oauth_key.encode("ascii")).hexdigest()
         )
     if oidc is not None:
-        values = {"oidc-client-secret": oidc["client_secret"]}
+        values = {
+            "oidc-client-secret": oidc["client_secret"],
+            "oidc-upstream.key": oidc["upstream_key"],
+        }
         resources[-1]["data"].update(
             {
                 key: base64.b64encode(value.encode("ascii")).decode("ascii")
@@ -1349,6 +1416,11 @@ def main():
         type=Path,
         help="render_sso.py's private bundle holding the Keycloak client secret",
     )
+    parser.add_argument(
+        "--upstream-key-file",
+        type=Path,
+        help="private key file sealing upstream refresh tokens (generated if absent)",
+    )
     parser.add_argument("--basic-secret-file", type=Path)
     parser.add_argument("--valkey-secret-file", type=Path)
     parser.add_argument("--oauth-secret-file", type=Path)
@@ -1402,8 +1474,11 @@ def main():
     checked_ecmwf_uids(args.oauth_allow_ecmwf_uids, bool(args.oauth_secret_file))
     checked_aviso_resource(args.oauth_aviso_resource, bool(args.oauth_secret_file))
     checked_trusted_proxies(args.oauth_trusted_proxies, bool(args.oauth_secret_file))
-    if bool(args.sso_issuer) != bool(args.sso_secret_file):
-        raise ValueError("--sso-issuer and --sso-secret-file go together")
+    sso_flags = (args.sso_issuer, args.sso_secret_file, args.upstream_key_file)
+    if any(sso_flags) and not all(sso_flags):
+        raise ValueError(
+            "--sso-issuer, --sso-secret-file and --upstream-key-file go together"
+        )
     if args.sso_issuer:
         checked_oidc_issuer(args.sso_issuer)
         if not args.oauth_secret_file:
@@ -1418,6 +1493,7 @@ def main():
             args.valkey_secret_file,
             args.oauth_secret_file,
             args.sso_secret_file,
+            args.upstream_key_file,
         )
         if path
     ]
@@ -1457,6 +1533,7 @@ def main():
         oauth["oidc"] = {
             "issuer": args.sso_issuer,
             "client_secret": sso_client_secret(args.sso_secret_file),
+            "upstream_key": upstream_key(args.upstream_key_file),
         }
     resources, _ = render_api_key(
         project,

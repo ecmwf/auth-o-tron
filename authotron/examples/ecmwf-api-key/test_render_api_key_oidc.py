@@ -1,7 +1,8 @@
-"""Offline contracts of the demo SSO (Keycloak) method."""
+"""Offline contracts of the demo SSO (Keycloak) method and upstream offline access."""
 
 import base64
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -15,7 +16,8 @@ import yaml
 
 ISSUER = "https://sso.example.org/realms/aviso-demo"
 CLIENT_SECRET = base64.urlsafe_b64encode(b"c" * 32).decode().rstrip("=")
-OIDC = {"issuer": ISSUER, "client_secret": CLIENT_SECRET}
+UPSTREAM_KEY = base64.b64encode(b"u" * 32).decode()
+OIDC = {"issuer": ISSUER, "client_secret": CLIENT_SECRET, "upstream_key": UPSTREAM_KEY}
 
 
 def config_of(resources):
@@ -110,6 +112,46 @@ class OidcRendererTests(unittest.TestCase):
                 self.assertNotIn(value, public)
                 self.assertNotIn(value, archive.decode("latin-1"))
 
+    def test_upstream_key_couples_the_mcp_clients(self):
+        baseline, _ = self.baseline()
+        resources = self.render(baseline)
+        oauth = private_config_of(resources)["oauth"]
+        kid = "upstream-" + hashlib.sha256(b"u" * 32).hexdigest()[:16]
+        self.assertEqual(
+            oauth["upstream_token_encryption"],
+            {
+                "active_kid": kid,
+                "keys": [{"kid": kid, "key_file": "/run/secrets/oidc/upstream.key"}],
+            },
+        )
+        clients = {client["client_id"]: client for client in oauth["clients"]}
+        self.assertEqual(
+            clients["mcp-local"]["refresh_tokens"], renderer.OAUTH_REFRESH_TOKENS
+        )
+        for table in renderer.MCP_CLIENTS:
+            self.assertEqual(
+                clients[table["client_id"]]["refresh_tokens"],
+                {**renderer.OAUTH_REFRESH_TOKENS, "upstream_offline_access": True},
+            )
+        secret = base.find(resources, "Secret")
+        self.assertEqual(
+            base64.b64decode(secret["data"]["oidc-upstream.key"]).decode(), UPSTREAM_KEY
+        )
+        template = base.find(resources, "Deployment")["spec"]["template"]
+        volume = next(v for v in template["spec"]["volumes"] if v["name"] == "oidc")
+        self.assertEqual(
+            volume["secret"]["items"],
+            [
+                {"key": "oidc-client-secret", "path": "client-secret"},
+                {"key": "oidc-upstream.key", "path": "upstream.key"},
+            ],
+        )
+        # Without the demo SSO no client is coupled and no key is configured.
+        plain = private_config_of(self.render(baseline, oidc=None))["oauth"]
+        self.assertNotIn("upstream_token_encryption", plain)
+        for client in plain["clients"]:
+            self.assertEqual(client["refresh_tokens"], renderer.OAUTH_REFRESH_TOKENS)
+
     def test_credential_changes_roll_out_by_digest_only(self):
         baseline, _ = self.baseline()
 
@@ -120,6 +162,8 @@ class OidcRendererTests(unittest.TestCase):
 
         original = annotation()
         self.assertNotEqual(annotation(client_secret=base.TOKEN), original)
+        rotated = base64.b64encode(b"v" * 32).decode()
+        self.assertNotEqual(annotation(upstream_key=rotated), original)
 
     def test_demo_sso_requires_oauth_and_valid_settings(self):
         baseline, _ = self.baseline()
@@ -140,6 +184,9 @@ class OidcRendererTests(unittest.TestCase):
             {"issuer": "https://sso.example.org/realms/../admin"},
             {"client_secret": "short"},
             {"extra": "value"},
+            {"upstream_key": UPSTREAM_KEY.rstrip("=")},
+            {"upstream_key": base64.b64encode(b"u" * 16).decode()},
+            {"upstream_key": base64.urlsafe_b64encode(b"\xff" * 32).decode()},
         ):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 renderer.transform(
@@ -175,6 +222,12 @@ class OidcRendererTests(unittest.TestCase):
             edit_config(
                 lambda c: c["ui"]["oidc"][0].update(client_secret_file="/tmp/s")
             ),
+            edit_config(
+                lambda c: c["oauth"]["clients"][0]["refresh_tokens"].update(
+                    upstream_offline_access=True
+                )
+            ),
+            edit_config(lambda c: c["oauth"].pop("upstream_token_encryption")),
             lambda d: base.find(d, "Secret")["data"].update(
                 {"oidc-client-secret": base64.b64encode(b"other").decode()}
             ),
@@ -199,6 +252,35 @@ class OidcRendererTests(unittest.TestCase):
                         base.BASIC,
                         **options,
                     )
+
+    def test_refresh_policy_and_key_rules_mirror_the_server(self):
+        good = dict(renderer.OAUTH_REFRESH_TOKENS, upstream_offline_access=True)
+        self.assertEqual(renderer.checked_refresh_tokens(dict(good)), good)
+        for invalid in (
+            dict(good, enabled=False),
+            dict(good, upstream_offline_access="yes"),
+            dict(good, upstream=True),
+        ):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                renderer.checked_refresh_tokens(invalid)
+        self.assertEqual(renderer.checked_upstream_key(UPSTREAM_KEY), UPSTREAM_KEY)
+        self.assertRegex(
+            renderer.upstream_kid(UPSTREAM_KEY), r"^upstream-[0-9a-f]{16}$"
+        )
+        self.assertNotEqual(
+            renderer.upstream_kid(UPSTREAM_KEY),
+            renderer.upstream_kid(base64.b64encode(b"v" * 32).decode()),
+        )
+
+    def test_upstream_key_file_generation_and_reuse(self):
+        path = self.root / "upstream.json"
+        key = renderer.upstream_key(path)
+        self.assertEqual(len(base64.b64decode(key, validate=True)), 32)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(renderer.upstream_key(path), key)
+        path.write_text(json.dumps({"upstream-key": key, "other": key}))
+        with self.assertRaises(ValueError):
+            renderer.upstream_key(path)
 
     def test_sso_bundle_is_read_but_never_created_or_changed(self):
         bundle = self.root / "sso.json"
@@ -235,6 +317,8 @@ class OidcRendererTests(unittest.TestCase):
             ISSUER,
             "--sso-secret-file",
             str(self.root / "sso.json"),
+            "--upstream-key-file",
+            str(self.root / "upstream.json"),
         ]
 
     def test_cli_passes_demo_sso_without_printing_secrets(self):
@@ -248,6 +332,7 @@ class OidcRendererTests(unittest.TestCase):
             patch.object(renderer, "valkey_secret", return_value=base.VALKEY_PASSWORD),
             patch.object(renderer, "oauth_signing_key", return_value=base.OAUTH_KEY),
             patch.object(renderer, "sso_client_secret", return_value=CLIENT_SECRET),
+            patch.object(renderer, "upstream_key", return_value=UPSTREAM_KEY),
             patch.object(
                 renderer, "render_api_key", return_value=(resources, b"archive")
             ) as render,
@@ -256,7 +341,8 @@ class OidcRendererTests(unittest.TestCase):
             renderer.main()
         self.assertEqual(render.call_args.kwargs["oidc"], OIDC)
         self.assertIn(ISSUER, str(printed.call_args_list))
-        self.assertNotIn(CLIENT_SECRET, str(printed.call_args_list))
+        for value in (CLIENT_SECRET, UPSTREAM_KEY):
+            self.assertNotIn(value, str(printed.call_args_list))
 
     def test_cli_rejects_partial_or_unsupported_sso_before_credentials(self):
         full = self.sso_arguments()
@@ -265,9 +351,10 @@ class OidcRendererTests(unittest.TestCase):
         del oauth_less[index : index + 2]
         invalid = [
             full[: full.index("--sso-secret-file")],
+            full[: full.index("--upstream-key-file")],
             oauth_less,
             [a if a != ISSUER else ISSUER + "/" for a in full],
-            full[:-1] + [str(self.root / "valkey.json")],
+            full[:-1] + [str(self.root / "sso.json")],
         ]
         for arguments in invalid:
             with (
@@ -275,11 +362,12 @@ class OidcRendererTests(unittest.TestCase):
                 patch("sys.argv", arguments),
                 patch.object(renderer, "signing_secret") as signing,
                 patch.object(renderer, "sso_client_secret") as sso,
+                patch.object(renderer, "upstream_key") as upstream,
                 patch.object(renderer, "render_api_key") as render,
             ):
                 with self.assertRaises(ValueError):
                     renderer.main()
-                for mocked in (signing, sso, render):
+                for mocked in (signing, sso, upstream, render):
                     mocked.assert_not_called()
 
     def test_method_and_client_ids_match_the_sso_realm(self):
@@ -290,6 +378,13 @@ class OidcRendererTests(unittest.TestCase):
         self.assertEqual(sso.AUTHOTRON_METHOD_ID, renderer.OIDC_METHOD_ID)
         self.assertEqual(sso.AUTHOTRON_CLIENT_ID, renderer.OIDC_CLIENT_ID)
         self.assertIn(renderer.OIDC_BUNDLE_KEY, sso.SECRET_KEYS)
+        self.assertEqual(
+            sso.OFFLINE_IDLE_SECONDS, renderer.OAUTH_REFRESH_TOKENS["idle_ttl_seconds"]
+        )
+        self.assertEqual(
+            sso.OFFLINE_MAX_SECONDS,
+            renderer.OAUTH_REFRESH_TOKENS["absolute_ttl_seconds"],
+        )
 
 
 if __name__ == "__main__":
