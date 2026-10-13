@@ -11,6 +11,7 @@ pub mod keys;
 pub mod rate_limit;
 pub mod records;
 pub mod refresh;
+mod refresh_durability;
 pub mod refresh_grant;
 pub mod refresh_store;
 pub mod runtime;

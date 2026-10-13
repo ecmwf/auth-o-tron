@@ -12,6 +12,7 @@ use super::refresh::{
     MAX_ROTATED_HASHES, Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant, RefreshStoreError,
     Rotated, deadline, initial_expiry, random_id,
 };
+use super::refresh_durability::{self, Durability};
 use crate::{
     config::{RefreshTokenPolicy, ui::BrowserBackendConfig},
     utils::valkey::ValkeyConnection,
@@ -52,6 +53,17 @@ impl ValkeyRefreshStore {
             prefix: format!("{key_prefix}:oauth:refresh-tokens:v2:"),
             max_per_user,
         })
+    }
+    /// Reads `INFO persistence`; any failure, including ACL denial, is `Unverified`.
+    pub(crate) async fn durability(&self) -> Durability {
+        match self
+            .connection
+            .query::<String>(redis::cmd("INFO").arg("persistence"))
+            .await
+        {
+            Ok(info) => refresh_durability::from_info(&info),
+            Err(_) => Durability::Unverified,
+        }
     }
     fn token_key(&self, hash: &[u8; 32]) -> String {
         format!("{}token:{}", self.prefix, URL_SAFE_NO_PAD.encode(hash))
@@ -285,6 +297,13 @@ mod tests {
         }
         let a = ready.expect("disposable Valkey did not become ready");
         let b = ValkeyRefreshStore::new(&backend, 2).await.unwrap();
+        assert_eq!(a.durability().await, Durability::NotPersisted);
+        let _: String = a
+            .connection
+            .query(redis::cmd("CONFIG").arg("SET").arg("appendonly").arg("yes"))
+            .await
+            .unwrap();
+        assert_eq!(a.durability().await, Durability::AppendOnly);
         let (sec, _): (u64, u64) = a.connection.query(&redis::cmd("TIME")).await.unwrap();
         let now = sec * 1000;
         let ceiling = now + 3_600_000;
