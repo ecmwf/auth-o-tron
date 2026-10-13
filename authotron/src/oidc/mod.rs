@@ -16,6 +16,7 @@ pub mod flow;
 pub mod http;
 pub mod id_token;
 pub mod jwks;
+pub mod method;
 #[cfg(test)]
 pub(crate) mod mock;
 pub mod token_client;
