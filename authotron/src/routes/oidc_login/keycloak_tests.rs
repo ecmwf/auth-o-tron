@@ -271,13 +271,15 @@ async fn offline_access(app: &Router, state: &AppState, address: &str) {
     assert_eq!(upstream_events(state, "invalid_grant"), 1);
     assert_eq!(refresh(app, &second).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(upstream_events(state, "invalid_grant"), 1);
-    // Revoking at Auth-O-Tron ends the new offline session at Keycloak too. The refused
-    // session is not revoked: Keycloak keeps it for the re-enabled account until its
-    // offline idle timeout, and no family holds its token any more.
+    // The refused token is revoked as well. Keycloak accepts that for the disabled
+    // account and ends its offline session, which would otherwise outlive re-enabling.
+    no_offline_session(&admin).await;
+    assert_eq!(upstream_events(state, "revocation_sent"), 1);
     admin.set_enabled(true).await;
-    let kept = admin.offline_sessions().await;
+    assert_eq!(admin.offline_sessions().await, 0);
+    // Revoking at Auth-O-Tron ends the new offline session at Keycloak too.
     let token = oauth_sign_in(app).await;
-    assert_eq!(admin.offline_sessions().await, kept + 1);
+    assert_eq!(admin.offline_sessions().await, 1);
     let (status, _) = post(
         app,
         "/oauth/revoke",
@@ -285,15 +287,20 @@ async fn offline_access(app: &Router, state: &AppState, address: &str) {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    no_offline_session(&admin).await;
+    assert_eq!(upstream_events(state, "revocation_sent"), 2);
+}
+
+/// Waits until the queued revocation has ended alice's offline sessions.
+async fn no_offline_session(admin: &Admin) {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while admin.offline_sessions().await > kept {
+    while admin.offline_sessions().await > 0 {
         assert!(
             Instant::now() < deadline,
             "Keycloak offline session not revoked"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(upstream_events(state, "revocation_sent"), 1);
 }
 
 /// Authorizes `desktop`, signs in at Keycloak, approves and returns the refresh token.

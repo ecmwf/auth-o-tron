@@ -261,15 +261,16 @@ families already coupled keep renewing at the provider until they end.
   method with `username_claim: sub` and no `roles_claim` can refresh. Then
   augmentation, policy and the family's own rotation follow as usual.
 - **Revocation.** When a coupled family ends through `/oauth/revoke`, reuse
-  detection, the per-user cap or a policy check at refresh, its upstream token is
-  revoked at the provider's RFC 7009 endpoint, if it advertises one. Revocations
-  run on a background queue of 256; a full queue skips and counts them.
+  detection, the per-user cap, a policy check at refresh or a refused upstream
+  refresh, its upstream token is revoked at the provider's RFC 7009 endpoint, if
+  it advertises one. Revocations run on a background queue of 256; a full queue
+  skips and counts them, as does a sealed grant that can no longer be opened.
 
 | Refresh situation | Response | Family | Upstream token |
 |-------------------|----------|--------|----------------|
 | Provider refreshed the grant | as for other families | rotated | stored (rotated if the provider rotated it) |
-| Provider answers `invalid_grant` (expired, revoked, account disabled) | 400 `invalid_grant` | revoked | not revoked |
-| Sealed grant cannot be opened (key removed, other binding) | 400 `invalid_grant` | revoked | not revoked |
+| Provider answers `invalid_grant` (expired, revoked, account disabled) | 400 `invalid_grant` | revoked | revoked |
+| Sealed grant cannot be opened (key removed, other binding) | 400 `invalid_grant` | revoked | cannot be revoked (skipped) |
 | `sub` or username changed, refreshed claims unusable | 400 `invalid_grant` | revoked | revoked |
 | Provider unavailable, client refused, malformed answer, refreshed ID token not verified, ID token needed but missing, lock still held, rotated token not stored | 503 `server_error` | kept | kept |
 
@@ -295,9 +296,10 @@ Not covered:
   upstream; the provider's offline session idle timeout ends them. The same holds
   for a sign-in whose authorization is abandoned before a code is issued, or whose
   code is never exchanged.
-- After `invalid_grant` the upstream token is not revoked. Keycloak keeps a
-  disabled account's offline session; if the account is enabled again, that
-  session lasts until its idle timeout, though no family holds its token.
+- After `invalid_grant` the refused token is revoked, but whether that ends the
+  provider's session is up to the provider. Keycloak (26.8) refuses a disabled
+  account's offline token at refresh but accepts its revocation and ends the
+  offline session, which would otherwise outlive re-enabling the account.
 - If the provider rotates the token but the new one cannot be stored, or the lock
   expires while a refresh is stalled, the rotated token is lost and the family
   fails at its next refresh. The lock lives for three times `http_timeout_ms`

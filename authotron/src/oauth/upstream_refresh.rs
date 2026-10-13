@@ -43,9 +43,9 @@ enum Outcome {
     Unavailable,
     /// Another refresh of the family held the lock for the whole wait.
     Busy,
-    /// The upstream grant is gone or cannot be opened: end the family only.
+    /// The provider refused the grant, or it is gone or cannot be opened.
     Dead,
-    /// The identity changed: end the family and its upstream grant.
+    /// The identity changed.
     Changed,
     /// The presented token turned out to be reused; the store ended the family.
     Reused(Option<EndedUpstream>),
@@ -54,7 +54,9 @@ enum Outcome {
 impl OAuthRuntime {
     /// Renews a coupled family's upstream grant for the presented token and returns the
     /// provider roles to augment. Families whose upstream grant is dead or whose identity
-    /// changed are revoked.
+    /// changed are revoked, and so is their upstream grant where it can still be opened:
+    /// a refusal may concern only that token, e.g. a disabled account whose offline
+    /// session the provider keeps.
     pub(super) async fn refresh_upstream(
         self: &Arc<Self>,
         backend: &RefreshBackend,
@@ -101,12 +103,10 @@ impl OAuthRuntime {
                 self.end_upstream(ended, browser, metrics);
                 Err(InvalidGrant)
             }
-            ended @ (Outcome::Dead | Outcome::Changed) => {
+            Outcome::Dead | Outcome::Changed => {
                 let revoked = refresh_dispatch!(backend, revoke_family(&family.family_id))?;
                 metrics.record_refresh_token(RefreshTokenEvent::FamilyRevoked);
-                if matches!(ended, Outcome::Changed) {
-                    self.end_upstream(revoked, browser, metrics);
-                }
+                self.end_upstream(revoked, browser, metrics);
                 Err(InvalidGrant)
             }
         }

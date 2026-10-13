@@ -74,9 +74,9 @@ async fn refresh_renews_the_upstream_grant_and_stores_its_rotation() {
 }
 
 #[tokio::test]
-async fn a_refused_grant_ends_the_family_without_contacting_the_provider_again() {
+async fn a_refused_grant_ends_the_family_and_is_revoked_at_the_provider() {
     let coupled = coupled(|_| {}).await;
-    let (token, _) = live_family(&coupled).await;
+    let (token, upstream) = live_family(&coupled).await;
     coupled
         .idp
         .state
@@ -88,15 +88,18 @@ async fn a_refused_grant_ends_the_family_without_contacting_the_provider_again()
         coupled.refresh(&token).await.err(),
         Some(RefreshGrantError::InvalidGrant)
     );
-    // The family is gone: no second provider request.
+    // The refused token is still revoked: the provider may keep its session.
+    assert_eq!(coupled.revoked(1).await, std::slice::from_ref(&upstream));
+    assert!(!coupled.idp.state.refresh_token_live(&upstream));
+    assert_eq!(coupled.upstream_events("revocation_sent"), 1);
+    // The family is gone: no second refresh request.
     assert_eq!(
         coupled.refresh(&token).await.err(),
         Some(RefreshGrantError::InvalidGrant)
     );
     assert_eq!(coupled.idp.state.refresh_requests.load(Ordering::SeqCst), 1);
     assert_eq!(coupled.upstream_events("invalid_grant"), 1);
-    assert!(coupled.idp.state.revoked.lock().unwrap().is_empty());
-    // A grant the configured keys cannot open ends its family the same way.
+    // A grant the configured keys cannot open ends its family; it is skipped upstream.
     let mut foreign = coupled.grant();
     foreign.client_id = "other".into();
     let sealed = coupled.seal(&foreign, "offline-foreign");
@@ -121,6 +124,8 @@ async fn a_refused_grant_ends_the_family_without_contacting_the_provider_again()
         Some(RefreshGrantError::InvalidGrant)
     );
     assert_eq!(coupled.idp.state.refresh_requests.load(Ordering::SeqCst), 1);
+    assert_eq!(coupled.upstream_events("revocation_skipped"), 1);
+    assert_eq!(coupled.idp.state.revoked.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
