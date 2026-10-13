@@ -412,8 +412,12 @@ clients discover it. Setup, with `AVISO` set to the `--oauth-aviso-resource` URL
   }
   ```
 
-- **Visual Studio Code**: add the server as an HTTP MCP server; when prompted for
-  a client ID (no dynamic registration), enter `vscode` and leave the secret empty.
+  Sign in with `/mcp auth aviso`. Gemini CLI stores tokens in plain JSON at
+  `~/.gemini/mcp-oauth-tokens.json` (mode `0600`) and refreshes them at startup.
+- **Visual Studio Code**: add the server as an HTTP MCP server and start it. VS Code
+  reports that dynamic client registration is not supported; choose *Copy URIs &
+  Proceed*, enter client ID `vscode`, leave the secret empty, then allow the
+  authentication prompt. The callback is `http://127.0.0.1:33418/`.
 - **Cursor** (`~/.cursor/mcp.json`):
 
   ```json
@@ -427,13 +431,20 @@ clients discover it. Setup, with `AVISO` set to the `--oauth-aviso-resource` URL
   }
   ```
 
+  With the Cursor CLI, sign in with `cursor-agent mcp login aviso`; no Cursor
+  account is needed for MCP commands. The CLI always listens on port `8787`
+  (`http://localhost:8787/callback`), so sign-in fails if another process holds
+  that port. Tokens are stored in plain JSON per working directory under
+  `~/.cursor/projects/`, so another directory may need a new sign-in.
 - **Claude (claude.ai, Desktop, mobile)**: *Settings → Connectors → Add custom
   connector*, URL `$AVISO`, advanced settings OAuth Client ID `claude-ai`, no secret.
 - **ChatGPT**: create a connector for `$AVISO` and choose a predefined OAuth client
   with client ID `chatgpt`, no secret (public client, token auth `none`).
-- **MCP Inspector**: `npx @modelcontextprotocol/inspector`, transport Streamable
-  HTTP, URL `$AVISO`, then under *Authentication* set Client ID `mcp-inspector`
-  and scope `aviso:read`.
+- **MCP Inspector** (v2): `npx @modelcontextprotocol/inspector`, then *Add Servers →
+  Add manually* with transport `streamable-http` and URL `$AVISO`. Under *Settings →
+  OAuth Settings* set Client ID `mcp-inspector` and scope `aviso:read`; the default
+  callback `http://localhost:6274/oauth/callback` is registered. Connecting opens
+  the sign-in page.
 
 The Ingress adds exactly `/oauth/authorize`, `/oauth/continue`, `/oauth/consent`,
 `/oauth/token`, `/oauth/revoke` and `/oauth/jwks` (Exact) and
