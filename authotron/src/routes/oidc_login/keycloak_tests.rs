@@ -7,12 +7,21 @@
 // does it submit to any jurisdiction.
 
 //! Interoperability with a disposable Keycloak: discovery, the code flow with PKCE,
-//! nonce and RFC 9207 `iss`, client authentication, signing keys and role mapping.
-//! The realm mirrors the playground client registration: a confidential client with
-//! the `basic`, `profile` and `email` scopes and a fixed user id, so `sub` is stable.
+//! nonce and RFC 9207 `iss`, client authentication, signing keys and role mapping, and
+//! offline access coupled to OAuth refresh families. The realm mirrors the playground
+//! client registration: a confidential client with the `basic`, `profile` and `email`
+//! scopes, a fixed user id, so `sub` is stable, strict refresh-token rotation, and a
+//! service-account client that administers users.
 
-use super::tests::{Jar, ORIGIN, get, local, location, text};
-use crate::config::ConfigV2;
+use super::{
+    authorization_tests::{CLIENT_CALLBACK, RESOURCE, authorize},
+    offline_tests::{approve_and_exchange, post, refresh},
+    tests::{Jar, ORIGIN, get, local, location, text},
+};
+use crate::{config::ConfigV2, oidc::mock::rsa_key, state::AppState};
+use axum::{Router, http::StatusCode};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use rsa::pkcs8::{EncodePrivateKey, LineEnding};
 use serde_json::{Value, json};
 use std::{
     io::Write,
@@ -28,6 +37,7 @@ const KEYCLOAK_IMAGE: &str = "quay.io/keycloak/keycloak@sha256:27b3230fbabb8c9ff
 const REALM: &str = "authotron-test";
 /// Disposable fixture credentials; they protect nothing.
 const CLIENT_SECRET: &str = "fixture-client-secret";
+const ADMIN_SECRET: &str = "fixture-admin-secret";
 const PASSWORD: &str = "fixture-password";
 const USER_ID: &str = "6f0c2b8e-4d55-4f3a-9a4c-2f1b8d7e5a01";
 
@@ -50,7 +60,7 @@ fn docker(args: &[&str]) -> String {
 fn realm() -> Value {
     json!({
         "realm": REALM, "enabled": true, "registrationAllowed": false,
-        "accessTokenLifespan": 60,
+        "accessTokenLifespan": 60, "revokeRefreshToken": true, "refreshTokenMaxReuse": 0,
         "roles": {"realm": [{"name": "mcp-demo"}]},
         "clients": [{
             "clientId": "authotron", "enabled": true, "protocol": "openid-connect",
@@ -70,13 +80,21 @@ fn realm() -> Value {
                     "multivalued": "true", "id.token.claim": "true",
                     "access.token.claim": "false", "userinfo.token.claim": "false"}
             }]
+        }, {
+            "clientId": "authotron-e2e-admin", "enabled": true, "protocol": "openid-connect",
+            "publicClient": false, "secret": ADMIN_SECRET, "standardFlowEnabled": false,
+            "directAccessGrantsEnabled": false, "serviceAccountsEnabled": true
         }],
         "users": [{
             "id": USER_ID, "username": "alice", "enabled": true,
             "firstName": "Alice", "lastName": "Demo",
             "email": "alice@example.org", "emailVerified": true,
-            "realmRoles": [format!("default-roles-{REALM}"), "mcp-demo"],
+            "realmRoles": [format!("default-roles-{REALM}"), "mcp-demo", "offline_access"],
             "credentials": [{"type": "password", "value": PASSWORD, "temporary": false}]
+        }, {
+            "username": "service-account-authotron-e2e-admin", "enabled": true,
+            "serviceAccountClientId": "authotron-e2e-admin",
+            "clientRoles": {"realm-management": ["manage-users", "view-users", "view-clients"]}
         }]
     })
 }
@@ -183,6 +201,11 @@ async fn disposable_keycloak_signs_in_through_an_oidc_method() {
 
     let mut secret = tempfile::NamedTempFile::new().unwrap();
     writeln!(secret, "{CLIENT_SECRET}").unwrap();
+    let mut signing = tempfile::NamedTempFile::new().unwrap();
+    let pem = rsa_key(0).to_pkcs8_pem(LineEnding::LF).unwrap();
+    signing.write_all(pem.as_bytes()).unwrap();
+    let mut sealing = tempfile::NamedTempFile::new().unwrap();
+    writeln!(sealing, "{}", STANDARD.encode([3u8; 32])).unwrap();
     let config: ConfigV2 = serde_json::from_value(json!({
         "store": {"enabled": false}, "services": [], "augmenters": [], "providers": [],
         "server": {"port": 0}, "metrics": {"enabled": false},
@@ -194,10 +217,18 @@ async fn disposable_keycloak_signs_in_through_an_oidc_method() {
                 "issuer": issuer, "client_id": "authotron",
                 "client_secret_file": secret.path(), "scopes": ["profile", "email"],
                 "roles_claim": "realm_access.roles", "role_map": {"mcp-demo": "reader"},
-                "max_authentication_age_seconds": 300}]}
+                "max_authentication_age_seconds": 300, "offline_access": true}]},
+        "oauth": {"enabled": true, "issuer": format!("{ORIGIN}/"),
+            "signing": {"active_kid": "oauth", "keys": [{"kid": "oauth", "private_key_file": signing.path()}]},
+            "upstream_token_encryption": {"active_kid": "u1", "keys": [{"kid": "u1", "key_file": sealing.path()}]},
+            "clients": [{"client_id": "desktop", "display_name": "Desktop", "application_type": "native",
+                "redirect_uris": [CLIENT_CALLBACK], "resources": [{"resource": RESOURCE, "scopes": ["read"]}],
+                "refresh_tokens": {"enabled": true, "upstream_offline_access": true}}],
+            "resources": [{"resource": RESOURCE, "allowed_realms": ["keycloak-test"],
+                "scopes": [{"name": "read", "required_roles": ["reader"]}]}]}
     }))
     .unwrap();
-    let (app, _state) = crate::startup::build_app(Arc::new(config)).await.unwrap();
+    let (app, state) = crate::startup::build_app(Arc::new(config)).await.unwrap();
 
     let mut jar = Jar::default();
     let started = get(&app, "/login/method/keycloak", &jar).await;
@@ -216,4 +247,133 @@ async fn disposable_keycloak_signs_in_through_an_oidc_method() {
     assert!(account.contains("alice@example.org"));
     // The code is single-use at Keycloak and the state at Auth-O-Tron.
     assert_eq!(get(&app, &local(&callback), &jar).await.status(), 400);
+    offline_access(&app, &state, &address).await;
+}
+
+/// An OAuth sign-in with `offline_access`, then refreshes coupled to Keycloak's offline
+/// session: strict rotation, a disabled account, and revocation by the client.
+async fn offline_access(app: &Router, state: &AppState, address: &str) {
+    let admin = Admin::new(address).await;
+    let first = oauth_sign_in(app).await;
+    assert_eq!(admin.offline_sessions().await, 1);
+    let (status, tokens) = refresh(app, &first).await;
+    assert_eq!(status, StatusCode::OK);
+    let second = tokens["refresh_token"].as_str().unwrap().to_owned();
+    assert_eq!(upstream_events(state, "refreshed"), 1);
+    assert_eq!(upstream_events(state, "rotated"), 1);
+    // Keycloak refuses a disabled account's offline token: the family ends with it.
+    admin.set_enabled(false).await;
+    let (status, error) = refresh(app, &second).await;
+    assert_eq!(
+        (status, error["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_grant"))
+    );
+    assert_eq!(upstream_events(state, "invalid_grant"), 1);
+    assert_eq!(refresh(app, &second).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(upstream_events(state, "invalid_grant"), 1);
+    // Revoking at Auth-O-Tron ends the new offline session at Keycloak too. The refused
+    // session is not revoked: Keycloak keeps it for the re-enabled account until its
+    // offline idle timeout, and no family holds its token any more.
+    admin.set_enabled(true).await;
+    let kept = admin.offline_sessions().await;
+    let token = oauth_sign_in(app).await;
+    assert_eq!(admin.offline_sessions().await, kept + 1);
+    let (status, _) = post(
+        app,
+        "/oauth/revoke",
+        &[("token", &token), ("client_id", "desktop")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while admin.offline_sessions().await > kept {
+        assert!(
+            Instant::now() < deadline,
+            "Keycloak offline session not revoked"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(upstream_events(state, "revocation_sent"), 1);
+}
+
+/// Authorizes `desktop`, signs in at Keycloak, approves and returns the refresh token.
+async fn oauth_sign_in(app: &Router) -> String {
+    let mut jar = authorize(app).await;
+    let started = get(app, "/login/method/keycloak", &jar).await;
+    jar.update(&started);
+    assert!(location(&started).contains("offline_access"));
+    let callback = provider_sign_in(&location(&started)).await;
+    let finished = get(app, &local(&callback), &jar).await;
+    assert_eq!(location(&finished), "/oauth/continue");
+    jar.update(&finished);
+    approve_and_exchange(app, &jar).await
+}
+
+fn upstream_events(state: &AppState, event: &str) -> u64 {
+    let line = format!("authotron_oauth_upstream_tokens_total{{event=\"{event}\"}} ");
+    let output = state.metrics.render().unwrap();
+    output
+        .lines()
+        .find_map(|candidate| candidate.strip_prefix(&line))
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// Keycloak's admin API through the `authotron-e2e-admin` service account.
+struct Admin {
+    client: reqwest::Client,
+    base: String,
+    token: String,
+}
+impl Admin {
+    async fn new(address: &str) -> Self {
+        let client = reqwest::Client::new();
+        let token: Value = client
+            .post(format!(
+                "http://{address}/realms/{REALM}/protocol/openid-connect/token"
+            ))
+            .form(&[
+                ("grant_type", "client_credentials"),
+                ("client_id", "authotron-e2e-admin"),
+                ("client_secret", ADMIN_SECRET),
+            ])
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        Self {
+            client,
+            base: format!("http://{address}/admin/realms/{REALM}"),
+            token: token["access_token"].as_str().unwrap().to_owned(),
+        }
+    }
+    async fn set_enabled(&self, enabled: bool) {
+        let response = self
+            .client
+            .put(format!("{}/users/{USER_ID}", self.base))
+            .bearer_auth(&self.token)
+            .json(&json!({"enabled": enabled}))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success(), "Keycloak updates the user");
+    }
+    /// Offline sessions of the user for the `authotron` client.
+    async fn offline_sessions(&self) -> usize {
+        let get = |url: String| {
+            let request = self.client.get(url).bearer_auth(&self.token);
+            async move { request.send().await.unwrap().json::<Value>().await.unwrap() }
+        };
+        let clients = get(format!("{}/clients?clientId=authotron", self.base)).await;
+        let id = clients[0]["id"].as_str().unwrap();
+        let sessions = get(format!(
+            "{}/users/{USER_ID}/offline-sessions/{id}",
+            self.base
+        ))
+        .await;
+        sessions.as_array().unwrap().len()
+    }
 }

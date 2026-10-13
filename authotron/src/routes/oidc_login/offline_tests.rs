@@ -18,6 +18,7 @@ use super::{
     tests::{Fixture, Jar, ORIGIN, get, local, location, start, text},
 };
 use axum::{
+    Router,
     http::{Request, StatusCode, header},
     response::Response,
 };
@@ -47,7 +48,7 @@ async fn offline_fixture(opted_in: bool) -> (Fixture, [NamedTempFile; 2]) {
 
 /// Starts an authorization, signs in at the provider and returns the callback's answer.
 async fn sign_in(fixture: &Fixture, jar: &mut Jar) -> (Url, Response) {
-    *jar = authorize(fixture).await;
+    *jar = authorize(&fixture.app).await;
     let request = start(fixture, jar).await;
     let response = get(&fixture.app, &local(&fixture.idp.authorize(&request)), jar).await;
     jar.update(&response);
@@ -63,10 +64,10 @@ fn scope(request: &Url) -> String {
         .into_owned()
 }
 
-async fn decide(fixture: &Fixture, jar: &Jar, decision: &str) -> Url {
-    let consent = text(get(&fixture.app, "/oauth/continue", jar).await).await;
+pub(super) async fn decide(app: &Router, jar: &Jar, decision: &str) -> Url {
+    let consent = text(get(app, "/oauth/continue", jar).await).await;
     let response = send(
-        fixture,
+        app,
         Request::post("/oauth/consent")
             .header(header::COOKIE, jar.header())
             .header(header::ORIGIN, ORIGIN)
@@ -82,9 +83,9 @@ async fn decide(fixture: &Fixture, jar: &Jar, decision: &str) -> Url {
     Url::parse(&location(&response)).unwrap()
 }
 
-async fn post(fixture: &Fixture, path: &str, fields: &[(&str, &str)]) -> (StatusCode, Value) {
+pub(super) async fn post(app: &Router, path: &str, fields: &[(&str, &str)]) -> (StatusCode, Value) {
     let response = send(
-        fixture,
+        app,
         Request::post(path)
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(form(fields))
@@ -99,8 +100,8 @@ async fn post(fixture: &Fixture, path: &str, fields: &[(&str, &str)]) -> (Status
 }
 
 /// Approves consent, exchanges the code and returns the refresh token.
-async fn approve_and_exchange(fixture: &Fixture, jar: &Jar) -> String {
-    let redirect = decide(fixture, jar, "approve").await;
+pub(super) async fn approve_and_exchange(app: &Router, jar: &Jar) -> String {
+    let redirect = decide(app, jar, "approve").await;
     let code = redirect
         .query_pairs()
         .find(|(name, _)| name == "code")
@@ -108,7 +109,7 @@ async fn approve_and_exchange(fixture: &Fixture, jar: &Jar) -> String {
         .1
         .into_owned();
     let (status, tokens) = post(
-        fixture,
+        app,
         "/oauth/token",
         &[
             ("grant_type", "authorization_code"),
@@ -124,9 +125,9 @@ async fn approve_and_exchange(fixture: &Fixture, jar: &Jar) -> String {
     tokens["refresh_token"].as_str().unwrap().to_owned()
 }
 
-async fn refresh(fixture: &Fixture, token: &str) -> (StatusCode, Value) {
+pub(super) async fn refresh(app: &Router, token: &str) -> (StatusCode, Value) {
     post(
-        fixture,
+        app,
         "/oauth/token",
         &[
             ("grant_type", "refresh_token"),
@@ -156,13 +157,13 @@ async fn offline_sign_in_couples_the_refresh_family_to_the_upstream_grant() {
     let (request, response) = sign_in(&fixture, &mut jar).await;
     assert_eq!(scope(&request), "openid offline_access");
     assert_eq!(location(&response), "/oauth/continue");
-    let token = approve_and_exchange(&fixture, &jar).await;
-    let (status, tokens) = refresh(&fixture, &token).await;
+    let token = approve_and_exchange(&fixture.app, &jar).await;
+    let (status, tokens) = refresh(&fixture.app, &token).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(fixture.idp.state.refresh_requests.load(Ordering::SeqCst), 1);
     let next = tokens["refresh_token"].as_str().unwrap();
     let (status, _) = post(
-        &fixture,
+        &fixture.app,
         "/oauth/revoke",
         &[("token", next), ("client_id", "desktop")],
     )
@@ -191,7 +192,7 @@ async fn denied_consent_and_policy_denial_revoke_the_upstream_grant() {
     let (fixture, _files) = offline_fixture(true).await;
     let mut jar = Jar::default();
     sign_in(&fixture, &mut jar).await;
-    let redirect = decide(&fixture, &jar, "deny").await;
+    let redirect = decide(&fixture.app, &jar, "deny").await;
     assert!(redirect.as_str().contains("error=access_denied"));
     assert_eq!(revoked(&fixture, 1).await.len(), 1);
     // Without the mapped role the scope policy denies the authorization at sign-in.
@@ -208,7 +209,7 @@ async fn clients_without_the_opt_in_never_request_offline_access() {
     let mut jar = Jar::default();
     let (request, _) = sign_in(&fixture, &mut jar).await;
     assert_eq!(scope(&request), "openid");
-    let token = approve_and_exchange(&fixture, &jar).await;
-    assert_eq!(refresh(&fixture, &token).await.0, StatusCode::OK);
+    let token = approve_and_exchange(&fixture.app, &jar).await;
+    assert_eq!(refresh(&fixture.app, &token).await.0, StatusCode::OK);
     assert_eq!(fixture.idp.state.refresh_requests.load(Ordering::SeqCst), 0);
 }

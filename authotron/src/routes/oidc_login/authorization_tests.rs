@@ -11,6 +11,7 @@
 use super::tests::{Fixture, Jar, ORIGIN, fixture, get, local, location, start, text};
 use crate::oidc::mock::{SUBJECT, rsa_key};
 use axum::{
+    Router,
     body::Body,
     http::{Request, StatusCode, header},
     response::Response,
@@ -60,7 +61,7 @@ async fn authorization_fixture() -> (Fixture, tempfile::NamedTempFile) {
 }
 
 /// Starts an authorization request from the client and returns the browser's cookies.
-pub(super) async fn authorize(fixture: &Fixture) -> Jar {
+pub(super) async fn authorize(app: &Router) -> Jar {
     let mut query = url::form_urlencoded::Serializer::new(String::new());
     for (name, value) in [
         ("client_id", "desktop"),
@@ -75,19 +76,14 @@ pub(super) async fn authorize(fixture: &Fixture) -> Jar {
         query.append_pair(name, value);
     }
     let mut jar = Jar::default();
-    let response = get(
-        &fixture.app,
-        &format!("/oauth/authorize?{}", query.finish()),
-        &jar,
-    )
-    .await;
+    let response = get(app, &format!("/oauth/authorize?{}", query.finish()), &jar).await;
     assert_eq!(location(&response), "/login");
     jar.update(&response);
     jar
 }
 
-pub(super) async fn send(fixture: &Fixture, request: Request<Body>) -> Response {
-    fixture.app.clone().oneshot(request).await.unwrap()
+pub(super) async fn send(app: &Router, request: Request<Body>) -> Response {
+    app.clone().oneshot(request).await.unwrap()
 }
 
 pub(super) fn form(fields: &[(&str, &str)]) -> Body {
@@ -111,7 +107,7 @@ pub(super) fn hidden(html: &str, name: &str) -> String {
 #[tokio::test]
 async fn oidc_sign_in_continues_the_authorization_to_consent_and_tokens() {
     let (fixture, _key) = authorization_fixture().await;
-    let mut jar = authorize(&fixture).await;
+    let mut jar = authorize(&fixture.app).await;
     let chooser = text(get(&fixture.app, "/login", &jar).await).await;
     assert!(chooser.contains("href=\"/login/method/demo-sso\">Demo SSO</a>"));
     let callback = local(&fixture.idp.authorize(&start(&fixture, &mut jar).await));
@@ -121,7 +117,7 @@ async fn oidc_sign_in_continues_the_authorization_to_consent_and_tokens() {
     let consent = text(get(&fixture.app, "/oauth/continue", &jar).await).await;
     assert!(consent.contains(&format!("Signed in as {SUBJECT}")));
     let response = send(
-        &fixture,
+        &fixture.app,
         Request::post("/oauth/consent")
             .header(header::COOKIE, jar.header())
             .header(header::ORIGIN, ORIGIN)
@@ -142,7 +138,7 @@ async fn oidc_sign_in_continues_the_authorization_to_consent_and_tokens() {
         .1
         .into_owned();
     let response = send(
-        &fixture,
+        &fixture.app,
         Request::post("/oauth/token")
             .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(form(&[
@@ -182,7 +178,7 @@ async fn oidc_sign_in_continues_the_authorization_to_consent_and_tokens() {
 async fn identities_without_the_mapped_role_end_the_authorization_with_access_denied() {
     let (fixture, _key) = authorization_fixture().await;
     *fixture.idp.state.claims.lock().unwrap() = json!({"realm_access": {"roles": ["other"]}});
-    let mut jar = authorize(&fixture).await;
+    let mut jar = authorize(&fixture.app).await;
     let callback = local(&fixture.idp.authorize(&start(&fixture, &mut jar).await));
     let response = get(&fixture.app, &callback, &jar).await;
     let redirect = location(&response);
@@ -197,7 +193,7 @@ async fn identities_without_the_mapped_role_end_the_authorization_with_access_de
 #[tokio::test]
 async fn states_complete_only_the_flow_they_were_started_for() {
     let (fixture, _key) = authorization_fixture().await;
-    let mut jar = authorize(&fixture).await;
+    let mut jar = authorize(&fixture.app).await;
     let callback = local(&fixture.idp.authorize(&start(&fixture, &mut jar).await));
     // Without its transaction cookies the state cannot become a browser session.
     let mut browser_only = jar.clone();
