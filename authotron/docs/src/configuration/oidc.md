@@ -240,7 +240,8 @@ oauth:
 `upstream_offline_access` requires `enabled` and `oauth.upstream_token_encryption`.
 Offline access is requested only for an authorization request of an opted-in
 client through a method with `offline_access: true`; browser sessions and other
-clients never request it.
+clients never request it. Turning either setting off affects new sign-ins only:
+families already coupled keep renewing at the provider until they end.
 
 - **Sign-in.** The authorization request adds the `offline_access` scope. The
   provider's refresh token is sealed with AES-256-GCM under the active key and
