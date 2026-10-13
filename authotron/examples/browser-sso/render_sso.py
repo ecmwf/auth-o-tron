@@ -177,6 +177,10 @@ def realm_config(profile):
                 "protocol": "openid-connect",
                 "publicClient": False,
                 "secret": "${AUTHOTRON_CLIENT_SECRET}",
+                # Tokens carry no realm roles beyond those of the client's scopes;
+                # `offline_access` comes with its client scope. Auth-O-Tron maps no
+                # provider roles here, and `sub` comes from `basic`.
+                "fullScopeAllowed": False,
                 "standardFlowEnabled": True,
                 "directAccessGrantsEnabled": False,
                 "implicitFlowEnabled": False,

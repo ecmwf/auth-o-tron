@@ -221,6 +221,7 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(authotron["optionalClientScopes"], ["offline_access"])
         self.assertEqual(authotron["attributes"]["pkce.code.challenge.method"], "S256")
         self.assertTrue(authotron["standardFlowEnabled"])
+        self.assertIs(authotron["fullScopeAllowed"], False)
         for key in (
             "publicClient",
             "directAccessGrantsEnabled",
@@ -229,6 +230,8 @@ class RendererTests(unittest.TestCase):
         ):
             self.assertFalse(authotron[key], key)
         admin = clients["authotron-e2e-admin"]
+        # The admin token needs its realm-management roles: full scope stays on.
+        self.assertNotIn("fullScopeAllowed", admin)
         self.assertEqual(admin["secret"], "${E2E_ADMIN_SECRET}")
         self.assertTrue(admin["serviceAccountsEnabled"])
         self.assertFalse(admin["standardFlowEnabled"] or admin["redirectUris"])

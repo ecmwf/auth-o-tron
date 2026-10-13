@@ -10,8 +10,10 @@
 //! nonce and RFC 9207 `iss`, client authentication, signing keys and role mapping, and
 //! offline access coupled to OAuth refresh families. The realm mirrors the playground
 //! client registration: a confidential client with the `basic`, `profile` and `email`
-//! scopes, a fixed user id, so `sub` is stable, strict refresh-token rotation, and a
-//! service-account client that administers users.
+//! scopes and without full scope (a realm role reaches its tokens only through a scope
+//! mapping, while `offline_access` comes with its client scope), a fixed user id, so
+//! `sub` is stable, strict refresh-token rotation, and a service-account client that
+//! administers users.
 
 use super::{
     authorization_tests::{CLIENT_CALLBACK, RESOURCE, authorize},
@@ -62,9 +64,10 @@ fn realm() -> Value {
         "realm": REALM, "enabled": true, "registrationAllowed": false,
         "accessTokenLifespan": 60, "revokeRefreshToken": true, "refreshTokenMaxReuse": 0,
         "roles": {"realm": [{"name": "mcp-demo"}]},
+        "scopeMappings": [{"client": "authotron", "roles": ["mcp-demo"]}],
         "clients": [{
             "clientId": "authotron", "enabled": true, "protocol": "openid-connect",
-            "publicClient": false, "secret": CLIENT_SECRET,
+            "publicClient": false, "secret": CLIENT_SECRET, "fullScopeAllowed": false,
             "standardFlowEnabled": true, "directAccessGrantsEnabled": false,
             "implicitFlowEnabled": false, "serviceAccountsEnabled": false,
             "consentRequired": false,

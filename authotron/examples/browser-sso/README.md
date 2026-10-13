@@ -11,7 +11,8 @@ or accounts.
 
 - Client `authotron-playground`: confidential, PKCE S256, the single redirect URI
   `https://<ui-host>/login/method/demo-sso/callback`, default scopes `basic`,
-  `profile` and `email`, optional scope `offline_access`. Its secret is the bundle
+  `profile` and `email`, optional scope `offline_access`, and "Full scope allowed"
+  off: tokens carry no realm roles beyond those of its scopes. Its secret is the bundle
   key `authotron-client-secret`; pass the bundle file to
   `../ecmwf-api-key/render_api_key.py --sso-secret-file`.
 - Strict refresh-token rotation (`revokeRefreshToken`, reuse 0) and offline
@@ -22,7 +23,8 @@ or accounts.
   Keycloak restarts, and the default roles, which include `offline_access`. Her
   password is the bundle key `demo-user-password`.
 - Client `authotron-e2e-admin`: a service account with `realm-management`
-  `manage-users` and `view-users`, secret `e2e-admin-secret`, for end-to-end
+  `manage-users` and `view-users` (which its token must carry, so it keeps full
+  scope), secret `e2e-admin-secret`, for end-to-end
   checks such as disabling `alice` or listing her offline sessions. The admin API
   has no ingress route; reach it only through
   `kubectl port-forward service/authotron-sso-keycloak 8080`.
