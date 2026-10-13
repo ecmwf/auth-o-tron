@@ -1031,6 +1031,11 @@
           "format": "uint64",
           "minimum": 300,
           "maximum": 34560000
+        },
+        "offline_access": {
+          "description": "Request `offline_access` for OAuth clients that set\n`refresh_tokens.upstream_offline_access`, coupling their refresh families to the\nprovider's offline session.",
+          "type": "boolean",
+          "default": false
         }
       },
       "additionalProperties": false,
@@ -1445,7 +1450,8 @@
           "default": {
             "enabled": false,
             "idle_ttl_seconds": 2592000,
-            "absolute_ttl_seconds": 7776000
+            "absolute_ttl_seconds": 7776000,
+            "upstream_offline_access": false
           }
         }
       },
@@ -1506,6 +1512,11 @@
           "minimum": 300,
           "maximum": 34560000,
           "default": 7776000
+        },
+        "upstream_offline_access": {
+          "description": "Couple each family started by an OIDC sign-in with `offline_access` to the\nprovider's offline session: refreshes renew it, and the family ends with it.\nRequires `enabled` and `oauth.upstream_token_encryption`.",
+          "type": "boolean",
+          "default": false
         }
       },
       "additionalProperties": false

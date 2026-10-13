@@ -118,6 +118,13 @@ impl OAuthConfig {
             if !ids.insert(&client.client_id) {
                 return Err("oauth.clients contains duplicate client_id values");
             }
+            if client.refresh_tokens.upstream_offline_access
+                && self.upstream_token_encryption.is_none()
+            {
+                return Err(
+                    "oauth.upstream_token_encryption is required when a client sets refresh_tokens.upstream_offline_access",
+                );
+            }
         }
         self.validate_resources()
     }
@@ -215,6 +222,10 @@ pub struct RefreshTokenPolicy {
     pub idle_ttl_seconds: u64,
     #[schemars(range(min = 300, max = 34560000))]
     pub absolute_ttl_seconds: u64,
+    /// Couple each family started by an OIDC sign-in with `offline_access` to the
+    /// provider's offline session: refreshes renew it, and the family ends with it.
+    /// Requires `enabled` and `oauth.upstream_token_encryption`.
+    pub upstream_offline_access: bool,
 }
 
 impl Default for RefreshTokenPolicy {
@@ -223,6 +234,7 @@ impl Default for RefreshTokenPolicy {
             enabled: false,
             idle_ttl_seconds: 30 * 86_400,
             absolute_ttl_seconds: 90 * 86_400,
+            upstream_offline_access: false,
         }
     }
 }
@@ -239,6 +251,9 @@ impl RefreshTokenPolicy {
             return Err(
                 "OAuth refresh_tokens idle_ttl_seconds must not exceed absolute_ttl_seconds",
             );
+        }
+        if self.upstream_offline_access && !self.enabled {
+            return Err("OAuth refresh_tokens upstream_offline_access requires enabled");
         }
         Ok(())
     }
@@ -410,7 +425,7 @@ fn validate_issuer(value: &str) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     #[test]
     fn defaults_and_unknown_fields() {
@@ -613,10 +628,36 @@ mod tests {
                 enabled: true,
                 idle_ttl_seconds: idle,
                 absolute_ttl_seconds: absolute,
+                upstream_offline_access: false,
             };
             assert_eq!(client.validate().is_ok(), valid, "{idle} {absolute}");
         }
         assert!(serde_json::from_value::<RefreshTokenPolicy>(json!({"enable": true})).is_err());
+    }
+
+    #[test]
+    fn upstream_offline_access_needs_refresh_tokens_and_encryption_keys() {
+        let config = |refresh: Value, encryption: bool| -> OAuthConfig {
+            let mut value = json!({"clients": [{"client_id": "desktop", "display_name": "Desktop",
+                "redirect_uris": ["https://app.example.org/cb"], "refresh_tokens": refresh}]});
+            if encryption {
+                value["upstream_token_encryption"] = json!({"active_kid": "k1",
+                    "keys": [{"kid": "k1", "key_file": "/run/secrets/upstream/k1"}]});
+            }
+            serde_json::from_value(value).unwrap()
+        };
+        let coupled = json!({"enabled": true, "upstream_offline_access": true});
+        assert!(config(coupled.clone(), true).validate().is_ok());
+        assert_eq!(
+            config(coupled, false).validate(),
+            Err(
+                "oauth.upstream_token_encryption is required when a client sets refresh_tokens.upstream_offline_access"
+            )
+        );
+        assert_eq!(
+            config(json!({"upstream_offline_access": true}), true).validate(),
+            Err("OAuth refresh_tokens upstream_offline_access requires enabled")
+        );
     }
 
     fn client(callback: &str) -> OAuthClient {

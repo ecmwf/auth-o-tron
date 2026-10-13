@@ -39,7 +39,7 @@ fn minimal_method_uses_documented_defaults() {
     assert_eq!(config.clock_skew_seconds, 60);
     assert_eq!(config.http_timeout_ms, 5000);
     assert!(config.scopes.is_empty() && config.role_map.is_empty());
-    assert!(config.roles_claim.is_none() && config.prompt.is_none());
+    assert!(config.roles_claim.is_none() && config.prompt.is_none() && !config.offline_access);
     let round_trip: OidcMethodConfig =
         serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
     assert_eq!(round_trip, config);
@@ -67,11 +67,13 @@ fn full_method_validates() {
         ("clock_skew_seconds", json!(0)),
         ("http_timeout_ms", json!(30000)),
         ("refresh_max_lifetime_seconds", json!(86400)),
+        ("offline_access", json!(true)),
     ] {
         value[field] = setting;
     }
     let config = parse(value);
     config.validate().unwrap();
+    assert!(config.offline_access);
     assert_eq!(
         config.prompt.map(OidcPrompt::as_str),
         Some("select_account")
@@ -196,7 +198,6 @@ fn unknown_fields_ids_and_algorithms_are_rejected_while_parsing() {
         ("id_token_algorithms", json!(["none"])),
         ("prompt", json!("none")),
         ("client_secret", json!("inline-secret-value")),
-        ("offline_access", json!(true)),
     ] {
         let mut value = base();
         value[field] = setting;

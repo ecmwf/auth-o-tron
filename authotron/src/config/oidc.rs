@@ -93,6 +93,11 @@ pub struct OidcMethodConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 300, max = 34560000))]
     pub refresh_max_lifetime_seconds: Option<u64>,
+    /// Request `offline_access` for OAuth clients that set
+    /// `refresh_tokens.upstream_offline_access`, coupling their refresh families to the
+    /// provider's offline session.
+    #[serde(default)]
+    pub offline_access: bool,
 }
 
 /// Token-endpoint client authentication.
