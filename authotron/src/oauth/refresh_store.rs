@@ -9,8 +9,9 @@
 //! Process-local refresh-token families for single-replica deployments.
 
 use super::refresh::{
-    MAX_ROTATED_HASHES, Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant, RefreshStoreError,
-    Rotated, UpstreamState, UpstreamStored, deadline, initial_expiry, random_id,
+    EndedUpstream, MAX_ROTATED_HASHES, Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant,
+    RefreshStoreError, Revocation, Rotated, UpstreamState, UpstreamStored, deadline,
+    initial_expiry, random_id,
 };
 use crate::config::RefreshTokenPolicy;
 use std::{
@@ -33,6 +34,13 @@ struct Family {
 impl Family {
     fn live(&self, now_ms: u64) -> bool {
         now_ms < self.idle_ms && now_ms < self.absolute_ms
+    }
+    fn ended(self) -> Option<EndedUpstream> {
+        let grant = self.grant;
+        self.upstream.map(|upstream| EndedUpstream {
+            grant,
+            sealed: upstream.sealed,
+        })
     }
 }
 
@@ -74,7 +82,7 @@ impl MemoryRefreshStore {
             .map_err(|_| RefreshStoreError::Unavailable)
     }
     /// Starts a family, coupled when `upstream` holds a sealed upstream grant; at the
-    /// per-user cap the user's oldest families are revoked.
+    /// per-user cap the user's oldest families are revoked and the coupled ones returned.
     pub async fn issue(
         &self,
         grant: &RefreshGrant,
@@ -82,7 +90,7 @@ impl MemoryRefreshStore {
         now_ms: u64,
         policy: &RefreshTokenPolicy,
         upstream: Option<&str>,
-    ) -> Result<(), RefreshStoreError> {
+    ) -> Result<Vec<EndedUpstream>, RefreshStoreError> {
         let (absolute_ms, idle_ms) =
             initial_expiry(now_ms, policy).ok_or(RefreshStoreError::Unavailable)?;
         grant.encode()?;
@@ -101,9 +109,11 @@ impl MemoryRefreshStore {
             .collect();
         owned.sort_unstable();
         let excess = (owned.len() + 1).saturating_sub(self.max_per_user);
-        for (_, id) in owned.into_iter().take(excess) {
-            inner.families.remove(&id);
-        }
+        let evicted = owned
+            .into_iter()
+            .take(excess)
+            .filter_map(|(_, id)| inner.families.remove(&id)?.ended())
+            .collect();
         inner
             .tokens
             .insert(token_hash, (family_id.clone(), idle_ms));
@@ -125,7 +135,7 @@ impl MemoryRefreshStore {
             },
         );
         inner.prune(now_ms);
-        Ok(())
+        Ok(evicted)
     }
     /// Classifies a presented hash; reuse outside the grace window revokes the family.
     pub async fn lookup(
@@ -163,8 +173,11 @@ impl MemoryRefreshStore {
             return Ok(Presented::Grace);
         }
         let client_id = family.grant.client_id.clone();
-        inner.families.remove(&id);
-        Ok(Presented::Reused { client_id })
+        let ended = inner.families.remove(&id).and_then(Family::ended);
+        Ok(Presented::Reused {
+            client_id,
+            ended: ended.map(Box::new),
+        })
     }
     /// Compare-and-swap from `presented` to `next`; `ceiling` is the current absolute expiry.
     pub async fn rotate(
@@ -274,29 +287,35 @@ impl MemoryRefreshStore {
         }
         Ok(())
     }
-    pub async fn revoke_family(&self, family_id: &str) -> Result<(), RefreshStoreError> {
-        self.lock()?.families.remove(family_id);
-        Ok(())
+    pub async fn revoke_family(
+        &self,
+        family_id: &str,
+    ) -> Result<Option<EndedUpstream>, RefreshStoreError> {
+        Ok(self
+            .lock()?
+            .families
+            .remove(family_id)
+            .and_then(Family::ended))
     }
     /// RFC 7009: any token of a family revokes it, but only for the owning client.
     pub async fn revoke_token(
         &self,
         token_hash: &[u8; 32],
         client_id: &str,
-    ) -> Result<bool, RefreshStoreError> {
+    ) -> Result<Revocation, RefreshStoreError> {
         let mut inner = self.lock()?;
         let Some((id, _)) = inner.tokens.get(token_hash).cloned() else {
-            return Ok(false);
+            return Ok(Revocation::NotFound);
         };
         if inner
             .families
             .get(&id)
             .is_some_and(|family| family.grant.client_id == client_id)
         {
-            inner.families.remove(&id);
-            return Ok(true);
+            let ended = inner.families.remove(&id).and_then(Family::ended);
+            return Ok(Revocation::Revoked(ended));
         }
-        Ok(false)
+        Ok(Revocation::NotFound)
     }
 }
 
@@ -350,7 +369,7 @@ mod tests {
         current(store.lookup(&[2; 32], NOW + 2).await.unwrap());
         assert!(matches!(
             store.lookup(&[1; 32], NOW + 1 + REUSE_GRACE_MS).await.unwrap(),
-            Presented::Reused { client_id } if client_id == "desktop"
+            Presented::Reused { client_id, ended: None } if client_id == "desktop"
         ));
         assert!(matches!(
             store.lookup(&[2; 32], NOW + 3).await.unwrap(),
@@ -638,15 +657,27 @@ mod tests {
             .rotate(&id, &[1; 32], [2; 32], NOW, 600, NOW + 3_600_000)
             .await
             .unwrap();
-        assert!(!store.revoke_token(&[1; 32], "other").await.unwrap());
-        assert!(!store.revoke_token(&[7; 32], "desktop").await.unwrap());
+        assert!(matches!(
+            store.revoke_token(&[1; 32], "other").await.unwrap(),
+            Revocation::NotFound
+        ));
+        assert!(matches!(
+            store.revoke_token(&[7; 32], "desktop").await.unwrap(),
+            Revocation::NotFound
+        ));
         current(store.lookup(&[2; 32], NOW).await.unwrap());
-        assert!(store.revoke_token(&[1; 32], "desktop").await.unwrap());
+        assert!(matches!(
+            store.revoke_token(&[1; 32], "desktop").await.unwrap(),
+            Revocation::Revoked(None)
+        ));
         assert!(matches!(
             store.lookup(&[2; 32], NOW).await.unwrap(),
             Presented::Missing
         ));
-        assert!(!store.revoke_token(&[2; 32], "desktop").await.unwrap());
+        assert!(matches!(
+            store.revoke_token(&[2; 32], "desktop").await.unwrap(),
+            Revocation::NotFound
+        ));
         store
             .issue(&grant(), [5; 32], NOW, &policy(), None)
             .await
@@ -657,5 +688,71 @@ mod tests {
             store.lookup(&[5; 32], NOW).await.unwrap(),
             Presented::Missing
         ));
+    }
+
+    #[tokio::test]
+    async fn ending_coupled_families_returns_their_sealed_upstream_grants() {
+        let store = MemoryRefreshStore::new(2);
+        let coupled = |n: u8| RefreshGrant {
+            upstream_coupled: true,
+            method: format!("sso-{n}"),
+            ..grant()
+        };
+        let issue = |n: u8| {
+            let store = &store;
+            async move {
+                store
+                    .issue(
+                        &coupled(n),
+                        [n; 32],
+                        NOW + u64::from(n),
+                        &policy(),
+                        Some(&format!("v1.k.{n}")),
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+        let named = |ended: EndedUpstream| (ended.grant.method, ended.sealed);
+        let expected = |n: u8| (format!("sso-{n}"), format!("v1.k.{n}"));
+        assert!(issue(1).await.is_empty() && issue(2).await.is_empty());
+        // The per-user cap evicts the oldest family, which is coupled.
+        let evicted = store
+            .issue(&grant(), [3; 32], NOW + 3, &policy(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            evicted.into_iter().map(named).collect::<Vec<_>>(),
+            [expected(1)]
+        );
+        match store.revoke_token(&[2; 32], "desktop").await.unwrap() {
+            Revocation::Revoked(Some(ended)) => assert_eq!(named(ended), expected(2)),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            store.revoke_token(&[3; 32], "desktop").await.unwrap(),
+            Revocation::Revoked(None)
+        ));
+        issue(4).await;
+        let id = current(store.lookup(&[4; 32], NOW).await.unwrap()).family_id;
+        store
+            .rotate(&id, &[4; 32], [5; 32], NOW + 4, 600, NOW + 3_600_000)
+            .await
+            .unwrap();
+        match store
+            .lookup(&[4; 32], NOW + 4 + REUSE_GRACE_MS)
+            .await
+            .unwrap()
+        {
+            Presented::Reused {
+                ended: Some(ended), ..
+            } => assert_eq!(named(*ended), expected(4)),
+            other => panic!("{other:?}"),
+        }
+        issue(6).await;
+        let id = current(store.lookup(&[6; 32], NOW).await.unwrap()).family_id;
+        let ended = store.revoke_family(&id).await.unwrap().map(named);
+        assert_eq!(ended, Some(expected(6)));
+        assert!(store.revoke_family(&id).await.unwrap().is_none());
     }
 }

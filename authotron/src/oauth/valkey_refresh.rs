@@ -9,8 +9,9 @@
 //! Shared refresh-token families in Valkey; every mutation is one atomic Lua script.
 
 use super::refresh::{
-    MAX_ROTATED_HASHES, Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant, RefreshStoreError,
-    Rotated, UpstreamState, UpstreamStored, deadline, initial_expiry, random_id,
+    EndedUpstream, MAX_ROTATED_HASHES, Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant,
+    RefreshStoreError, Revocation, Rotated, UpstreamState, UpstreamStored, deadline,
+    initial_expiry, random_id,
 };
 use super::refresh_durability::{self, Durability};
 use crate::{
@@ -35,6 +36,30 @@ fn number(bytes: &[u8]) -> Result<u64, RefreshStoreError> {
 }
 fn text(bytes: &[u8]) -> Result<String, RefreshStoreError> {
     String::from_utf8(bytes.to_vec()).map_err(|_| RefreshStoreError::Unavailable)
+}
+/// The `grant, sealed` pairs a reply appends for each ended coupled family.
+fn ended(values: &[Vec<u8>]) -> Result<Vec<EndedUpstream>, RefreshStoreError> {
+    let (pairs, rest) = values.as_chunks::<2>();
+    if !rest.is_empty() {
+        return Err(RefreshStoreError::Unavailable);
+    }
+    pairs
+        .iter()
+        .map(|[grant, sealed]| {
+            Ok(EndedUpstream {
+                grant: RefreshGrant::decode(grant)?,
+                sealed: text(sealed)?,
+            })
+        })
+        .collect()
+}
+/// At most one ended family, for replies that end a single family.
+fn ended_one(values: &[Vec<u8>]) -> Result<Option<EndedUpstream>, RefreshStoreError> {
+    let mut all = ended(values)?;
+    if all.len() > 1 {
+        return Err(RefreshStoreError::Unavailable);
+    }
+    Ok(all.pop())
 }
 
 impl ValkeyRefreshStore {
@@ -101,7 +126,7 @@ impl ValkeyRefreshStore {
         }
     }
     /// Starts a family, coupled when `upstream` holds a sealed upstream grant; at the
-    /// per-user cap the user's oldest families are revoked.
+    /// per-user cap the user's oldest families are revoked and the coupled ones returned.
     pub async fn issue(
         &self,
         grant: &RefreshGrant,
@@ -109,7 +134,7 @@ impl ValkeyRefreshStore {
         now_ms: u64,
         policy: &RefreshTokenPolicy,
         upstream: Option<&str>,
-    ) -> Result<(), RefreshStoreError> {
+    ) -> Result<Vec<EndedUpstream>, RefreshStoreError> {
         let (absolute, idle) =
             initial_expiry(now_ms, policy).ok_or(RefreshStoreError::Unavailable)?;
         let payload = grant.encode()?;
@@ -132,7 +157,10 @@ impl ValkeyRefreshStore {
                 ],
             )
             .await?;
-        Self::expect_ok(&reply)
+        match reply.split_first() {
+            Some((status, evicted)) if status == b"ok" => ended(evicted),
+            _ => Err(RefreshStoreError::Unavailable),
+        }
     }
     /// Classifies a presented hash; reuse outside the grace window revokes the family.
     pub async fn lookup(
@@ -169,8 +197,9 @@ impl ValkeyRefreshStore {
                 }))
             }
             [status] if status == b"grace" => Presented::Grace,
-            [status, client] if status == b"reused" => Presented::Reused {
+            [status, client, rest @ ..] if status == b"reused" => Presented::Reused {
                 client_id: text(client)?,
+                ended: ended_one(rest)?.map(Box::new),
             },
             [status] if status == b"missing" => Presented::Missing,
             _ => return Err(RefreshStoreError::Unavailable),
@@ -279,7 +308,10 @@ impl ValkeyRefreshStore {
             .await?;
         Self::expect_ok(&reply)
     }
-    pub async fn revoke_family(&self, family_id: &str) -> Result<(), RefreshStoreError> {
+    pub async fn revoke_family(
+        &self,
+        family_id: &str,
+    ) -> Result<Option<EndedUpstream>, RefreshStoreError> {
         // The token key is unused by this operation; any key in the namespace routes it.
         let reply = self
             .run(
@@ -289,14 +321,17 @@ impl ValkeyRefreshStore {
                 &[family_id.as_bytes()],
             )
             .await?;
-        Self::expect_ok(&reply)
+        match reply.split_first() {
+            Some((status, rest)) if status == b"ok" => ended_one(rest),
+            _ => Err(RefreshStoreError::Unavailable),
+        }
     }
     /// RFC 7009: any token of a family revokes it, but only for the owning client.
     pub async fn revoke_token(
         &self,
         token_hash: &[u8; 32],
         client_id: &str,
-    ) -> Result<bool, RefreshStoreError> {
+    ) -> Result<Revocation, RefreshStoreError> {
         let reply = self
             .run(
                 &[self.token_key(token_hash)],
@@ -306,8 +341,8 @@ impl ValkeyRefreshStore {
             )
             .await?;
         match reply.as_slice() {
-            [status] if status == b"ok" => Ok(true),
-            [status] if status == b"missing" => Ok(false),
+            [status, rest @ ..] if status == b"ok" => Ok(Revocation::Revoked(ended_one(rest)?)),
+            [status] if status == b"missing" => Ok(Revocation::NotFound),
             _ => Err(RefreshStoreError::Unavailable),
         }
     }
@@ -468,7 +503,7 @@ mod tests {
         family(a.lookup(&[2; 32], now + 2).await.unwrap());
         assert!(matches!(
             a.lookup(&[1; 32], now + 1 + REUSE_GRACE_MS).await.unwrap(),
-            Presented::Reused { client_id } if client_id == "desktop"
+            Presented::Reused { client_id, ended: None } if client_id == "desktop"
         ));
         assert!(matches!(
             a.lookup(&[2; 32], now + 3).await.unwrap(),
@@ -485,9 +520,18 @@ mod tests {
             Presented::Missing
         ));
         family(b.lookup(&[5; 32], now + 5).await.unwrap());
-        assert!(!b.revoke_token(&[5; 32], "other").await.unwrap());
-        assert!(b.revoke_token(&[5; 32], "desktop").await.unwrap());
-        assert!(!b.revoke_token(&[5; 32], "desktop").await.unwrap());
+        assert!(matches!(
+            b.revoke_token(&[5; 32], "other").await.unwrap(),
+            Revocation::NotFound
+        ));
+        assert!(matches!(
+            b.revoke_token(&[5; 32], "desktop").await.unwrap(),
+            Revocation::Revoked(None)
+        ));
+        assert!(matches!(
+            b.revoke_token(&[5; 32], "desktop").await.unwrap(),
+            Revocation::NotFound
+        ));
         let id = family(a.lookup(&[6; 32], now + 5).await.unwrap()).family_id;
         a.revoke_family(&id).await.unwrap();
         assert!(matches!(
@@ -666,5 +710,69 @@ mod tests {
                 .unwrap()
         );
         assert!(a.lock_upstream("f", "a", now, now).await.is_err());
+    }
+    /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
+    #[tokio::test]
+    #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+    async fn disposable_valkey_ending_coupled_families_returns_sealed_grants() {
+        let (_fixture, backend, a) = disposable(2).await;
+        let b = ValkeyRefreshStore::new(&backend, 2).await.unwrap();
+        let now = server_now(&a).await;
+        let coupled = |n: u8| RefreshGrant {
+            upstream_coupled: true,
+            method: format!("sso-{n}"),
+            ..grant()
+        };
+        let named = |ended: EndedUpstream| (ended.grant.method, ended.sealed);
+        let expected = |n: u8| (format!("sso-{n}"), format!("v1.k.{n}"));
+        for n in [1, 2, 4, 6] {
+            if n == 4 {
+                assert!(matches!(
+                    b.revoke_token(&[3; 32], "desktop").await.unwrap(),
+                    Revocation::Revoked(None)
+                ));
+            }
+            let evicted = a
+                .issue(
+                    &coupled(n),
+                    [n; 32],
+                    now + u64::from(n),
+                    &policy(),
+                    Some(&format!("v1.k.{n}")),
+                )
+                .await
+                .unwrap();
+            assert!(evicted.is_empty());
+            if n == 2 {
+                let evicted = b
+                    .issue(&grant(), [3; 32], now + 3, &policy(), None)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    evicted.into_iter().map(named).collect::<Vec<_>>(),
+                    [expected(1)]
+                );
+                match b.revoke_token(&[2; 32], "desktop").await.unwrap() {
+                    Revocation::Revoked(Some(ended)) => assert_eq!(named(ended), expected(2)),
+                    other => panic!("{other:?}"),
+                }
+            }
+        }
+        let id = family(a.lookup(&[4; 32], now).await.unwrap()).family_id;
+        a.rotate(&id, &[4; 32], [5; 32], now + 4, 600, now + 3_600_000)
+            .await
+            .unwrap();
+        match b.lookup(&[4; 32], now + 4 + REUSE_GRACE_MS).await.unwrap() {
+            Presented::Reused {
+                ended: Some(ended), ..
+            } => assert_eq!(named(*ended), expected(4)),
+            other => panic!("{other:?}"),
+        }
+        let id = family(a.lookup(&[6; 32], now).await.unwrap()).family_id;
+        assert_eq!(
+            b.revoke_family(&id).await.unwrap().map(named),
+            Some(expected(6))
+        );
+        assert!(a.revoke_family(&id).await.unwrap().is_none());
     }
 }

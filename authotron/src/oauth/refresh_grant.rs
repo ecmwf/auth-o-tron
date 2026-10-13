@@ -12,7 +12,8 @@
 use super::{
     authentication::projection,
     refresh::{
-        Presented, RefreshGrant, RefreshStoreError, RefreshToken, Rotated, effective_absolute,
+        Presented, RefreshGrant, RefreshStoreError, RefreshToken, Revocation, Rotated,
+        effective_absolute,
     },
     refresh_store::MemoryRefreshStore,
     runtime::OAuthRuntime,
@@ -300,7 +301,9 @@ impl OAuthRuntime {
         let (Some(backend), Some(token)) = (&self.refresh, RefreshToken::parse(token)) else {
             return Ok(());
         };
-        if refresh_dispatch!(backend, revoke_token(&token.hash(), client_id))? {
+        if let Revocation::Revoked(_) =
+            refresh_dispatch!(backend, revoke_token(&token.hash(), client_id))?
+        {
             metrics.record_refresh_token(RefreshTokenEvent::FamilyRevoked);
         }
         Ok(())

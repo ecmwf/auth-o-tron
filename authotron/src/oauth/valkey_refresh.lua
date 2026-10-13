@@ -4,6 +4,8 @@
 -- rotated, and a family keeps at most ARGV[10] rotated hashes ("history", oldest first).
 -- A coupled family also holds a sealed upstream grant ("upstream") and its generation
 -- ("upstream_gen").
+-- Replies that end coupled families append each one's grant and sealed upstream grant,
+-- so the caller can revoke it upstream; families removed after expiry are not reported.
 -- A run resent after a lost reply never applies twice: rotate finds the hash no longer
 -- current ('stale'), issue finds the token key present, set_upstream recognises its own
 -- replacement, and revocation is idempotent.
@@ -20,16 +22,25 @@ local function history(key)
     for hash in string.gmatch(redis.call('HGET', key, 'history') or '', '%S+') do hashes[#hashes + 1] = hash end
     return hashes
 end
+-- Returns {grant, sealed upstream grant} for a coupled family, otherwise {}.
 local function revoke(id)
     local key = family_key(id)
+    local ended = {}
     if redis.call('TYPE', key).ok == 'hash' then
         local current = redis.call('HGET', key, 'current')
         if current then redis.call('DEL', token_key(current)) end
         for _, hash in ipairs(history(key)) do redis.call('DEL', token_key(hash)) end
+        local grant, upstream = redis.call('HGET', key, 'grant'), redis.call('HGET', key, 'upstream')
+        if grant and upstream then ended = {grant, upstream} end
     end
     local user = redis.call('HGET', key, 'user')
     redis.call('DEL', key)
     if user then redis.call('ZREM', index_key(user), id) end
+    return ended
+end
+local function append(reply, values)
+    for _, value in ipairs(values) do reply[#reply + 1] = value end
+    return reply
 end
 local function live(key)
     if redis.call('TYPE', key).ok ~= 'hash' then return nil end
@@ -48,8 +59,9 @@ if op == 'issue' then
         if not live(family_key(member)) then revoke(member) end
     end
     local excess = redis.call('ZCARD', index) + 1 - cap
+    local reply = {'ok'}
     if excess > 0 then
-        for _, member in ipairs(redis.call('ZRANGE', index, 0, excess - 1)) do revoke(member) end
+        for _, member in ipairs(redis.call('ZRANGE', index, 0, excess - 1)) do append(reply, revoke(member)) end
     end
     local key = family_key(id)
     redis.call('HSET', key, 'grant', grant, 'client', client, 'user', user, 'created', decimal(now), 'absolute', decimal(absolute),
@@ -59,7 +71,7 @@ if op == 'issue' then
     redis.call('SET', token, id, 'PXAT', decimal(idle))
     redis.call('ZADD', index, now, id)
     if redis.call('PEXPIRETIME', index) < absolute then redis.call('PEXPIREAT', index, decimal(absolute)) end
-    return {'ok'}
+    return reply
 end
 
 -- Upstream refresh lock: KEYS[1] is the family's lock key, ARGV[5] the holder.
@@ -82,12 +94,10 @@ if op == 'revoke' then
     local key = family_key(id)
     if redis.call('TYPE', key).ok ~= 'hash' then return {'missing'} end
     if redis.call('HGET', key, 'client') ~= ARGV[5] then return {'missing'} end
-    revoke(id)
-    return {'ok'}
+    return append({'ok'}, revoke(id))
 end
 if op == 'revoke_family' then
-    revoke(ARGV[5])
-    return {'ok'}
+    return append({'ok'}, revoke(ARGV[5]))
 end
 if not id then return {'missing'} end
 local key = family_key(id)
@@ -105,8 +115,7 @@ if op == 'lookup' then
     local rotated = tonumber(redis.call('HGET', key, 'rotated'))
     if redis.call('HGET', key, 'previous') == hash and rotated and now < rotated + grace then return {'grace'} end
     local client = redis.call('HGET', key, 'client')
-    revoke(id)
-    return {'reused', client}
+    return append({'reused', client}, revoke(id))
 end
 if op == 'rotate' then
     local next_hash, next_token, idle, ceiling = ARGV[6], KEYS[2], tonumber(ARGV[7]), tonumber(ARGV[8])

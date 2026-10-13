@@ -138,8 +138,25 @@ pub enum Presented {
     /// Any other rotated token: the store has already revoked the family.
     Reused {
         client_id: String,
+        ended: Option<Box<EndedUpstream>>,
     },
     Missing,
+}
+
+/// A coupled family that revocation, reuse detection or the per-user cap ended, with the
+/// grant needed to open its sealed upstream grant for upstream revocation.
+#[derive(Debug)]
+pub struct EndedUpstream {
+    pub grant: RefreshGrant,
+    pub sealed: String,
+}
+
+/// Outcome of revoking a presented token for its client (RFC 7009).
+#[derive(Debug)]
+pub enum Revocation {
+    /// Unknown token, or a family of another client: nothing changed.
+    NotFound,
+    Revoked(Option<EndedUpstream>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
