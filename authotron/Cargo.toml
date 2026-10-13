@@ -37,6 +37,7 @@ tokio = { version = "~1.50", features = ["full"] }
 # Authentication & crypto
 base64 = "~0.22"
 jsonwebtoken = { version = "~10.3", features = ["rust_crypto"] }
+ring = "~0.17"
 rsa = "~0.9.10"
 sha2 = "~0.10"
 zeroize = "~1.8"

@@ -112,6 +112,7 @@ SOURCE_FILES = (
     "authotron/src/oidc/mock.rs",
     "authotron/src/oidc/mod.rs",
     "authotron/src/oidc/token_client.rs",
+    "authotron/src/oidc/upstream.rs",
     "authotron/src/providers/base.rs",
     "authotron/src/providers/ecmwf_token_generator_provider.rs",
     "authotron/src/providers/ecmwfapi_provider.rs",

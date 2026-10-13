@@ -20,6 +20,7 @@ pub mod method;
 #[cfg(test)]
 pub(crate) mod mock;
 pub mod token_client;
+pub mod upstream;
 
 /// Bounded failure classes, safe for logs and metric labels; provider-supplied text is
 /// never carried.

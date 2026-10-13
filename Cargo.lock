@@ -147,6 +147,7 @@ dependencies = [
  "prometheus",
  "redis",
  "reqwest",
+ "ring",
  "rsa",
  "schemars 1.2.1",
  "serde",
