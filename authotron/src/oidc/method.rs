@@ -23,9 +23,9 @@ use super::{
 use crate::{
     config::{OidcClientAuth, OidcMethodConfig},
     models::user::User,
+    utils::secret_file::read_secret_text,
 };
 use std::{
-    io::Read,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -45,26 +45,13 @@ pub struct OidcMethod {
     jwks: Jwks,
 }
 
-/// Reads a secret file: at most 4 KiB of UTF-8, surrounding whitespace trimmed, and
-/// non-empty without control characters. Errors never include the content or path.
-fn read_secret(path: &std::path::Path) -> Option<Zeroizing<String>> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut bytes = Zeroizing::new(Vec::new());
-    file.take(MAX_SECRET_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    let text = std::str::from_utf8(&bytes).ok()?.trim();
-    (bytes.len() <= MAX_SECRET_BYTES && !text.is_empty() && !text.chars().any(char::is_control))
-        .then(|| Zeroizing::new(text.to_owned()))
-}
-
 impl OidcMethod {
     /// Validates the method and reads its client secret; `origin` is the browser public
     /// origin that prefixes the redirect URI.
     pub fn new(config: &OidcMethodConfig, origin: &str) -> Result<Self, String> {
         config.validate().map_err(str::to_owned)?;
         let secret = match &config.client_secret_file {
-            Some(path) => Some(read_secret(path).ok_or_else(|| {
+            Some(path) => Some(read_secret_text(path, MAX_SECRET_BYTES).ok_or_else(|| {
                 format!(
                     "OIDC method {}: client_secret_file is unreadable, empty, larger than 4 KiB or not plain text",
                     config.id

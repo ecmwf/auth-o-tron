@@ -151,6 +151,7 @@ SOURCE_FILES = (
     "authotron/src/utils/log_throttle.rs",
     "authotron/src/utils/logger.rs",
     "authotron/src/utils/mod.rs",
+    "authotron/src/utils/secret_file.rs",
     "authotron/src/utils/valkey.rs",
     "authotron/src/utils/value.rs",
 )

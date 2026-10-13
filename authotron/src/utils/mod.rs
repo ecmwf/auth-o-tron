@@ -11,5 +11,6 @@
 pub mod http_helpers;
 pub mod log_throttle;
 pub mod logger;
+pub mod secret_file;
 pub(crate) mod valkey;
 pub mod value;
