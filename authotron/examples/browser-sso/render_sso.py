@@ -58,21 +58,28 @@ OFFLINE_MAX_SECONDS = 90 * 86400
 
 
 def trusted_addresses(value):
-    """Accept host addresses only: 10.26.28.1/32 is valid; 0.0.0.0/0 is not."""
+    """Canonical addresses or networks of the ingress peers, such as the ingress pod
+    range, in Keycloak's `--proxy-trusted-addresses` form. Valid: 10.70.0.0/16,
+    10.26.28.1, 10.26.28.1/32 (as 10.26.28.1), 2001:db8::/64. Invalid: 0.0.0.0/0,
+    ::/0, 10.70.1.0/16 (host bits set), a repeated entry."""
     result = []
     for item in value.split(","):
         try:
             network = ipaddress.ip_network(item.strip(), strict=True)
         except ValueError:
             raise ValueError(
-                "trusted proxies must be individual IP addresses"
+                "trusted proxies must be canonical IP addresses or networks"
             ) from None
-        if network.prefixlen != network.max_prefixlen:
-            raise ValueError("trusted proxies require /32 or /128 host prefixes")
-        address = str(network.network_address)
-        if address in result:
+        if network.prefixlen == 0:
+            raise ValueError("trusted proxies must not cover every address")
+        entry = (
+            str(network.network_address)
+            if network.prefixlen == network.max_prefixlen
+            else str(network)
+        )
+        if entry in result:
             raise ValueError("duplicate trusted proxy address")
-        result.append(address)
+        result.append(entry)
     return tuple(result)
 
 
@@ -90,9 +97,7 @@ class Profile:
         if not isinstance(self.trusted_proxies, tuple) or not self.trusted_proxies:
             raise ValueError("trusted proxy addresses are mandatory")
         if trusted_addresses(",".join(self.trusted_proxies)) != self.trusted_proxies:
-            raise ValueError(
-                "trusted proxies must be canonical individual IP addresses"
-            )
+            raise ValueError("trusted proxies must be canonical addresses or networks")
 
     realm = "aviso-demo"
 

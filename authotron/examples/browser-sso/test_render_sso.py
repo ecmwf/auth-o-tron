@@ -27,7 +27,7 @@ class RendererTests(unittest.TestCase):
         self.profile = renderer.Profile(
             "ui.example.org",
             "issuer.example.org",
-            renderer.trusted_addresses("10.26.28.1/32,10.26.28.2,2001:db8::1/128"),
+            renderer.trusted_addresses("10.70.0.0/16,10.26.28.2/32,2001:db8::1"),
         )
         self.bundle = {
             key: "fake-demo-only-" + "x" * 32 for key in renderer.SECRET_KEYS
@@ -114,13 +114,21 @@ class RendererTests(unittest.TestCase):
         )
 
     def test_input_validation(self):
+        self.assertEqual(
+            self.profile.trusted_proxies, ("10.70.0.0/16", "10.26.28.2", "2001:db8::1")
+        )
+        self.assertEqual(
+            renderer.trusted_addresses(" 10.26.28.0/24 ,2001:db8::/64"),
+            ("10.26.28.0/24", "2001:db8::/64"),
+        )
         for addresses in (
             "",
             "0.0.0.0/0",
-            "10.26.28.0/24",
             "::/0",
+            "10.70.1.0/16",
             "no-ip",
             "10.0.0.1,10.0.0.1",
+            "10.0.0.1/32,10.0.0.1",
         ):
             with self.subTest(addresses=addresses), self.assertRaises(ValueError):
                 renderer.trusted_addresses(addresses)
@@ -263,9 +271,11 @@ class RendererTests(unittest.TestCase):
             self.doc("Service", renderer.PREFIX + "keycloak")["spec"]["type"],
             "ClusterIP",
         )
+        args = self.pod()["containers"][0]["args"]
+        # Forwarded scheme and client address are trusted only from the ingress peers.
+        self.assertIn("--proxy-headers=xforwarded", args)
         self.assertIn(
-            "--proxy-trusted-addresses=" + ",".join(self.profile.trusted_proxies),
-            self.pod()["containers"][0]["args"],
+            "--proxy-trusted-addresses=10.70.0.0/16,10.26.28.2,2001:db8::1", args
         )
         self.assert_invalid(
             lambda ds: self.doc("Ingress", renderer.PREFIX + "keycloak", ds)["spec"][

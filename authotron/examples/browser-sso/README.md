@@ -40,14 +40,18 @@ Run from the workspace root:
 python3 authotron/examples/browser-sso/render_sso.py \
   --ui-host authotron-playground.lumi.apps.dte.destination-earth.eu \
   --issuer-host authotron-sso-playground.lumi.apps.dte.destination-earth.eu \
-  --trusted-proxy-addresses <ingress peer addresses> \
+  --trusted-proxy-addresses 10.70.0.0/16 \
   --secret-file /tmp/opencode/authotron-sso-secrets.json \
   --output-dir /tmp/opencode/authotron-sso
 ```
 
-Trusted proxy addresses must be individual host addresses of the ingress peers
-(`/32` or `/128`), not network ranges; they configure Keycloak's trusted
-forwarding addresses and need reassessment when the ingress pods move.
+Trusted proxy addresses are canonical addresses or networks of the ingress peers;
+on the playground that is the ingress pod range `10.70.0.0/16`, so rescheduled
+ingress pods stay trusted. Keycloak runs with `--proxy-headers=xforwarded` and
+`--proxy-trusted-addresses`, and takes the scheme and client address from
+`X-Forwarded-*` headers only from these peers: requests from any other peer are
+treated as plain HTTP, and Keycloak warns "Non-secure context detected" and
+withholds secure cookies. `/0` ranges are rejected.
 
 The renderer writes only the private, mode-0600 `sso-resources.yaml`: the realm
 ConfigMap, the Keycloak Deployment (non-root, read-only root filesystem, no
