@@ -396,6 +396,13 @@ impl MockState {
     pub(crate) fn refresh_token_live(&self, token: &str) -> bool {
         self.offline.lock().unwrap().contains_key(token)
     }
+    /// A live refresh token for `subject`, as an earlier offline sign-in would leave.
+    pub(crate) fn offline_token(&self, subject: &str) -> String {
+        self.issue_refresh_token(Offline {
+            subject: subject.into(),
+            nonce: "earlier-sign-in".into(),
+        })
+    }
 }
 
 /// An ID token for `subject` with the default claims and [`MockState::claims`] merged in.

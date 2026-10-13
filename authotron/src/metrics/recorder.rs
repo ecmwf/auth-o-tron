@@ -211,6 +211,18 @@ impl RefreshTokenEvent {
 /// Bounded `event` label values for the upstream refresh tokens of coupled families.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpstreamTokenEvent {
+    /// A coupled family's upstream grant was renewed at the provider.
+    Refreshed,
+    /// The provider rotated the upstream refresh token and the new one was stored.
+    Rotated,
+    /// The provider refused the upstream grant, or it could not be opened: family revoked.
+    InvalidGrant,
+    /// The refreshed identity no longer matches the family: family and grant revoked.
+    IdentityChanged,
+    /// The provider, the per-family lock or the store was unavailable; family kept.
+    Unavailable,
+    /// The provider rotated the upstream token but the new one could not be stored.
+    RotationLost,
     /// The provider accepted a revocation request.
     RevocationSent,
     /// The provider advertises no revocation endpoint.
@@ -221,7 +233,13 @@ pub enum UpstreamTokenEvent {
     RevocationSkipped,
 }
 impl UpstreamTokenEvent {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 10] = [
+        Self::Refreshed,
+        Self::Rotated,
+        Self::InvalidGrant,
+        Self::IdentityChanged,
+        Self::Unavailable,
+        Self::RotationLost,
         Self::RevocationSent,
         Self::RevocationUnsupported,
         Self::RevocationFailed,
@@ -229,6 +247,12 @@ impl UpstreamTokenEvent {
     ];
     fn label(self) -> &'static str {
         match self {
+            Self::Refreshed => "refreshed",
+            Self::Rotated => "rotated",
+            Self::InvalidGrant => "invalid_grant",
+            Self::IdentityChanged => "identity_changed",
+            Self::Unavailable => "unavailable",
+            Self::RotationLost => "rotation_lost",
             Self::RevocationSent => "revocation_sent",
             Self::RevocationUnsupported => "revocation_unsupported",
             Self::RevocationFailed => "revocation_failed",
@@ -661,6 +685,8 @@ mod tests {
         metrics.record_upstream_token(UpstreamTokenEvent::RevocationSkipped);
         let output = metrics.render().unwrap();
         for (event, value) in [
+            ("refreshed", 0),
+            ("rotation_lost", 0),
             ("revocation_sent", 0),
             ("revocation_unsupported", 0),
             ("revocation_failed", 0),

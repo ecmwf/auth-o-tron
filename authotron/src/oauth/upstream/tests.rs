@@ -189,15 +189,18 @@ impl Coupled {
 #[tokio::test]
 async fn reuse_detection_and_client_revocation_revoke_the_upstream_grant() {
     let coupled = coupled(|_| {}).await;
-    let first = coupled.family("offline-reused").await;
+    let original = coupled.idp.state.offline_token(SUBJECT);
+    let first = coupled.family(&original).await;
     let second = coupled.refresh(&first).await.unwrap();
     coupled.refresh(&second).await.unwrap();
-    // A token two rotations old is reuse: the family ends, upstream too.
+    // A token two rotations old is reuse: the family ends with its newest upstream grant.
     assert_eq!(
         coupled.refresh(&first).await.err(),
         Some(RefreshGrantError::InvalidGrant)
     );
-    assert_eq!(coupled.revoked(1).await, ["offline-reused"]);
+    let newest = &coupled.revoked(1).await[0];
+    assert!(newest != &original && newest.starts_with("offline-"));
+    assert!(!coupled.idp.state.refresh_token_live(newest));
     let other = coupled.family("offline-revoked").await;
     coupled
         .runtime

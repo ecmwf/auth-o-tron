@@ -41,6 +41,7 @@ macro_rules! refresh_dispatch {
         }
     };
 }
+pub(super) use refresh_dispatch;
 
 /// Token-endpoint outcomes; mapped to RFC 6749 §5.2 / RFC 8707 error codes by the route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -257,10 +258,20 @@ impl OAuthRuntime {
             return Err(InvalidTarget);
         }
         let scopes = narrowed_scopes(request.scope, &family.grant.scopes)?;
+        // A coupled family renews its upstream grant and takes the refreshed roles.
+        let provider_roles = if family.grant.upstream_coupled {
+            let Some(oidc) = method.oidc() else {
+                return revoke(InvalidGrant).await;
+            };
+            self.refresh_upstream(backend, &family, &hash, oidc, browser, metrics)
+                .await?
+        } else {
+            family.grant.provider_roles.clone()
+        };
         let user = User::new(
             family.grant.realm.clone(),
             family.grant.username.clone(),
-            Some(family.grant.provider_roles.clone()),
+            Some(provider_roles),
             None,
             None,
             None,
