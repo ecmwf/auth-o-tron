@@ -169,7 +169,9 @@ implementation and cross-replica behavior require independent runtime review.
 Lost backend state forces a new login. Replacement uses `Recreate`, deliberately
 interrupting the backend rather than routing requests to two independent caches;
 users must sign in again after replacement. This standalone Valkey deployment is a
-single point of failure, **not HA**; it has no persistence or failover.
+single point of failure, **not HA**; it has no failover. Its state is durable across
+pod restarts: an append-only file on a PersistentVolumeClaim keeps OAuth refresh
+tokens, sessions and transactions (see "Valkey persistence" below).
 
 Valkey uses the official **9.1.2** digest already verified in
 `browser-sso/render_sso.py`, but has its own Deployment, ClusterIP Service and
@@ -181,8 +183,9 @@ argv. Only `valkey.conf` is mounted from the combined Secret, read-only with mod
 0440 and group 1000; signing and private Basic configuration are not mounted into
 Valkey. Health probes use `VALKEYCLI_AUTH` from the password Secret key, not an
 argv password. The private config requires authentication, binds `0.0.0.0`, uses
-protected mode, disables AOF and snapshots, sets 128 MB/noeviction, logs to stdout,
-and runs in the foreground with `/data` on `emptyDir`. UID/GID 1000, read-only
+protected mode, enables AOF (`appendonly yes`, `appendfsync everysec`) with RDB
+snapshots disabled (`save ""`), sets 128 MB/noeviction, logs to stdout,
+and runs in the foreground with `/data` on the PersistentVolumeClaim. UID/GID 1000, read-only
 root, dropped capabilities, RuntimeDefault seccomp, no service-account token and
 a 256 MiB memory limit constrain the pod.
 
@@ -359,8 +362,9 @@ login.
   a loopback callback. The user's consent page names the client it asked for.
 - An `aviso:read` access token is valid for one hour and cannot be revoked early.
   Refresh tokens rotate on every use; reusing an already-rotated token revokes the
-  whole sign-in, and `POST /oauth/revoke` ends it explicitly. The playground Valkey
-  runs without persistence, so restarting it ends every refresh-token sign-in.
+  whole sign-in, and `POST /oauth/revoke` ends it explicitly. Refresh tokens live
+  only in Valkey, so the playground Valkey persists them with AOF on a
+  PersistentVolumeClaim; a pod restart keeps every refresh-token sign-in.
 
 ### Pre-registered MCP clients
 
@@ -470,10 +474,22 @@ Output is only `resources.yaml`, mode `0600`, containing **six resources** by de
    `data.valkey-password` and `data.valkey.conf`. With OAuth it additionally
    holds `data.oauth-signing.pem`.
 
-The shared profile contains **nine resources**: these six plus Deployment,
-ClusterIP Service and NetworkPolicy, each named
-`authotron-login-preview-browser-valkey`. No extra Namespace, RBAC, Ingress or
-storage resource is created.
+The shared profile contains **ten resources**: these six plus
+PersistentVolumeClaim, Deployment, ClusterIP Service and NetworkPolicy, each named
+`authotron-login-preview-browser-valkey`. No extra Namespace, RBAC or Ingress is
+created.
+
+### Valkey persistence
+
+The claim is `ReadWriteOnce`, `--valkey-storage-size` (default `1Gi`) and uses
+the cluster's default StorageClass unless `--valkey-storage-class NAME` is set.
+The Valkey Deployment uses `Recreate`, so the old pod releases the volume before
+the new one mounts it; pod fsGroup 1000 makes `/data` writable for UID 1000.
+AOF with `everysec` loses at most about one second of writes on a crash; RDB
+snapshots stay off because AOF alone is sufficient and simpler to reason about.
+Switching an existing `emptyDir` deployment to the claim discards its state once.
+Deleting the claim discards every session and refresh token: clients fail closed
+with `invalid_grant` and users sign in again.
 
 The application receives `AOT_JWT__SECRET` exclusively through that Secret's
 `jwt-secret` key, preserving `AOT_CONFIG_PATH`. The public fixture's demo signing
@@ -486,7 +502,7 @@ prints credentials.
 
 ## Resource contract and review
 
-All six or nine objects explicitly target the fixed namespace. No Namespace,
+All six or ten objects explicitly target the fixed namespace. No Namespace,
 RBAC, host-path mount, or additional public API route is accepted. Only the exact
 profile's volumes, environment references and resources are accepted. The full
 bundle is compared against the narrowly transformed baseline,
@@ -525,7 +541,7 @@ Before any deployment, the deployment owner should independently verify:
 
 1. The packaged backend accepts the tagged memory/Valkey interface and enforces
    absolute session/transaction expiry, logout and failed-backend behavior.
-2. The rendered six/nine exact resource IDs and references remain entirely in
+2. The rendered six/ten exact resource IDs and references remain entirely in
    `authotron-playground`, and the dedicated Valkey policy is enforced by the CNI.
 3. Credentials occur only in private files/Secret data and Secret-backed env;
    source archives, public configuration, argv, logs and annotations do not leak them.

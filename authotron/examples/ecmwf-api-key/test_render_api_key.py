@@ -39,7 +39,7 @@ OTHER_OAUTH_KEY = renderer.oauth_pem(
 PRE_OAUTH_DIGESTS = {
     "plain": "07337b6aa32f379a821916586666d8aa1abf94c065e4082206562c2010f21830",
     "basic": "ef3c1199f4b5eeb4c55c45cc7a0bbba018e95793e36bc48896402621ec5ec558",
-    "shared": "55809ff1a4b91d0c4bb7f21acddf33efe82cb1c3b4aebe09bc3bcbfbed7a1ae5",
+    "shared": "1bf28a518e16716ee4614cdf332c348235648cbbae220b3f828133b28cf0acc9",
 }
 # One `/login/` Prefix replaces per-method Exact paths, independent of method count.
 API_KEY_PATH_RULES = [
@@ -343,12 +343,13 @@ class RendererTests(unittest.TestCase):
                     set(renderer.resource_map(baseline))
                     | {
                         ("v1", "Secret", renderer.SECRET_NAME),
+                        ("v1", "PersistentVolumeClaim", renderer.VALKEY_NAME),
                         ("apps/v1", "Deployment", renderer.VALKEY_NAME),
                         ("v1", "Service", renderer.VALKEY_NAME),
                         ("networking.k8s.io/v1", "NetworkPolicy", renderer.VALKEY_NAME),
                     },
                 )
-                self.assertEqual(len(resources), 9)
+                self.assertEqual(len(resources), 10)
                 public_text = find(resources, "ConfigMap")["data"]["config.yaml"]
                 public = yaml.safe_load(public_text)
                 session = public["ui"]["browser_session"]
@@ -418,6 +419,24 @@ class RendererTests(unittest.TestCase):
                 )
                 self.assertEqual(pod["volumes"][0]["secret"]["defaultMode"], 0o440)
                 self.assertEqual(pod["securityContext"]["fsGroup"], 1000)
+                self.assertIn(
+                    {
+                        "name": "data",
+                        "persistentVolumeClaim": {"claimName": renderer.VALKEY_NAME},
+                    },
+                    pod["volumes"],
+                )
+                claim = find(resources, "PersistentVolumeClaim")["spec"]
+                self.assertEqual(
+                    claim,
+                    {
+                        "accessModes": ["ReadWriteOnce"],
+                        "resources": {"requests": {"storage": "1Gi"}},
+                    },
+                )
+                conf = renderer.valkey_config(VALKEY_PASSWORD).splitlines()
+                for line in ("appendonly yes", "appendfsync everysec", "dir /data"):
+                    self.assertIn(line, conf)
                 policy = find(resources, "NetworkPolicy")["spec"]
                 self.assertEqual(
                     policy["ingress"][0]["from"],
@@ -454,6 +473,13 @@ class RendererTests(unittest.TestCase):
 
         mutations = [
             lambda d: valkey(d)["spec"].update(strategy={"type": "RollingUpdate"}),
+            lambda d: pod(d)["volumes"].__setitem__(
+                1, {"name": "data", "emptyDir": {}}
+            ),
+            lambda d: find(d, "PersistentVolumeClaim")["spec"].update(
+                accessModes=["ReadWriteMany"]
+            ),
+            lambda d: d.remove(find(d, "PersistentVolumeClaim")),
             lambda d: valkey(d)["metadata"].update(namespace="other"),
             lambda d: pod(d).update(hostNetwork=True),
             lambda d: pod(d).update(automountServiceAccountToken=True),
@@ -504,6 +530,39 @@ class RendererTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     renderer.validate_resources(
                         candidate, baseline, HOST, IMAGE, TOKEN, BASIC, **options
+                    )
+
+    def test_valkey_storage_options(self):
+        baseline, _ = self.baseline()
+        resources = renderer.transform(
+            baseline,
+            HOST,
+            TOKEN,
+            valkey_password=VALKEY_PASSWORD,
+            valkey_storage_size="512Mi",
+            valkey_storage_class="longhorn",
+        )
+        claim = find(resources, "PersistentVolumeClaim")["spec"]
+        self.assertEqual(claim["resources"]["requests"]["storage"], "512Mi")
+        self.assertEqual(claim["storageClassName"], "longhorn")
+        for size, storage_class in (
+            ("1G", None),
+            ("0Gi", None),
+            ("10000Gi", None),
+            (1, None),
+            ("1Gi", "Bad_Class"),
+            ("1Gi", ""),
+            ("1Gi", "a" * 254),
+        ):
+            with self.subTest(size=size, storage_class=storage_class):
+                with self.assertRaises(ValueError):
+                    renderer.transform(
+                        baseline,
+                        HOST,
+                        TOKEN,
+                        valkey_password=VALKEY_PASSWORD,
+                        valkey_storage_size=size,
+                        valkey_storage_class=storage_class,
                     )
 
     def test_valkey_rotation_rolls_both_pods_without_changing_public_config(self):
@@ -807,6 +866,8 @@ class RendererTests(unittest.TestCase):
             replicas=2,
             session_ttl_seconds=600,
             transaction_ttl_seconds=90,
+            valkey_storage_size="2Gi",
+            valkey_storage_class="fast-rwo",
         )
         resources = renderer.transform(baseline, HOST, TOKEN, BASIC, **options)
         arguments = self.cli_arguments() + [
@@ -820,6 +881,10 @@ class RendererTests(unittest.TestCase):
             "600",
             "--transaction-ttl-seconds",
             "90",
+            "--valkey-storage-size",
+            "2Gi",
+            "--valkey-storage-class",
+            "fast-rwo",
             "--browser-start-url",
             "https://browser.example.org/oauth2/start?rd=%2Faccount",
         ]
@@ -839,7 +904,7 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(
             render.call_args.args[-2][0]["label"], "Continue with demo SSO"
         )
-        self.assertIn("Validated 9 resources", str(printed.call_args_list))
+        self.assertIn("Validated 10 resources", str(printed.call_args_list))
         for password in (TOKEN, VALKEY_PASSWORD):
             self.assertNotIn(password, str(printed.call_args_list))
             self.assertNotIn(
@@ -853,6 +918,8 @@ class RendererTests(unittest.TestCase):
             ["--replicas", "0"],
             ["--session-ttl-seconds", "59"],
             ["--transaction-ttl-seconds", "901"],
+            ["--valkey-storage-size", "1G"],
+            ["--valkey-storage-class", "Bad_Class"],
             ["--basic-secret-file", str(self.root / "jwt.json")],
             ["--valkey-secret-file", str(self.root / "jwt.json")],
             [
@@ -1651,7 +1718,7 @@ class RendererTests(unittest.TestCase):
                     valkey_password=VALKEY_PASSWORD,
                     oauth_key=OAUTH_KEY,
                 )
-                self.assertEqual(len(resources), 9)
+                self.assertEqual(len(resources), 10)
                 public_text = find(resources, "ConfigMap")["data"]["config.yaml"]
                 config = yaml.safe_load(public_text)
                 oauth = config["oauth"]

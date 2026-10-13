@@ -203,6 +203,19 @@ def checked_session_options(
         checked_token(valkey_password)
 
 
+def checked_valkey_storage(size, storage_class):
+    """Valid: ("1Gi", None), ("512Mi", "longhorn"). Invalid: ("1G", None),
+    ("0Gi", None), ("1Gi", "Bad_Class")."""
+    if not isinstance(size, str) or not re.fullmatch(r"[1-9][0-9]{0,3}(Mi|Gi)", size):
+        raise ValueError("Valkey storage size must look like 512Mi or 1Gi")
+    if storage_class is not None and (
+        not isinstance(storage_class, str)
+        or len(storage_class) > 253
+        or not re.fullmatch(r"[a-z0-9]([-a-z0-9.]*[a-z0-9])?", storage_class)
+    ):
+        raise ValueError("Valkey storage class must be a Kubernetes resource name")
+
+
 def checked_ecmwf_uids(uids, oauth_enabled):
     """Valid: ("user_ecmwf",). Invalid: "user_ecmwf" (bare str), ("",), (" a",),
     ("a", "a"), or any uid without OAuth."""
@@ -356,12 +369,21 @@ def valkey_config(password):
     return (
         "bind 0.0.0.0\nprotected-mode yes\nport 6379\n"
         f"requirepass {password}\n"
-        'appendonly no\nsave ""\nmaxmemory 128mb\nmaxmemory-policy noeviction\n'
+        # OAuth refresh tokens must survive restarts: AOF on the PVC, no RDB snapshots.
+        'appendonly yes\nappendfsync everysec\nsave ""\n'
+        "maxmemory 128mb\nmaxmemory-policy noeviction\n"
         'logfile ""\ndaemonize no\ndir /data\n'
     )
 
 
-def valkey_resources(app_labels, password):
+def valkey_resources(app_labels, password, storage_size="1Gi", storage_class=None):
+    checked_valkey_storage(storage_size, storage_class)
+    claim_spec = {
+        "accessModes": ["ReadWriteOnce"],
+        "resources": {"requests": {"storage": storage_size}},
+    }
+    if storage_class is not None:
+        claim_spec["storageClassName"] = storage_class
     labels = {
         "app.kubernetes.io/name": VALKEY_NAME,
         "app.kubernetes.io/instance": preview.RELEASE,
@@ -386,6 +408,12 @@ def valkey_resources(app_labels, password):
         "failureThreshold": 3,
     }
     return [
+        {
+            "apiVersion": "v1",
+            "kind": "PersistentVolumeClaim",
+            "metadata": {**metadata, "labels": copy.deepcopy(labels)},
+            "spec": claim_spec,
+        },
         {
             "apiVersion": "apps/v1",
             "kind": "Deployment",
@@ -455,7 +483,10 @@ def valkey_resources(app_labels, password):
                                     ],
                                 },
                             },
-                            {"name": "data", "emptyDir": {}},
+                            {
+                                "name": "data",
+                                "persistentVolumeClaim": {"claimName": VALKEY_NAME},
+                            },
                         ],
                     },
                 },
@@ -821,6 +852,7 @@ def resource_map(resources):
     allowed = preview.ALLOWED_API_KIND_PAIRS | {
         ("v1", "Secret"),
         ("networking.k8s.io/v1", "NetworkPolicy"),
+        ("v1", "PersistentVolumeClaim"),
     }
     for doc in resources:
         if (
@@ -852,11 +884,14 @@ def transform(
     oauth_allow_ecmwf_uids=(),
     oauth_aviso_resource=None,
     oauth_trusted_proxies=(),
+    valkey_storage_size="1Gi",
+    valkey_storage_class=None,
 ):
     checked_session_options(
         valkey_password, replicas, session_ttl_seconds, transaction_ttl_seconds
     )
     checked_oauth_profile(oauth_key is not None, valkey_password)
+    checked_valkey_storage(valkey_storage_size, valkey_storage_class)
     ecmwf_uids = checked_ecmwf_uids(oauth_allow_ecmwf_uids, oauth_key is not None)
     aviso = checked_aviso_resource(oauth_aviso_resource, oauth_key is not None)
     proxies = checked_trusted_proxies(oauth_trusted_proxies, oauth_key is not None)
@@ -1035,9 +1070,14 @@ def transform(
         template["spec"]["containers"][0]["env"].append(
             secret_env(VALKEY_PASSWORD_ENV, "valkey-password")
         )
-        shared = valkey_resources(template["metadata"]["labels"], valkey_password)
+        shared = valkey_resources(
+            template["metadata"]["labels"],
+            valkey_password,
+            valkey_storage_size,
+            valkey_storage_class,
+        )
         template["metadata"]["annotations"].update(
-            shared[0]["spec"]["template"]["metadata"]["annotations"]
+            shared[1]["spec"]["template"]["metadata"]["annotations"]
         )
         resources.extend(shared)
     template["metadata"]["annotations"]["checksum/config"] = hashlib.sha256(
@@ -1062,6 +1102,8 @@ def validate_resources(
     oauth_allow_ecmwf_uids=(),
     oauth_aviso_resource=None,
     oauth_trusted_proxies=(),
+    valkey_storage_size="1Gi",
+    valkey_storage_class=None,
 ):
     """Compare the full output to the narrowly transformed, validated prototype."""
     preview.validate_inputs(host, image)
@@ -1112,6 +1154,8 @@ def validate_resources(
             oauth_allow_ecmwf_uids=oauth_allow_ecmwf_uids,
             oauth_aviso_resource=oauth_aviso_resource,
             oauth_trusted_proxies=oauth_trusted_proxies,
+            valkey_storage_size=valkey_storage_size,
+            valkey_storage_class=valkey_storage_class,
         )
     )
     if resource_map(resources) != expected:
@@ -1137,6 +1181,8 @@ def render_api_key(
     oauth_allow_ecmwf_uids=(),
     oauth_aviso_resource=None,
     oauth_trusted_proxies=(),
+    valkey_storage_size="1Gi",
+    valkey_storage_class=None,
 ):
     preview.validate_inputs(host, image)
     checked_token(token)
@@ -1144,6 +1190,7 @@ def render_api_key(
         valkey_password, replicas, session_ttl_seconds, transaction_ttl_seconds
     )
     checked_oauth_profile(oauth_key is not None, valkey_password)
+    checked_valkey_storage(valkey_storage_size, valkey_storage_class)
     ecmwf_uids = checked_ecmwf_uids(oauth_allow_ecmwf_uids, oauth_key is not None)
     aviso = checked_aviso_resource(oauth_aviso_resource, oauth_key is not None)
     proxies = checked_trusted_proxies(oauth_trusted_proxies, oauth_key is not None)
@@ -1157,6 +1204,8 @@ def render_api_key(
         replicas=replicas,
         session_ttl_seconds=session_ttl_seconds,
         transaction_ttl_seconds=transaction_ttl_seconds,
+        valkey_storage_size=valkey_storage_size,
+        valkey_storage_class=valkey_storage_class,
     )
     if oauth_key is not None:
         options["oauth_key"] = oauth_key
@@ -1207,6 +1256,17 @@ def main():
     parser.add_argument("--replicas", type=int, default=1)
     parser.add_argument("--session-ttl-seconds", type=int, default=300)
     parser.add_argument("--transaction-ttl-seconds", type=int, default=300)
+    parser.add_argument(
+        "--valkey-storage-size",
+        default="1Gi",
+        metavar="SIZE",
+        help="Valkey AOF PersistentVolumeClaim size (default: 1Gi)",
+    )
+    parser.add_argument(
+        "--valkey-storage-class",
+        metavar="NAME",
+        help="Valkey PersistentVolumeClaim storage class (default: cluster default)",
+    )
     args = parser.parse_args()
     preview.validate_inputs(args.host, args.build_image)
     # A synthetic valid token checks profile selection before creating credentials.
@@ -1217,6 +1277,7 @@ def main():
         args.transaction_ttl_seconds,
     )
     checked_oauth_profile(bool(args.oauth_secret_file), args.valkey_secret_file)
+    checked_valkey_storage(args.valkey_storage_size, args.valkey_storage_class)
     checked_ecmwf_uids(args.oauth_allow_ecmwf_uids, bool(args.oauth_secret_file))
     checked_aviso_resource(args.oauth_aviso_resource, bool(args.oauth_secret_file))
     checked_trusted_proxies(args.oauth_trusted_proxies, bool(args.oauth_secret_file))
@@ -1299,6 +1360,8 @@ def main():
         replicas=args.replicas,
         session_ttl_seconds=args.session_ttl_seconds,
         transaction_ttl_seconds=args.transaction_ttl_seconds,
+        valkey_storage_size=args.valkey_storage_size,
+        valkey_storage_class=args.valkey_storage_class,
         **oauth,
     )
     output = directory_fd(output_dir, create=True)
