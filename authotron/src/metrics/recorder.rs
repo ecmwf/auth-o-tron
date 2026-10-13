@@ -176,6 +176,7 @@ pub struct Metrics {
     browser_attempts: IntCounterVec,
     browser_duration: HistogramVec,
     oauth_refresh_tokens: IntCounterVec,
+    oauth_upstream_tokens: IntCounterVec,
 }
 
 /// Bounded `event` label values for refresh-token lifecycle counters.
@@ -203,6 +204,35 @@ impl RefreshTokenEvent {
             Self::ReuseDetected => "reuse_detected",
             Self::FamilyRevoked => "family_revoked",
             Self::IssueFailed => "issue_failed",
+        }
+    }
+}
+
+/// Bounded `event` label values for the upstream refresh tokens of coupled families.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpstreamTokenEvent {
+    /// The provider accepted a revocation request.
+    RevocationSent,
+    /// The provider advertises no revocation endpoint.
+    RevocationUnsupported,
+    /// The revocation request failed; the provider's own expiry still applies.
+    RevocationFailed,
+    /// Not attempted: the queue was full, or the method or key no longer opens the grant.
+    RevocationSkipped,
+}
+impl UpstreamTokenEvent {
+    const ALL: [Self; 4] = [
+        Self::RevocationSent,
+        Self::RevocationUnsupported,
+        Self::RevocationFailed,
+        Self::RevocationSkipped,
+    ];
+    fn label(self) -> &'static str {
+        match self {
+            Self::RevocationSent => "revocation_sent",
+            Self::RevocationUnsupported => "revocation_unsupported",
+            Self::RevocationFailed => "revocation_failed",
+            Self::RevocationSkipped => "revocation_skipped",
         }
     }
 }
@@ -371,6 +401,16 @@ impl Metrics {
         for event in RefreshTokenEvent::ALL {
             oauth_refresh_tokens.with_label_values(&[event.label()]);
         }
+        let oauth_upstream_tokens = register_int_counter_vec_with_registry!(
+            "authotron_oauth_upstream_tokens_total",
+            "Upstream refresh-token events of refresh families coupled to an OIDC sign-in",
+            &["event"],
+            registry.clone()
+        )
+        .expect("register OAuth upstream-token events");
+        for event in UpstreamTokenEvent::ALL {
+            oauth_upstream_tokens.with_label_values(&[event.label()]);
+        }
         Metrics {
             registry,
             auth_requests_total,
@@ -386,11 +426,18 @@ impl Metrics {
             browser_attempts,
             browser_duration,
             oauth_refresh_tokens,
+            oauth_upstream_tokens,
         }
     }
 
     pub fn record_refresh_token(&self, event: RefreshTokenEvent) {
         self.oauth_refresh_tokens
+            .with_label_values(&[event.label()])
+            .inc();
+    }
+
+    pub fn record_upstream_token(&self, event: UpstreamTokenEvent) {
+        self.oauth_upstream_tokens
             .with_label_values(&[event.label()])
             .inc();
     }
@@ -602,6 +649,26 @@ mod tests {
             assert!(
                 output.contains(&format!(
                     "authotron_oauth_refresh_tokens_total{{event=\"{event}\"}} {value}"
+                )),
+                "{event}"
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_token_events_start_at_zero_and_count() {
+        let metrics = Metrics::new();
+        metrics.record_upstream_token(UpstreamTokenEvent::RevocationSkipped);
+        let output = metrics.render().unwrap();
+        for (event, value) in [
+            ("revocation_sent", 0),
+            ("revocation_unsupported", 0),
+            ("revocation_failed", 0),
+            ("revocation_skipped", 1),
+        ] {
+            assert!(
+                output.contains(&format!(
+                    "authotron_oauth_upstream_tokens_total{{event=\"{event}\"}} {value}"
                 )),
                 "{event}"
             );
