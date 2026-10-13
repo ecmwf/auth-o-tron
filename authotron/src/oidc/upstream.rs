@@ -21,6 +21,7 @@ use ring::{
     rand::{SecureRandom, SystemRandom},
 };
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use zeroize::Zeroizing;
 
 /// Upper bound on a sealed token; the plaintext is at most an 8 KiB refresh token.
@@ -67,11 +68,14 @@ impl UpstreamGrant {
     }
 }
 
+/// The sealed JSON. Strings borrow from the opened buffer unless they hold escapes.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Plaintext<'a> {
-    sub: &'a str,
-    refresh_token: &'a str,
+    #[serde(borrow)]
+    sub: Cow<'a, str>,
+    #[serde(borrow)]
+    refresh_token: Cow<'a, str>,
 }
 
 /// Seals with the active key; opens with any configured key. Deliberately not Debug.
@@ -184,13 +188,16 @@ impl UpstreamCipher {
         self.random
             .fill(&mut nonce)
             .map_err(|_| UpstreamError::Seal)?;
-        let mut data = Zeroizing::new(
-            serde_json::to_vec(&Plaintext {
-                sub: &grant.subject,
-                refresh_token: &grant.refresh_token,
-            })
-            .map_err(|_| UpstreamError::Seal)?,
-        );
+        // Room for JSON escapes (neither field holds control characters) and the tag,
+        // so neither serializing nor sealing reallocates and leaves an unwiped copy.
+        let capacity =
+            2 * (grant.subject.len() + grant.refresh_token.len()) + 64 + AES_256_GCM.tag_len();
+        let mut data = Zeroizing::new(Vec::with_capacity(capacity));
+        let plaintext = Plaintext {
+            sub: Cow::Borrowed(&grant.subject),
+            refresh_token: Cow::Borrowed(&grant.refresh_token),
+        };
+        serde_json::to_writer(&mut *data, &plaintext).map_err(|_| UpstreamError::Seal)?;
         key.seal_in_place_append_tag(
             Nonce::assume_unique_for_key(nonce),
             Aad::from(associated_data(&self.active, binding)),
@@ -244,8 +251,8 @@ impl UpstreamCipher {
             .map_err(|_| error)?;
         let parsed: Plaintext<'_> = serde_json::from_slice(plaintext).map_err(|_| error)?;
         Ok(UpstreamGrant::new(
-            parsed.sub,
-            Zeroizing::new(parsed.refresh_token.to_owned()),
+            &parsed.sub,
+            Zeroizing::new(parsed.refresh_token.into_owned()),
         ))
     }
 }
@@ -349,6 +356,14 @@ pub(crate) mod tests {
         );
         let removed = cipher("upstream.2", &["upstream.2"]);
         assert!(removed.open(&binding(), &sealed).is_err());
+        // Escaped characters round-trip too.
+        let quoted = UpstreamGrant::new(r#"a"b"#, Zeroizing::new(r#"t\"k"#.into()));
+        let resealed = rotated.seal(&binding(), &quoted).unwrap();
+        let opened = rotated.open(&binding(), &resealed).unwrap();
+        assert_eq!(
+            (opened.subject(), opened.refresh_token()),
+            (r#"a"b"#, r#"t\"k"#)
+        );
         let large = UpstreamGrant::new("s", Zeroizing::new("t".repeat(MAX_SEALED_BYTES)));
         assert_eq!(
             rotated.seal(&binding(), &large).err(),
