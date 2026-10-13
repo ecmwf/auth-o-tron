@@ -25,4 +25,6 @@ pub enum OidcError {
     /// An answer outside the protocol: unexpected status, malformed or oversized body,
     /// or a destination that is not an allowed provider URL.
     InvalidResponse,
+    /// The ID token's signature, key or claims failed validation.
+    InvalidIdToken,
 }
