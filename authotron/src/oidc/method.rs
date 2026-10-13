@@ -184,17 +184,175 @@ impl OidcMethod {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oidc::mock::{CLIENT_ID, CLIENT_SECRET, MockIdp, SUBJECT};
     use serde_json::json;
-    use std::io::Write;
+    use std::{io::Write, sync::atomic::Ordering};
 
     const ORIGIN: &str = "https://login.example.org";
+    const FORM_NONCE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn method(idp: &MockIdp, changes: serde_json::Value) -> (tempfile::NamedTempFile, OidcMethod) {
+        let mut secret = tempfile::NamedTempFile::new().unwrap();
+        writeln!(secret, "  {CLIENT_SECRET}  ").unwrap();
+        let mut value = json!({
+            "id": "demo-sso", "label": "SSO", "realm": "idp", "issuer": idp.issuer,
+            "client_id": CLIENT_ID, "client_secret_file": secret.path(),
+        });
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(changes.as_object().unwrap().clone());
+        let config: OidcMethodConfig = serde_json::from_value(value).unwrap();
+        (secret, OidcMethod::new(&config, ORIGIN).unwrap())
+    }
+
+    /// Runs the browser leg: authorization URL, provider sign-in, callback parameters.
+    async fn sign_in(idp: &MockIdp, method: &OidcMethod, state: &str) -> Result<User, OidcError> {
+        let secrets = FlowSecrets::derive(FORM_NONCE, state);
+        let metadata = method.metadata().await?;
+        let callback = idp.authorize(&method.authorization_url(&metadata, state, &secrets));
+        let query = url::Url::parse(&callback).unwrap();
+        let callback =
+            crate::oidc::flow::parse_callback(query.query().unwrap().as_bytes()).unwrap();
+        assert_eq!(callback.state, state);
+        let crate::oidc::flow::CallbackResult::Code(code) = callback.result else {
+            panic!("expected a code");
+        };
+        method
+            .complete(callback.iss.as_deref(), &code, &secrets)
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_complete_sign_in_yields_the_mapped_identity() {
+        let idp = MockIdp::start().await;
+        for auth in ["client_secret_basic", "client_secret_post"] {
+            let (_secret, method) = method(&idp, json!({"client_auth": auth}));
+            assert_eq!(
+                method.redirect_uri(),
+                "https://login.example.org/login/method/demo-sso/callback"
+            );
+            assert_eq!(method.availability(), Availability::Unknown);
+            let user = sign_in(&idp, &method, "state-1").await.unwrap();
+            assert_eq!(
+                (user.realm.as_str(), user.username.as_str()),
+                ("idp", SUBJECT)
+            );
+            assert!(user.roles.is_empty());
+            assert_eq!(user.attributes["email"], "alice@example.org");
+            assert_eq!(method.availability(), Availability::Available);
+        }
+        let (_secret, mapped) = method(
+            &idp,
+            json!({"username_claim": "preferred_username", "roles_claim": "realm_access.roles",
+                "role_map": {"mcp-demo": "mcp-demo"}}),
+        );
+        let user = sign_in(&idp, &mapped, "state-2").await.unwrap();
+        assert_eq!(user.username, "alice");
+        assert_eq!(user.roles, ["mcp-demo"]);
+    }
+
+    #[tokio::test]
+    async fn codes_issuers_nonces_and_keys_are_checked() {
+        let idp = MockIdp::start().await;
+        let (_secret, method) = method(&idp, json!({}));
+        let secrets = FlowSecrets::derive(FORM_NONCE, "state");
+        let metadata = method.metadata().await.unwrap();
+        let callback = idp.authorize(&method.authorization_url(&metadata, "state", &secrets));
+        let code = url::Url::parse(&callback)
+            .unwrap()
+            .query_pairs()
+            .find(|(name, _)| name == "code")
+            .unwrap()
+            .1
+            .into_owned();
+        // RFC 9207: the provider advertises `iss`, so it is required and must match.
+        for iss in [None, Some("https://attacker.example.org")] {
+            assert_eq!(
+                method.complete(iss, &code, &secrets).await.err(),
+                Some(OidcError::Rejected)
+            );
+        }
+        assert_eq!(idp.state.token_requests.load(Ordering::SeqCst), 0);
+        // A verifier or nonce from another state fails at the provider or locally.
+        let other = FlowSecrets::derive(FORM_NONCE, "other-state");
+        assert_eq!(
+            method
+                .complete(Some(&idp.issuer), &code, &other)
+                .await
+                .err(),
+            Some(OidcError::Rejected)
+        );
+        // The code is single-use at the provider.
+        assert_eq!(
+            method
+                .complete(Some(&idp.issuer), &code, &secrets)
+                .await
+                .err(),
+            Some(OidcError::Rejected)
+        );
+        *idp.state.claims.lock().unwrap() = json!({"nonce": "replayed"});
+        assert_eq!(
+            sign_in(&idp, &method, "state-3").await.err(),
+            Some(OidcError::InvalidIdToken)
+        );
+        *idp.state.claims.lock().unwrap() = json!({"aud": "other-client"});
+        assert_eq!(
+            sign_in(&idp, &method, "state-4").await.err(),
+            Some(OidcError::InvalidIdToken)
+        );
+        *idp.state.claims.lock().unwrap() = json!({});
+        // Rotated signing key published under a new kid.
+        *idp.state.signer.lock().unwrap() = (1, "k1".into());
+        assert!(sign_in(&idp, &method, "state-5").await.is_ok());
+        *idp.state.signer.lock().unwrap() = (1, "k0".into());
+        assert_eq!(
+            sign_in(&idp, &method, "state-6").await.err(),
+            Some(OidcError::InvalidIdToken)
+        );
+    }
+
+    #[tokio::test]
+    async fn providers_without_the_iss_parameter_and_failing_endpoints() {
+        let idp = MockIdp::start().await;
+        idp.state.iss_parameter.store(false, Ordering::SeqCst);
+        let (_secret, method) = method(&idp, json!({}));
+        assert!(sign_in(&idp, &method, "state").await.is_ok());
+        for (status, answer, expected) in [
+            (500, json!({}), OidcError::Unavailable),
+            (
+                401,
+                json!({"error": "invalid_client"}),
+                OidcError::ClientRejected,
+            ),
+            (
+                200,
+                json!({"access_token": "only"}),
+                OidcError::InvalidResponse,
+            ),
+        ] {
+            *idp.state.token_answer.lock().unwrap() = Some((status, answer));
+            assert_eq!(sign_in(&idp, &method, "state").await.err(), Some(expected));
+        }
+        // A wrong client secret is refused by the provider.
+        *idp.state.token_answer.lock().unwrap() = None;
+        let mut secret = tempfile::NamedTempFile::new().unwrap();
+        writeln!(secret, "wrong-secret").unwrap();
+        let mut config = method.config().clone();
+        config.client_secret_file = Some(secret.path().to_owned());
+        let wrong = OidcMethod::new(&config, ORIGIN).unwrap();
+        assert_eq!(
+            sign_in(&idp, &wrong, "state").await.err(),
+            Some(OidcError::ClientRejected)
+        );
+    }
 
     #[test]
     fn secret_files_must_be_small_plain_text() {
         let config = |path: &std::path::Path| -> OidcMethodConfig {
             serde_json::from_value(json!({
                 "id": "sso", "label": "SSO", "realm": "idp", "issuer": "https://idp.example.org",
-                "client_id": "authotron", "client_secret_file": path
+                "client_id": CLIENT_ID, "client_secret_file": path
             }))
             .unwrap()
         };
