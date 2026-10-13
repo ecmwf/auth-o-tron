@@ -481,6 +481,44 @@ their `exp`.
 - Metrics: `authotron_oauth_refresh_tokens_total{event}` with `issued`, `rotated`,
   `reuse_detected`, `family_revoked` and `issue_failed`.
 
+### Durable refresh-token storage
+
+Refresh-token families live only in the backend; nothing else can reconstruct them.
+They outlive Valkey restarts only if Valkey persists its data. Recommended settings:
+
+```text
+appendonly yes
+appendfsync everysec   # at most about one second of rotations lost on a crash
+dir /data              # on a persistent volume, not emptyDir
+maxmemory-policy noeviction
+```
+
+RDB snapshots alone are not enough: a restore loses every rotation since the last
+snapshot, so clients that refreshed afterwards hold tokens the store no longer knows.
+
+If state is lost anyway, the server fails closed. Every refresh returns
+`invalid_grant`, clients discard their tokens, and users sign in again. Access tokens
+already issued stay valid until their `exp`. Nothing falls back to memory.
+
+At startup, when any client enables refresh tokens, the server checks the store once
+and logs one event. Startup continues whatever the outcome:
+
+| Event | Level | When |
+|---|---|---|
+| `oauth.refresh_token.store_durable` | INFO | Valkey `INFO persistence` reports `aof_enabled:1` |
+| `oauth.refresh_token.store_not_durable` | WARN | Valkey reports `aof_enabled:0` (`backend=valkey`), or the Memory backend is selected (`backend=memory`) |
+| `oauth.refresh_token.store_durability_unverified` | WARN | `INFO persistence` failed, was ACL-denied, or lacked `aof_enabled` |
+
+Only `aof_enabled` is checked. The RDB `save` setting is not read, because
+`CONFIG GET` is usually ACL-denied and snapshots are not durable enough anyway. To
+let the check run, grant the backend user `+info`, which is read-only. The check reads
+the server at startup only. It does not notice persistence turned off later, and it
+cannot tell whether `/data` is on a persistent volume.
+
+A single Valkey with AOF on a persistent volume survives pod restarts. It is still a
+single point of failure. For production, choose a managed or replicated Valkey, or a
+future database backend, as an operations decision.
+
 ## Signing and deferred capabilities
 
 Keys are trusted absolute file references, loaded explicitly on enabled startup.
