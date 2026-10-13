@@ -562,10 +562,10 @@ and only the required-role union, with no username/email/credentials or unrelate
 Resource servers must enforce RS256, at+jwt, exact issuer/audience and current validity.
 The MCP resource server owns its protected-resource metadata and access-token validation.
 
-External SSO/OIDC, dynamic/CIMD registration, confidential-client
-authentication, browser token CORS and automatic operational key rotation are deferred.
-The first supported flow is preregistered public clients with fresh Basic/API-key login,
-explicit consent and code/S256 exchange; no separate production demo or deployment is required.
+Dynamic/CIMD registration, confidential-client authentication, browser token CORS and
+automatic operational key rotation are deferred. The supported flow is preregistered
+public clients with a fresh sign-in through a browser method (password, API key or an
+[OpenID Connect method](oidc.md)), explicit consent and code/S256 exchange.
 
 ## Self-contained verification
 
