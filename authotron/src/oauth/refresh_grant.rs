@@ -129,6 +129,7 @@ impl OAuthRuntime {
             realm: code.as_user().realm.clone(),
             provider_roles: code.provider_roles().to_vec(),
             method: code.method().into(),
+            upstream_coupled: false,
         };
         let response = self
             .token(proof)
@@ -158,7 +159,7 @@ impl OAuthRuntime {
                 .now()
                 .await
                 .map_err(|_| RefreshStoreError::Unavailable)?;
-            refresh_dispatch!(backend, issue(grant, token.hash(), now, policy))?;
+            refresh_dispatch!(backend, issue(grant, token.hash(), now, policy, None))?;
             Ok::<_, RefreshStoreError>(token)
         };
         match issued.await {
@@ -342,7 +343,7 @@ mod tests {
         let backend = runtime.refresh.as_ref().unwrap();
         let policy = runtime.refresh_policy("desktop").unwrap();
         let now = runtime.now().await.unwrap();
-        refresh_dispatch!(backend, issue(grant, token.hash(), now, policy)).unwrap();
+        refresh_dispatch!(backend, issue(grant, token.hash(), now, policy, None)).unwrap();
         token
     }
     fn auth(config: &ConfigV2, augmenters: serde_json::Value) -> Auth {

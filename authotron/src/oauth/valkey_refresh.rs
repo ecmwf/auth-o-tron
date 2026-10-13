@@ -10,7 +10,7 @@
 
 use super::refresh::{
     MAX_ROTATED_HASHES, Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant, RefreshStoreError,
-    Rotated, deadline, initial_expiry, random_id,
+    Rotated, UpstreamState, UpstreamStored, deadline, initial_expiry, random_id,
 };
 use super::refresh_durability::{self, Durability};
 use crate::{
@@ -97,13 +97,15 @@ impl ValkeyRefreshStore {
             _ => Err(RefreshStoreError::Unavailable),
         }
     }
-    /// Starts a family; at the per-user cap the user's oldest families are revoked.
+    /// Starts a family, coupled when `upstream` holds a sealed upstream grant; at the
+    /// per-user cap the user's oldest families are revoked.
     pub async fn issue(
         &self,
         grant: &RefreshGrant,
         token_hash: [u8; 32],
         now_ms: u64,
         policy: &RefreshTokenPolicy,
+        upstream: Option<&str>,
     ) -> Result<(), RefreshStoreError> {
         let (absolute, idle) =
             initial_expiry(now_ms, policy).ok_or(RefreshStoreError::Unavailable)?;
@@ -123,6 +125,7 @@ impl ValkeyRefreshStore {
                     idle.to_string().as_bytes(),
                     self.max_per_user.to_string().as_bytes(),
                     grant.client_id.as_bytes(),
+                    upstream.unwrap_or_default().as_bytes(),
                 ],
             )
             .await?;
@@ -144,12 +147,22 @@ impl ValkeyRefreshStore {
             )
             .await?;
         Ok(match reply.as_slice() {
-            [status, id, grant, created, absolute] if status == b"current" => {
+            [status, id, grant, created, absolute, upstream, generation]
+                if status == b"current" =>
+            {
                 Presented::Current(Box::new(RefreshFamily {
                     family_id: text(id)?,
                     grant: RefreshGrant::decode(grant)?,
                     created_at_ms: number(created)?,
                     absolute_expires_at_ms: number(absolute)?,
+                    upstream: (!upstream.is_empty())
+                        .then(|| {
+                            Ok::<_, RefreshStoreError>(UpstreamState {
+                                sealed: text(upstream)?,
+                                generation: number(generation)?,
+                            })
+                        })
+                        .transpose()?,
                 }))
             }
             [status] if status == b"grace" => Presented::Grace,
@@ -190,6 +203,36 @@ impl ValkeyRefreshStore {
         match reply.as_slice() {
             [status] if status == b"rotated" => Ok(Rotated::Rotated),
             [status] if status == b"stale" || status == b"missing" => Ok(Rotated::Stale),
+            _ => Err(RefreshStoreError::Unavailable),
+        }
+    }
+    /// Replaces the sealed upstream grant while `presented` is the family's current token
+    /// and `generation` its current upstream generation. Repeating a stored replacement
+    /// reports `Stored` again.
+    pub async fn set_upstream(
+        &self,
+        family_id: &str,
+        presented: &[u8; 32],
+        generation: u64,
+        sealed: &str,
+        now_ms: u64,
+    ) -> Result<UpstreamStored, RefreshStoreError> {
+        let reply = self
+            .run(
+                &[self.token_key(presented)],
+                "set_upstream",
+                now_ms,
+                &[
+                    URL_SAFE_NO_PAD.encode(presented).as_bytes(),
+                    family_id.as_bytes(),
+                    generation.to_string().as_bytes(),
+                    sealed.as_bytes(),
+                ],
+            )
+            .await?;
+        match reply.as_slice() {
+            [status] if status == b"stored" => Ok(UpstreamStored::Stored),
+            [status] if status == b"stale" || status == b"missing" => Ok(UpstreamStored::Stale),
             _ => Err(RefreshStoreError::Unavailable),
         }
     }
@@ -270,10 +313,10 @@ mod tests {
         assert!(killed >= 1, "another connection is closed");
     }
 
-    /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
-    #[tokio::test]
-    #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
-    async fn disposable_valkey_refresh_rotation_reuse_cap_and_revocation() {
+    /// A disposable Valkey container and a connected store with `max_per_user`.
+    async fn disposable(
+        max_per_user: usize,
+    ) -> (Fixture, BrowserBackendConfig, ValkeyRefreshStore) {
         let fixture = Fixture(docker(&[
             "run",
             "--rm",
@@ -296,15 +339,24 @@ mod tests {
             connect_timeout_ms: 2000,
             operation_timeout_ms: 1000,
         };
-        let mut ready = None;
         for _ in 0..100 {
-            if let Ok(store) = ValkeyRefreshStore::new(&backend, 2).await {
-                ready = Some(store);
-                break;
+            if let Ok(store) = ValkeyRefreshStore::new(&backend, max_per_user).await {
+                return (fixture, backend, store);
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let a = ready.expect("disposable Valkey did not become ready");
+        panic!("disposable Valkey did not become ready");
+    }
+    async fn server_now(store: &ValkeyRefreshStore) -> u64 {
+        let (sec, _): (u64, u64) = store.connection.query(&redis::cmd("TIME")).await.unwrap();
+        sec * 1000
+    }
+
+    /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
+    #[tokio::test]
+    #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+    async fn disposable_valkey_refresh_rotation_reuse_cap_and_revocation() {
+        let (_fixture, backend, a) = disposable(2).await;
         let b = ValkeyRefreshStore::new(&backend, 2).await.unwrap();
         assert_eq!(a.durability().await, Durability::NotPersisted);
         let _: String = a
@@ -313,12 +365,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(a.durability().await, Durability::AppendOnly);
-        let (sec, _): (u64, u64) = a.connection.query(&redis::cmd("TIME")).await.unwrap();
-        let now = sec * 1000;
+        let now = server_now(&a).await;
         let ceiling = now + 3_600_000;
 
-        a.issue(&grant(), [1; 32], now, &policy()).await.unwrap();
-        assert!(a.issue(&grant(), [1; 32], now, &policy()).await.is_err());
+        a.issue(&grant(), [1; 32], now, &policy(), None)
+            .await
+            .unwrap();
+        assert!(
+            a.issue(&grant(), [1; 32], now, &policy(), None)
+                .await
+                .is_err()
+        );
         // The first operation on a closed connection reconnects and succeeds.
         close_other_connections(&a).await;
         let current = family(b.lookup(&[1; 32], now).await.unwrap());
@@ -376,7 +433,7 @@ mod tests {
         ));
 
         for (index, token) in [[4; 32], [5; 32], [6; 32]].into_iter().enumerate() {
-            a.issue(&grant(), token, now + index as u64, &policy())
+            a.issue(&grant(), token, now + index as u64, &policy(), None)
                 .await
                 .unwrap();
         }
@@ -398,7 +455,9 @@ mod tests {
             a.lookup(&[7; 32], now).await.unwrap(),
             Presented::Missing
         ));
-        a.issue(&grant(), [8; 32], now, &policy()).await.unwrap();
+        a.issue(&grant(), [8; 32], now, &policy(), None)
+            .await
+            .unwrap();
         assert!(matches!(
             a.lookup(&[8; 32], now + 600_000).await.unwrap(),
             Presented::Missing
@@ -407,7 +466,9 @@ mod tests {
         let mut bounded = grant();
         bounded.username = "bounded".into();
         let hash = |step: usize| [100 + step as u8; 32];
-        a.issue(&bounded, hash(0), now, &policy()).await.unwrap();
+        a.issue(&bounded, hash(0), now, &policy(), None)
+            .await
+            .unwrap();
         let id = family(a.lookup(&hash(0), now).await.unwrap()).family_id;
         let rotations = MAX_ROTATED_HASHES + 2;
         for step in 0..rotations {
@@ -451,5 +512,83 @@ mod tests {
                 .unwrap();
             assert!(!found, "revocation removes token {step}");
         }
+    }
+
+    /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
+    #[tokio::test]
+    #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+    async fn disposable_valkey_upstream_grants_follow_token_and_generation() {
+        let (_fixture, backend, a) = disposable(50).await;
+        let b = ValkeyRefreshStore::new(&backend, 50).await.unwrap();
+        let now = server_now(&a).await;
+        let coupled = RefreshGrant {
+            upstream_coupled: true,
+            ..grant()
+        };
+        a.issue(&coupled, [1; 32], now, &policy(), Some("v1.k.first"))
+            .await
+            .unwrap();
+        let current = family(b.lookup(&[1; 32], now).await.unwrap());
+        assert!(current.grant.upstream_coupled);
+        assert_eq!(
+            current.upstream,
+            Some(UpstreamState {
+                sealed: "v1.k.first".into(),
+                generation: 0
+            })
+        );
+        let id = current.family_id;
+        for (store, presented, generation, sealed, expected) in [
+            (&a, [9; 32], 0, "v1.k.second", UpstreamStored::Stale),
+            (&b, [1; 32], 1, "v1.k.second", UpstreamStored::Stale),
+            (&a, [1; 32], 0, "v1.k.second", UpstreamStored::Stored),
+            // A run resent after a lost reply recognises its own replacement.
+            (&b, [1; 32], 0, "v1.k.second", UpstreamStored::Stored),
+            (&b, [1; 32], 0, "v1.k.other", UpstreamStored::Stale),
+        ] {
+            assert_eq!(
+                store
+                    .set_upstream(&id, &presented, generation, sealed, now)
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
+        let state = family(a.lookup(&[1; 32], now).await.unwrap())
+            .upstream
+            .unwrap();
+        assert_eq!(
+            (state.sealed.as_str(), state.generation),
+            ("v1.k.second", 1)
+        );
+        assert_eq!(
+            a.rotate(&id, &[1; 32], [2; 32], now, 600, now + 3_600_000)
+                .await
+                .unwrap(),
+            Rotated::Rotated
+        );
+        assert_eq!(
+            b.set_upstream(&id, &[1; 32], 1, "v1.k.third", now)
+                .await
+                .unwrap(),
+            UpstreamStored::Stale
+        );
+        assert_eq!(
+            b.set_upstream(&id, &[2; 32], 1, "v1.k.third", now)
+                .await
+                .unwrap(),
+            UpstreamStored::Stored
+        );
+        a.issue(&grant(), [5; 32], now, &policy(), None)
+            .await
+            .unwrap();
+        let plain = family(a.lookup(&[5; 32], now).await.unwrap());
+        assert!(plain.upstream.is_none() && !plain.grant.upstream_coupled);
+        assert_eq!(
+            a.set_upstream(&plain.family_id, &[5; 32], 0, "v1.k.x", now)
+                .await
+                .unwrap(),
+            UpstreamStored::Stale
+        );
     }
 }

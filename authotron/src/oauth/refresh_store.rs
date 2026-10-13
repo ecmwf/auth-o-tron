@@ -10,7 +10,7 @@
 
 use super::refresh::{
     MAX_ROTATED_HASHES, Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant, RefreshStoreError,
-    Rotated, deadline, initial_expiry, random_id,
+    Rotated, UpstreamState, UpstreamStored, deadline, initial_expiry, random_id,
 };
 use crate::config::RefreshTokenPolicy;
 use std::{
@@ -28,6 +28,7 @@ struct Family {
     previous: Option<([u8; 32], u64)>,
     /// Recently rotated hashes, oldest first, at most [`MAX_ROTATED_HASHES`].
     rotated: VecDeque<[u8; 32]>,
+    upstream: Option<UpstreamState>,
 }
 impl Family {
     fn live(&self, now_ms: u64) -> bool {
@@ -68,13 +69,15 @@ impl MemoryRefreshStore {
             .lock()
             .map_err(|_| RefreshStoreError::Unavailable)
     }
-    /// Starts a family; at the per-user cap the user's oldest families are revoked.
+    /// Starts a family, coupled when `upstream` holds a sealed upstream grant; at the
+    /// per-user cap the user's oldest families are revoked.
     pub async fn issue(
         &self,
         grant: &RefreshGrant,
         token_hash: [u8; 32],
         now_ms: u64,
         policy: &RefreshTokenPolicy,
+        upstream: Option<&str>,
     ) -> Result<(), RefreshStoreError> {
         let (absolute_ms, idle_ms) =
             initial_expiry(now_ms, policy).ok_or(RefreshStoreError::Unavailable)?;
@@ -111,6 +114,10 @@ impl MemoryRefreshStore {
                 current: token_hash,
                 previous: None,
                 rotated: VecDeque::new(),
+                upstream: upstream.map(|sealed| UpstreamState {
+                    sealed: sealed.to_owned(),
+                    generation: 0,
+                }),
             },
         );
         inner.prune(now_ms);
@@ -143,6 +150,7 @@ impl MemoryRefreshStore {
                 grant: family.grant.clone(),
                 created_at_ms: family.created_at_ms,
                 absolute_expires_at_ms: family.absolute_ms,
+                upstream: family.upstream.clone(),
             })));
         }
         if family.previous.is_some_and(|(hash, rotated_at)| {
@@ -190,6 +198,39 @@ impl MemoryRefreshStore {
         inner.tokens.insert(*presented, (family_id.into(), idle_ms));
         inner.tokens.insert(next, (family_id.into(), idle_ms));
         Ok(Rotated::Rotated)
+    }
+    /// Replaces the sealed upstream grant while `presented` is the family's current token
+    /// and `generation` its current upstream generation. Repeating a stored replacement
+    /// reports `Stored` again.
+    pub async fn set_upstream(
+        &self,
+        family_id: &str,
+        presented: &[u8; 32],
+        generation: u64,
+        sealed: &str,
+        now_ms: u64,
+    ) -> Result<UpstreamStored, RefreshStoreError> {
+        let mut inner = self.lock()?;
+        let Some(family) = inner.families.get_mut(family_id) else {
+            return Ok(UpstreamStored::Stale);
+        };
+        if !family.live(now_ms) || family.current != *presented {
+            return Ok(UpstreamStored::Stale);
+        }
+        let Some(upstream) = &mut family.upstream else {
+            return Ok(UpstreamStored::Stale);
+        };
+        if upstream.generation == generation + 1 && upstream.sealed == sealed {
+            return Ok(UpstreamStored::Stored);
+        }
+        if upstream.generation != generation {
+            return Ok(UpstreamStored::Stale);
+        }
+        *upstream = UpstreamState {
+            sealed: sealed.to_owned(),
+            generation: generation + 1,
+        };
+        Ok(UpstreamStored::Stored)
     }
     pub async fn revoke_family(&self, family_id: &str) -> Result<(), RefreshStoreError> {
         self.lock()?.families.remove(family_id);
@@ -242,7 +283,7 @@ mod tests {
     async fn rotation_grace_and_reuse_revokes_family() {
         let store = MemoryRefreshStore::new(50);
         store
-            .issue(&grant(), [1; 32], NOW, &policy())
+            .issue(&grant(), [1; 32], NOW, &policy(), None)
             .await
             .unwrap();
         let family = current(store.lookup(&[1; 32], NOW).await.unwrap());
@@ -283,7 +324,7 @@ mod tests {
     async fn older_ancestors_are_reuse_even_within_grace() {
         let store = MemoryRefreshStore::new(50);
         store
-            .issue(&grant(), [1; 32], NOW, &policy())
+            .issue(&grant(), [1; 32], NOW, &policy(), None)
             .await
             .unwrap();
         let id = current(store.lookup(&[1; 32], NOW).await.unwrap()).family_id;
@@ -311,7 +352,7 @@ mod tests {
     async fn rotated_hashes_are_bounded_and_expire_at_their_idle_deadline() {
         let store = MemoryRefreshStore::new(50);
         store
-            .issue(&grant(), [0; 32], NOW, &policy())
+            .issue(&grant(), [0; 32], NOW, &policy(), None)
             .await
             .unwrap();
         let id = current(store.lookup(&[0; 32], NOW).await.unwrap()).family_id;
@@ -359,7 +400,7 @@ mod tests {
     async fn idle_and_absolute_expiry_and_rotation_extends_idle_only() {
         let store = MemoryRefreshStore::new(50);
         store
-            .issue(&grant(), [1; 32], NOW, &policy())
+            .issue(&grant(), [1; 32], NOW, &policy(), None)
             .await
             .unwrap();
         assert!(matches!(
@@ -367,7 +408,7 @@ mod tests {
             Presented::Missing
         ));
         store
-            .issue(&grant(), [2; 32], NOW, &policy())
+            .issue(&grant(), [2; 32], NOW, &policy(), None)
             .await
             .unwrap();
         let id = current(store.lookup(&[2; 32], NOW).await.unwrap()).family_id;
@@ -395,7 +436,7 @@ mod tests {
             Presented::Missing
         ));
         store
-            .issue(&grant(), [3; 32], NOW, &policy())
+            .issue(&grant(), [3; 32], NOW, &policy(), None)
             .await
             .unwrap();
         let id = current(store.lookup(&[3; 32], NOW).await.unwrap()).family_id;
@@ -413,10 +454,13 @@ mod tests {
         let store = MemoryRefreshStore::new(2);
         let mut other = grant();
         other.username = "bob".into();
-        store.issue(&other, [9; 32], NOW, &policy()).await.unwrap();
+        store
+            .issue(&other, [9; 32], NOW, &policy(), None)
+            .await
+            .unwrap();
         for (index, token) in [[1; 32], [2; 32], [3; 32]].into_iter().enumerate() {
             store
-                .issue(&grant(), token, NOW + index as u64, &policy())
+                .issue(&grant(), token, NOW + index as u64, &policy(), None)
                 .await
                 .unwrap();
         }
@@ -429,9 +473,68 @@ mod tests {
         }
         assert!(
             store
-                .issue(&grant(), [2; 32], NOW, &policy())
+                .issue(&grant(), [2; 32], NOW, &policy(), None)
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_grants_are_replaced_only_for_the_current_token_and_generation() {
+        let store = MemoryRefreshStore::new(50);
+        let coupled = RefreshGrant {
+            upstream_coupled: true,
+            ..grant()
+        };
+        store
+            .issue(&coupled, [1; 32], NOW, &policy(), Some("v1.k.first"))
+            .await
+            .unwrap();
+        let family = current(store.lookup(&[1; 32], NOW).await.unwrap());
+        assert!(family.grant.upstream_coupled);
+        let state = family.upstream.unwrap();
+        assert_eq!((state.sealed.as_str(), state.generation), ("v1.k.first", 0));
+        let id = family.family_id;
+        let set = |presented, generation, sealed: &'static str| {
+            let (store, id) = (&store, id.clone());
+            async move {
+                store
+                    .set_upstream(&id, &presented, generation, sealed, NOW)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert_eq!(set([9; 32], 0, "v1.k.second").await, UpstreamStored::Stale);
+        assert_eq!(set([1; 32], 1, "v1.k.second").await, UpstreamStored::Stale);
+        assert_eq!(set([1; 32], 0, "v1.k.second").await, UpstreamStored::Stored);
+        // A repeated request after a lost answer is recognised as stored.
+        assert_eq!(set([1; 32], 0, "v1.k.second").await, UpstreamStored::Stored);
+        assert_eq!(set([1; 32], 0, "v1.k.other").await, UpstreamStored::Stale);
+        let state = current(store.lookup(&[1; 32], NOW).await.unwrap())
+            .upstream
+            .unwrap();
+        assert_eq!(
+            (state.sealed.as_str(), state.generation),
+            ("v1.k.second", 1)
+        );
+        store
+            .rotate(&id, &[1; 32], [2; 32], NOW, 600, NOW + 3_600_000)
+            .await
+            .unwrap();
+        assert_eq!(set([1; 32], 1, "v1.k.third").await, UpstreamStored::Stale);
+        assert_eq!(set([2; 32], 1, "v1.k.third").await, UpstreamStored::Stored);
+        store
+            .issue(&grant(), [5; 32], NOW, &policy(), None)
+            .await
+            .unwrap();
+        let plain = current(store.lookup(&[5; 32], NOW).await.unwrap());
+        assert!(plain.upstream.is_none());
+        assert_eq!(
+            store
+                .set_upstream(&plain.family_id, &[5; 32], 0, "v1.k.x", NOW)
+                .await
+                .unwrap(),
+            UpstreamStored::Stale
         );
     }
 
@@ -439,7 +542,7 @@ mod tests {
     async fn revocation_requires_owning_client_and_accepts_any_family_token() {
         let store = MemoryRefreshStore::new(50);
         store
-            .issue(&grant(), [1; 32], NOW, &policy())
+            .issue(&grant(), [1; 32], NOW, &policy(), None)
             .await
             .unwrap();
         let id = current(store.lookup(&[1; 32], NOW).await.unwrap()).family_id;
@@ -457,7 +560,7 @@ mod tests {
         ));
         assert!(!store.revoke_token(&[2; 32], "desktop").await.unwrap());
         store
-            .issue(&grant(), [5; 32], NOW, &policy())
+            .issue(&grant(), [5; 32], NOW, &policy(), None)
             .await
             .unwrap();
         let id = current(store.lookup(&[5; 32], NOW).await.unwrap()).family_id;

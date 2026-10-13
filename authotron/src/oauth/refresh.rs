@@ -73,6 +73,10 @@ pub struct RefreshGrant {
     pub provider_roles: Vec<String>,
     /// Browser method id of the login that started the family.
     pub method: String,
+    /// The family holds a sealed upstream grant that each refresh renews at the
+    /// provider. Serialized only when set, so uncoupled grants keep their encoding.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub upstream_coupled: bool,
 }
 impl RefreshGrant {
     pub(super) fn encode(&self) -> Result<Vec<u8>, RefreshStoreError> {
@@ -106,6 +110,23 @@ pub struct RefreshFamily {
     pub grant: RefreshGrant,
     pub created_at_ms: u64,
     pub absolute_expires_at_ms: u64,
+    pub upstream: Option<UpstreamState>,
+}
+
+/// A coupled family's sealed upstream grant and its generation, which every stored
+/// upstream rotation increments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpstreamState {
+    pub sealed: String,
+    pub generation: u64,
+}
+
+/// Outcome of replacing a family's sealed upstream grant.
+#[derive(Debug, PartialEq, Eq)]
+pub enum UpstreamStored {
+    Stored,
+    /// The presented token or the generation is no longer current.
+    Stale,
 }
 
 /// Classification of a presented refresh token.
@@ -170,6 +191,7 @@ pub(super) mod tests {
             realm: "local".into(),
             provider_roles: vec!["reader".into()],
             method: "password".into(),
+            upstream_coupled: false,
         }
     }
 
@@ -207,6 +229,15 @@ pub(super) mod tests {
             Ok(grant.clone())
         );
         let mut value = serde_json::to_value(&grant).unwrap();
+        assert!(value.get("upstream_coupled").is_none());
+        let coupled = RefreshGrant {
+            upstream_coupled: true,
+            ..grant.clone()
+        };
+        assert_eq!(
+            RefreshGrant::decode(&coupled.encode().unwrap()),
+            Ok(coupled)
+        );
         value["roles"] = serde_json::json!(["admin"]);
         assert_eq!(
             RefreshGrant::decode(&serde_json::to_vec(&value).unwrap()),
