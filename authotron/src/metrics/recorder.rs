@@ -82,6 +82,10 @@ pub enum BrowserOutcome {
     Capacity,
     Timeout,
     Cancelled,
+    /// The OIDC provider returned an error, e.g. the user declined.
+    IdpError,
+    /// The OIDC provider was unreachable, refused this client or answered off-protocol.
+    IdpUnavailable,
 }
 impl BrowserOutcome {
     fn label(self) -> &'static str {
@@ -97,6 +101,8 @@ impl BrowserOutcome {
             Self::Capacity => "capacity",
             Self::Timeout => "timeout",
             Self::Cancelled => "cancelled",
+            Self::IdpError => "idp_error",
+            Self::IdpUnavailable => "idp_unavailable",
         }
     }
 }

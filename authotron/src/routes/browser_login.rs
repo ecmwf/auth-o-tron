@@ -30,7 +30,7 @@ use maud::{Markup, html};
 use serde::Deserialize;
 
 pub(super) const FORM_COOKIE: &str = "__Host-authotron_form";
-const SESSION_COOKIE: &str = "__Host-authotron_session";
+pub(super) const SESSION_COOKIE: &str = "__Host-authotron_session";
 const ERROR: &str = "Key invalid or could not be verified";
 
 pub(super) fn private_ui(state: &AppState) -> UiConfig {
@@ -71,6 +71,10 @@ pub fn routes(state: &AppState) -> Router<AppState> {
     Router::new()
         .route("/login/method/{id}", get(method_form).post(submit))
         .route("/login/method/{id}/", get(method_slash))
+        .route(
+            "/login/method/{id}/callback",
+            get(super::oidc_login::callback),
+        )
         .route("/login/account", get(account))
         .route("/login/account/", get(account_slash))
         .layer(DefaultBodyLimit::max(8 * 1024))
@@ -86,7 +90,7 @@ pub(super) fn method_path(id: &str) -> String {
 /// configured id) is rejected rather than decoded: each method has one URL.
 /// Valid: `password`, `ecmwf-api-key` when configured. Invalid: `Password`,
 /// `pass%77ord`, `password%20`, `0`, or any id with no configured method.
-fn resolve_method<'a>(
+pub(super) fn resolve_method<'a>(
     state: &'a AppState,
     uri: &OriginalUri,
     id: &str,
@@ -364,7 +368,7 @@ async fn submit(
     response
 }
 
-fn error_outcome(error: &BrowserVerifyError) -> BrowserOutcome {
+pub(super) fn error_outcome(error: &BrowserVerifyError) -> BrowserOutcome {
     match error {
         BrowserVerifyError::Limited => BrowserOutcome::Limited,
         BrowserVerifyError::Rejected => BrowserOutcome::Rejected,

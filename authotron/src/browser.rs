@@ -726,7 +726,7 @@ impl BrowserLoginState {
 
     /// Local-first, nonblocking admission bounds pending backend requests as well
     /// as provider work. Only locally admitted attempts spend backend quota.
-    async fn admitted_with_metrics<T>(
+    pub(crate) async fn admitted_with_metrics<T>(
         &self,
         operation: impl std::future::Future<Output = Result<T, BrowserVerifyError>>,
         metrics: Option<&Metrics>,

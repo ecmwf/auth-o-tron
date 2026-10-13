@@ -129,6 +129,7 @@ SOURCE_FILES = (
     "authotron/src/routes/mod.rs",
     "authotron/src/routes/oauth.rs",
     "authotron/src/routes/oidc_login.rs",
+    "authotron/src/routes/oidc_login/tests.rs",
     "authotron/src/routes/providers.rs",
     "authotron/src/routes/tokens.rs",
     "authotron/src/routes/whoami.rs",
