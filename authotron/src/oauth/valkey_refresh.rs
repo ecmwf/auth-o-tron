@@ -260,6 +260,15 @@ mod tests {
             other => panic!("expected current family, got {other:?}"),
         }
     }
+    /// Closes every other client connection, as a Valkey restart does.
+    async fn close_other_connections(store: &ValkeyRefreshStore) {
+        let killed: usize = store
+            .connection
+            .query(redis::cmd("CLIENT").arg(&["KILL", "TYPE", "normal", "SKIPME", "yes"]))
+            .await
+            .unwrap();
+        assert!(killed >= 1, "another connection is closed");
+    }
 
     /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
     #[tokio::test]
@@ -310,6 +319,8 @@ mod tests {
 
         a.issue(&grant(), [1; 32], now, &policy()).await.unwrap();
         assert!(a.issue(&grant(), [1; 32], now, &policy()).await.is_err());
+        // The first operation on a closed connection reconnects and succeeds.
+        close_other_connections(&a).await;
         let current = family(b.lookup(&[1; 32], now).await.unwrap());
         assert_eq!(current.grant, grant());
         assert_eq!(current.created_at_ms, now);
@@ -322,6 +333,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ttl as u64, now + 600_000);
+        // A rotation sent on a closed connection runs once: a second run would be stale.
+        close_other_connections(&a).await;
         assert_eq!(
             b.rotate(&id, &[1; 32], [2; 32], now + 1, 600, ceiling)
                 .await

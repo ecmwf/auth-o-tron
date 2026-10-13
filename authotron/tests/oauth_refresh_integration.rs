@@ -464,4 +464,28 @@ async fn disposable_valkey_refresh_rotates_across_replicas() {
     let response = post(&a, "/oauth/revoke", &Jar::default(), &fields).await;
     assert_eq!(response.status(), StatusCode::OK);
     error(refresh_as(&b, "desktop", &t4).await, "invalid_grant");
+
+    // Valkey closing every connection, as on restart, fails neither the next sign-in
+    // nor the next refresh on either replica.
+    let authotron::config::ui::BrowserBackendConfig::Valkey { url, password, .. } =
+        &config.ui.browser_session.as_ref().unwrap().backend
+    else {
+        unreachable!()
+    };
+    let mut info = redis::IntoConnectionInfo::into_connection_info(url.as_str()).unwrap();
+    info.redis.password = Some(password.clone());
+    let mut admin = redis::Client::open(info)
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    let mut kill = redis::cmd("CLIENT");
+    kill.arg(&["KILL", "TYPE", "normal", "SKIPME", "yes"]);
+    let killed: usize = kill.query_async(&mut admin).await.unwrap();
+    assert!(killed >= 2, "both replicas lose their connections");
+    let t5 = refresh_token(&authorize(&a, "desktop").await);
+    let _: usize = kill.query_async(&mut admin).await.unwrap();
+    let (status, refreshed) = refresh_as(&b, "desktop", &t5).await;
+    assert_eq!(status, StatusCode::OK);
+    refresh_token(&refreshed);
 }

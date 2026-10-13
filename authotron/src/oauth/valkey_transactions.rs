@@ -2468,6 +2468,30 @@ mod tests {
         authenticated_cases(&backend).await;
         code_cases(&backend).await;
         redemption_cases(&backend).await;
+        // Closing b's connection, as a Valkey restart does: each next command
+        // reconnects and reaches Valkey instead of failing as unavailable.
+        let mut kill = redis::cmd("CLIENT");
+        kill.arg(&["KILL", "TYPE", "normal", "SKIPME", "yes"]);
+        let _: usize = command(&a, &kill).await;
+        b.server_now_ms().await.unwrap();
+        let _: usize = command(&a, &kill).await;
+        assert_eq!(
+            b.redeem_code(
+                &AuthorizationCode::generate().unwrap(),
+                "desktop",
+                "https://app.example.org/cb",
+                "https://mcp.example.org/mcp",
+                "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+            )
+            .await
+            .err(),
+            Some(CodeStoreError::Missing)
+        );
+        let _: usize = command(&a, &kill).await;
+        assert_eq!(
+            b.lookup(&created.id, &[7; 32]).await.err(),
+            Some(StoreError::Missing)
+        );
         docker(&["stop", &container.0]);
         let code = AuthorizationCode::generate().unwrap();
         assert_eq!(

@@ -670,22 +670,19 @@ mod tests {
                 .contains("authotron_browser_logins_inflight 0")
         );
 
-        // A dead connection is re-established for later operations, never replaying a write.
-        let _: usize = command(
-            backend,
-            "CLIENT",
-            &["KILL", "TYPE", "normal", "SKIPME", "yes"],
-        )
-        .await;
-        let mut reconnected = false;
-        for _ in 0..100 {
-            if b.form(&LoginFlow::basic("password")).await.is_ok() {
-                reconnected = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(reconnected, "a form eventually succeeds after reconnecting");
+        // Closing b's connection, as a Valkey restart does: the next form reconnects
+        // and succeeds, and a session read after another close reaches Valkey.
+        let close = || {
+            command::<usize>(
+                backend,
+                "CLIENT",
+                &["KILL", "TYPE", "normal", "SKIPME", "yes"],
+            )
+        };
+        close().await;
+        b.form(&LoginFlow::basic("password")).await.unwrap();
+        close().await;
+        assert!(b.lookup(&opaque_id()).await.unwrap().is_none());
         b.discard(&short).await.unwrap();
 
         let mut lease = backend.admit(100, 60, 1, 10).await.unwrap();

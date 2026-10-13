@@ -161,4 +161,93 @@ mod tests {
         *url = "rediss://valkey.example.org:6379/0".into();
         assert!(config.validate().is_ok());
     }
+
+    struct Fixture(String);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "-f", &self.0])
+                .output();
+        }
+    }
+    fn docker(args: &[&str]) -> String {
+        let output = std::process::Command::new("docker")
+            .args(args)
+            .output()
+            .expect("Docker CLI required for disposable Valkey tests");
+        assert!(output.status.success(), "Docker fixture command failed");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
+    #[tokio::test]
+    #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+    async fn disposable_valkey_resends_a_command_once_after_its_connection_closed() {
+        let fixture = Fixture(docker(&[
+            "run",
+            "--rm",
+            "-d",
+            "-p",
+            "127.0.0.1::6379",
+            "valkey/valkey:8",
+            "valkey-server",
+            "--requirepass",
+            "public-disposable-fixture",
+            "--save",
+            "",
+            "--appendonly",
+            "no",
+        ]));
+        let mut config = settings();
+        let BrowserBackendConfig::Valkey { url, password, .. } = &mut config else {
+            unreachable!()
+        };
+        *url = format!("redis://{}/0", docker(&["port", &fixture.0, "6379/tcp"]));
+        *password = "public-disposable-fixture".into();
+        let mut ready = None;
+        for _ in 0..100 {
+            if let Ok(connection) = ValkeyConnection::connect(&config).await {
+                ready = Some(connection);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let connection = ready.expect("disposable Valkey did not become ready");
+        let admin = ValkeyConnection::connect(&config).await.unwrap();
+        let mut kill = redis::cmd("CLIENT");
+        kill.arg(&["KILL", "TYPE", "normal", "SKIPME", "yes"]);
+
+        // A command that finds its connection closed runs exactly once on the new one.
+        for expected in 1..=3_u64 {
+            let killed: usize = admin.query(&kill).await.unwrap();
+            assert!(killed >= 1, "the fixture connection is closed");
+            let count: u64 = connection
+                .query(redis::cmd("INCR").arg("fixture:resent"))
+                .await
+                .unwrap();
+            assert_eq!(count, expected);
+        }
+
+        // Server error replies are returned without a second run.
+        let mut failing = redis::cmd("EVAL");
+        failing
+            .arg("redis.call('INCR', KEYS[1]) return redis.error_reply('fixture')")
+            .arg(1)
+            .arg("fixture:failed");
+        assert_eq!(
+            connection.query::<()>(&failing).await.err(),
+            Some(ConnectionError::Unavailable)
+        );
+        let count: u64 = admin
+            .query(redis::cmd("GET").arg("fixture:failed"))
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+
+        docker(&["stop", &fixture.0]);
+        assert_eq!(
+            connection.query::<String>(&redis::cmd("PING")).await.err(),
+            Some(ConnectionError::Unavailable)
+        );
+    }
 }
