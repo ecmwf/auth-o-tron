@@ -43,6 +43,8 @@ struct Inner {
     /// expires at the family's idle deadline when it was issued or rotated: a family
     /// unused for that long has expired, so older hashes need not be recognised.
     tokens: HashMap<[u8; 32], (String, u64)>,
+    /// Upstream refresh locks: family id to holder token and expiry.
+    upstream_locks: HashMap<String, (String, u64)>,
 }
 impl Inner {
     fn prune(&mut self, now_ms: u64) {
@@ -50,6 +52,8 @@ impl Inner {
         let families = &self.families;
         self.tokens
             .retain(|_, (id, expires)| now_ms < *expires && families.contains_key(id));
+        self.upstream_locks
+            .retain(|_, (_, expires)| now_ms < *expires);
     }
 }
 
@@ -231,6 +235,44 @@ impl MemoryRefreshStore {
             generation: generation + 1,
         };
         Ok(UpstreamStored::Stored)
+    }
+    /// Takes the family's upstream refresh lock for `holder` until `expires_ms`. Another
+    /// holder's unexpired lock refuses it; the same holder renews its own lock.
+    pub async fn lock_upstream(
+        &self,
+        family_id: &str,
+        holder: &str,
+        now_ms: u64,
+        expires_ms: u64,
+    ) -> Result<bool, RefreshStoreError> {
+        let mut inner = self.lock()?;
+        if inner
+            .upstream_locks
+            .get(family_id)
+            .is_some_and(|(current, expires)| current != holder && now_ms < *expires)
+        {
+            return Ok(false);
+        }
+        inner
+            .upstream_locks
+            .insert(family_id.to_owned(), (holder.to_owned(), expires_ms));
+        Ok(true)
+    }
+    /// Releases the lock only if `holder` still holds it.
+    pub async fn unlock_upstream(
+        &self,
+        family_id: &str,
+        holder: &str,
+    ) -> Result<(), RefreshStoreError> {
+        let mut inner = self.lock()?;
+        if inner
+            .upstream_locks
+            .get(family_id)
+            .is_some_and(|(current, _)| current == holder)
+        {
+            inner.upstream_locks.remove(family_id);
+        }
+        Ok(())
     }
     pub async fn revoke_family(&self, family_id: &str) -> Result<(), RefreshStoreError> {
         self.lock()?.families.remove(family_id);
@@ -535,6 +577,52 @@ mod tests {
                 .await
                 .unwrap(),
             UpstreamStored::Stale
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_locks_exclude_other_holders_until_released_or_expired() {
+        let store = MemoryRefreshStore::new(50);
+        assert!(store.lock_upstream("f", "a", NOW, NOW + 10).await.unwrap());
+        assert!(
+            !store
+                .lock_upstream("f", "b", NOW + 1, NOW + 20)
+                .await
+                .unwrap()
+        );
+        // Other families and a renewal by the holder are unaffected.
+        assert!(
+            store
+                .lock_upstream("g", "b", NOW + 1, NOW + 20)
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .lock_upstream("f", "a", NOW + 2, NOW + 30)
+                .await
+                .unwrap()
+        );
+        store.unlock_upstream("f", "b").await.unwrap();
+        assert!(
+            !store
+                .lock_upstream("f", "b", NOW + 3, NOW + 40)
+                .await
+                .unwrap()
+        );
+        store.unlock_upstream("f", "a").await.unwrap();
+        assert!(
+            store
+                .lock_upstream("f", "b", NOW + 4, NOW + 40)
+                .await
+                .unwrap()
+        );
+        // An expired lock no longer excludes anyone.
+        assert!(
+            store
+                .lock_upstream("f", "c", NOW + 40, NOW + 50)
+                .await
+                .unwrap()
         );
     }
 

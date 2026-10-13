@@ -62,6 +62,20 @@ if op == 'issue' then
     return {'ok'}
 end
 
+-- Upstream refresh lock: KEYS[1] is the family's lock key, ARGV[5] the holder.
+if op == 'lock' then
+    local holder, expires = ARGV[5], tonumber(ARGV[6])
+    if not integer(expires) or expires <= now then return {'unavailable'} end
+    local current = redis.call('GET', token)
+    if current and current ~= holder then return {'busy'} end
+    redis.call('SET', token, holder, 'PXAT', decimal(expires))
+    return {'ok'}
+end
+if op == 'unlock' then
+    if redis.call('GET', token) == ARGV[5] then redis.call('DEL', token) end
+    return {'ok'}
+end
+
 local id = redis.call('GET', token)
 if op == 'revoke' then
     if not id then return {'missing'} end

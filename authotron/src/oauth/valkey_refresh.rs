@@ -68,6 +68,9 @@ impl ValkeyRefreshStore {
     fn token_key(&self, hash: &[u8; 32]) -> String {
         format!("{}token:{}", self.prefix, URL_SAFE_NO_PAD.encode(hash))
     }
+    fn lock_key(&self, family_id: &str) -> String {
+        format!("{}lock:{family_id}", self.prefix)
+    }
     async fn run(
         &self,
         keys: &[String],
@@ -236,6 +239,46 @@ impl ValkeyRefreshStore {
             _ => Err(RefreshStoreError::Unavailable),
         }
     }
+    /// Takes the family's upstream refresh lock for `holder` until `expires_ms`. Another
+    /// holder's unexpired lock refuses it; the same holder renews its own lock, so a
+    /// resent request succeeds.
+    pub async fn lock_upstream(
+        &self,
+        family_id: &str,
+        holder: &str,
+        now_ms: u64,
+        expires_ms: u64,
+    ) -> Result<bool, RefreshStoreError> {
+        let reply = self
+            .run(
+                &[self.lock_key(family_id)],
+                "lock",
+                now_ms,
+                &[holder.as_bytes(), expires_ms.to_string().as_bytes()],
+            )
+            .await?;
+        match reply.as_slice() {
+            [status] if status == b"ok" => Ok(true),
+            [status] if status == b"busy" => Ok(false),
+            _ => Err(RefreshStoreError::Unavailable),
+        }
+    }
+    /// Releases the lock only if `holder` still holds it.
+    pub async fn unlock_upstream(
+        &self,
+        family_id: &str,
+        holder: &str,
+    ) -> Result<(), RefreshStoreError> {
+        let reply = self
+            .run(
+                &[self.lock_key(family_id)],
+                "unlock",
+                1,
+                &[holder.as_bytes()],
+            )
+            .await?;
+        Self::expect_ok(&reply)
+    }
     pub async fn revoke_family(&self, family_id: &str) -> Result<(), RefreshStoreError> {
         // The token key is unused by this operation; any key in the namespace routes it.
         let reply = self
@@ -348,8 +391,8 @@ mod tests {
         panic!("disposable Valkey did not become ready");
     }
     async fn server_now(store: &ValkeyRefreshStore) -> u64 {
-        let (sec, _): (u64, u64) = store.connection.query(&redis::cmd("TIME")).await.unwrap();
-        sec * 1000
+        let (sec, micros): (u64, u64) = store.connection.query(&redis::cmd("TIME")).await.unwrap();
+        sec * 1000 + micros / 1000
     }
 
     /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
@@ -590,5 +633,38 @@ mod tests {
                 .unwrap(),
             UpstreamStored::Stale
         );
+    }
+
+    /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
+    #[tokio::test]
+    #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+    async fn disposable_valkey_upstream_lock_excludes_other_replicas() {
+        let (_fixture, backend, a) = disposable(50).await;
+        let b = ValkeyRefreshStore::new(&backend, 50).await.unwrap();
+        let now = server_now(&a).await;
+        assert!(a.lock_upstream("f", "a", now, now + 60_000).await.unwrap());
+        assert!(!b.lock_upstream("f", "b", now, now + 60_000).await.unwrap());
+        assert!(b.lock_upstream("g", "b", now, now + 60_000).await.unwrap());
+        // A resent lock request by the holder succeeds and renews it.
+        assert!(a.lock_upstream("f", "a", now, now + 60_000).await.unwrap());
+        b.unlock_upstream("f", "b").await.unwrap();
+        assert!(!b.lock_upstream("f", "b", now, now + 60_000).await.unwrap());
+        a.unlock_upstream("f", "a").await.unwrap();
+        a.unlock_upstream("f", "a").await.unwrap();
+        assert!(b.lock_upstream("f", "b", now, now + 50).await.unwrap());
+        let ttl: i64 = a
+            .connection
+            .query(redis::cmd("PTTL").arg(a.lock_key("f")))
+            .await
+            .unwrap();
+        assert!((0..=50).contains(&ttl), "{ttl}");
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let later = server_now(&a).await.max(now + 51);
+        assert!(
+            a.lock_upstream("f", "a", later, later + 60_000)
+                .await
+                .unwrap()
+        );
+        assert!(a.lock_upstream("f", "a", now, now).await.is_err());
     }
 }
