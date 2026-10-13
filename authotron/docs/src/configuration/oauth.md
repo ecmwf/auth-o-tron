@@ -263,7 +263,9 @@ continue the current request; no cookies change and no automatic redirect occurs
 Finish or deny the current request before starting a different authorization.
 
 Credential and consent pages escape all configured/client/identity text. They do not
-render client state or tokens. Modal JavaScript whitelists the optional canonical
+render client state or tokens. The consent page names the user as "Signed in as" the
+sign-in's display name (an OIDC method's `display_name_claim`), or else the username;
+the display name never reaches codes or tokens. Modal JavaScript whitelists the optional canonical
 transaction field and navigates only to literal same-origin `/oauth/continue` or
 `/login/account`. Native POST fallback remains supported. Consent alone uses a native
 POST redirect; its CSP allows self plus the registered callback origin because browsers
@@ -336,7 +338,7 @@ restoration does not rerun upstream verification.
 Private codecs are wire-bounded: Pending 16 KiB, authenticated context 64 KiB,
 ConsentReady/code grant 96 KiB. Trusted authenticated storage is required, not a MAC
 against compromised cache contents. Code envelopes bind their actual code hash and
-originating literal issuer. Valkey namespaces are `:oauth:authorization-transactions:v7:`
+originating literal issuer. Valkey namespaces are `:oauth:authorization-transactions:v8:`
 and `:oauth:authorization-codes:v4:`; code hashes contain exactly code_hash/issuer/expiry/payload.
 Shared issuance atomically persists code while consuming consent; redemption compares
 all code fields/index score/effective deadline before atomic deletion and proof release.

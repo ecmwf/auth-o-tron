@@ -115,7 +115,7 @@ async fn oidc_sign_in_continues_the_authorization_to_consent_and_tokens() {
     assert_eq!(location(&response), "/oauth/continue");
     jar.update(&response);
     let consent = text(get(&fixture.app, "/oauth/continue", &jar).await).await;
-    assert!(consent.contains(&format!("Signed in as {SUBJECT}")));
+    assert!(consent.contains("<p>Signed in as alice</p>"));
     let response = send(
         &fixture.app,
         Request::post("/oauth/consent")
@@ -172,6 +172,32 @@ async fn oidc_sign_in_continues_the_authorization_to_consent_and_tokens() {
             .unwrap()
             .starts_with("urn:authotron:subject:")
     );
+    // The display name stays on the consent page and out of the token.
+    assert!(!claims.to_string().contains("alice"));
+}
+
+#[tokio::test]
+async fn consent_escapes_the_display_name_and_falls_back_to_the_username() {
+    let (fixture, _key) = authorization_fixture().await;
+    for (claim, shown) in [
+        (json!("<b>Ada</b>"), "&lt;b&gt;Ada&lt;/b&gt;".to_owned()),
+        (json!("ada\u{7f}"), SUBJECT.to_owned()),
+        (Value::Null, SUBJECT.to_owned()),
+    ] {
+        *fixture.idp.state.claims.lock().unwrap() = json!({
+            "preferred_username": claim, "realm_access": {"roles": ["mcp-demo"]}
+        });
+        let mut jar = authorize(&fixture.app).await;
+        let callback = local(&fixture.idp.authorize(&start(&fixture, &mut jar).await));
+        let response = get(&fixture.app, &callback, &jar).await;
+        assert_eq!(location(&response), "/oauth/continue");
+        jar.update(&response);
+        let consent = text(get(&fixture.app, "/oauth/continue", &jar).await).await;
+        assert!(
+            consent.contains(&format!("<p>Signed in as {shown}</p>")),
+            "{claim}"
+        );
+    }
 }
 
 #[tokio::test]

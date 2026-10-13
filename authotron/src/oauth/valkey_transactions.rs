@@ -92,7 +92,7 @@ impl ValkeyTransactionStore {
         Ok(Self {
             config,
             connection,
-            prefix: format!("{key_prefix}:oauth:authorization-transactions:v7:"),
+            prefix: format!("{key_prefix}:oauth:authorization-transactions:v8:"),
             code_prefix: format!("{key_prefix}:oauth:authorization-codes:v4:"),
         })
     }

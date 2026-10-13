@@ -317,8 +317,8 @@ async fn authorize(
                 let SignIn {
                     user,
                     subject,
+                    display_name,
                     refresh_token,
-                    ..
                 } = match oidc.complete(iss, code, secrets).await {
                     Ok(signed_in) => signed_in,
                     Err(error) => return Ok((None, Err(SignInError::Provider(error)))),
@@ -334,7 +334,9 @@ async fn authorize(
                         );
                         return Ok((None, Err(SignInError::OfflineAccess)));
                     }
-                    return Ok((None, oidc_verified(state, method, user, None).await));
+                    let identity = oidc_verified(state, method, user, None).await;
+                    let identity = identity.map(|identity| identity.with_display_name(display_name));
+                    return Ok((None, identity));
                 };
                 let binding = UpstreamBinding {
                     method: &method.flow.method,
@@ -355,6 +357,7 @@ async fn authorize(
                     return Ok((unheld, Err(SignInError::OfflineAccess)));
                 };
                 let identity = oidc_verified(state, method, user, Some(sealed)).await;
+                let identity = identity.map(|identity| identity.with_display_name(display_name));
                 Ok((unheld, identity))
             },
             Some(&state.metrics),

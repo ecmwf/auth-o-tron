@@ -311,7 +311,7 @@ async fn continue_consent(State(state): State<AppState>, headers: HeaderMap) -> 
         html! {
             h2 id="login-card-title" { "Authorize " (&client.display_name) }
             p { "Resource: " (request.resource()) }
-            p { "Signed in as " (&context.as_user().username) }
+            p { "Signed in as " (context.shown_name()) }
             ul { @for scope in context.authorized_scopes() { li { (scope) } } }
             form class="key-form" method="post" action="/oauth/consent" {
                 input type="hidden" name="csrf" value=(csrf.as_secret_str());

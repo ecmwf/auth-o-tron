@@ -14,7 +14,7 @@ use crate::{
     browser::{BrowserCredentials, BrowserLoginState, BrowserVerifyError},
     metrics::Metrics,
     models::user::User,
-    oidc::upstream,
+    oidc::{claims::display_text, upstream},
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -34,6 +34,7 @@ pub struct VerifiedOAuthIdentity {
     method: String,
     verified_at_ms: u64,
     upstream: Option<String>,
+    display_name: Option<String>,
 }
 impl VerifiedOAuthIdentity {
     pub fn as_user(&self) -> &User {
@@ -55,6 +56,22 @@ impl VerifiedOAuthIdentity {
     pub fn upstream(&self) -> Option<&str> {
         self.upstream.as_deref()
     }
+    /// Display only, e.g. an OIDC method's `display_name_claim`; never part of policy,
+    /// codes or tokens.
+    pub fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
+    }
+    /// Sets the display name if it is exactly a valid display text; any other value
+    /// leaves none, and pages show the username.
+    pub(crate) fn with_display_name(mut self, name: Option<String>) -> Self {
+        self.display_name = name.filter(|name| valid_display_name(name));
+        self
+    }
+}
+
+/// A display name exactly as [`display_text`] keeps it.
+pub(super) fn valid_display_name(name: &str) -> bool {
+    display_text(name) == Some(name)
 }
 
 /// Callers must enforce Origin/CSRF and the bound OAuth transaction before invoking this.
@@ -91,6 +108,7 @@ pub async fn verify_identity(
             method: method.into(),
             verified_at_ms,
             upstream: None,
+            display_name: None,
         })
     })
     .await
@@ -144,6 +162,7 @@ pub(crate) async fn oidc_identity(
         method: method.into(),
         verified_at_ms: now_ms()?,
         upstream,
+        display_name: None,
     })
 }
 
@@ -206,6 +225,7 @@ pub(super) fn restore_from_trusted_storage(
         method,
         verified_at_ms,
         upstream,
+        display_name: None,
     })
 }
 

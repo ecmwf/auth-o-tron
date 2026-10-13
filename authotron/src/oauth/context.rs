@@ -9,7 +9,10 @@
 //! Fresh, browser-bound policy eligibility for later consent; no grant or code issuance.
 
 use super::{
-    authentication::{AuthenticationError, VerifiedOAuthIdentity, restore_from_trusted_storage},
+    authentication::{
+        AuthenticationError, VerifiedOAuthIdentity, restore_from_trusted_storage,
+        valid_display_name,
+    },
     records::{
         AuthorizationTransaction, BoundAuthorizationTransaction, MAX_TRANSACTION_BYTES, valid_time,
     },
@@ -50,6 +53,7 @@ struct ContextDto {
     transaction: String,
     source_transaction_id_hash: Option<[u8; 32]>,
     upstream: Option<String>,
+    display_name: Option<String>,
 }
 
 /// Owns verification proof/snapshot and validated input. No Debug, Clone or public serialization.
@@ -176,6 +180,12 @@ impl AuthenticatedAuthorization {
     pub fn upstream(&self) -> Option<&str> {
         self.identity.upstream()
     }
+    /// The name the consent page shows: the display name, or else the username.
+    pub fn shown_name(&self) -> &str {
+        self.identity
+            .display_name()
+            .unwrap_or(&self.as_user().username)
+    }
     /// Eligible scopes only; this accessor conveys no consent decision.
     pub fn authorized_scopes(&self) -> &[String] {
         &self.scopes
@@ -190,7 +200,7 @@ impl AuthenticatedAuthorization {
             .encode()
             .map_err(|_| ContextError::InvalidTransaction)?;
         let dto = ContextDto {
-            version: 5,
+            version: 6,
             username: user.username.clone(),
             realm: user.realm.clone(),
             roles: user.roles.clone(),
@@ -200,6 +210,7 @@ impl AuthenticatedAuthorization {
             transaction: URL_SAFE_NO_PAD.encode(transaction),
             source_transaction_id_hash: self.source_transaction_id_hash,
             upstream: self.upstream().map(str::to_owned),
+            display_name: self.identity.display_name().map(str::to_owned),
         };
         let bytes = serde_json::to_vec(&dto).map_err(|_| ContextError::InvalidRecord)?;
         if bytes.len() > MAX_AUTHENTICATED_CONTEXT_BYTES {
@@ -288,8 +299,11 @@ fn decode_parts(
         return Err(TooLarge);
     }
     let dto: ContextDto = serde_json::from_slice(bytes).map_err(|_| InvalidRecord)?;
-    if dto.version != 5 {
+    if dto.version != 6 {
         return Err(UnsupportedVersion);
+    }
+    if !dto.display_name.as_deref().is_none_or(valid_display_name) {
+        return Err(InvalidRecord);
     }
     if dto.transaction.len() > (MAX_TRANSACTION_BYTES * 4).div_ceil(3) {
         return Err(TooLarge);
@@ -317,7 +331,8 @@ fn decode_parts(
     .map_err(|error| match error {
         AuthenticationError::Unavailable => InvalidTime,
         _ => InvalidRecord,
-    })?;
+    })?
+    .with_display_name(dto.display_name);
     Ok((transaction, identity, dto.source_transaction_id_hash))
 }
 
@@ -381,7 +396,7 @@ pub(super) mod tests {
         names.sort_unstable();
         assert_eq!(
             names.join(" "),
-            "method provider_roles realm roles source_transaction_id_hash transaction upstream username verified_at_ms version"
+            "display_name method provider_roles realm roles source_transaction_id_hash transaction upstream username verified_at_ms version"
         );
         let restored = AuthenticatedAuthorization::decode(&bytes, &config, &[7; 32], now).unwrap();
         assert_eq!(restored.encode().unwrap(), bytes);
@@ -393,6 +408,15 @@ pub(super) mod tests {
             AuthenticatedAuthorization::decode(&coupled, &config, &[7; 32], now).unwrap();
         assert_eq!(restored.upstream(), Some("v1.k1.AAAA"));
         assert_eq!(restored.encode().unwrap(), coupled);
+        // The display name is restored for the consent page only; the username stays.
+        assert_eq!(restored.shown_name(), restored.as_user().username);
+        let mut named = value.clone();
+        named["display_name"] = json!("Ada <Lovelace>");
+        let named = serde_json::to_vec(&named).unwrap();
+        let restored = AuthenticatedAuthorization::decode(&named, &config, &[7; 32], now).unwrap();
+        assert_eq!(restored.shown_name(), "Ada <Lovelace>");
+        assert_eq!(restored.as_user().username, value["username"]);
+        assert_eq!(restored.encode().unwrap(), named);
         assert!(restored.as_user().attributes.is_empty() && restored.as_user().scopes.is_empty());
         config.max_authentication_age_seconds = 1;
         let restored =
@@ -420,8 +444,12 @@ pub(super) mod tests {
         let bytes = context.encode().unwrap();
         let original: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         for (field, replacement, error) in [
-            ("version", json!(6), UnsupportedVersion),
-            ("version", json!(4), UnsupportedVersion),
+            ("version", json!(7), UnsupportedVersion),
+            ("version", json!(5), UnsupportedVersion),
+            ("display_name", json!("a\nb"), InvalidRecord),
+            ("display_name", json!(" padded "), InvalidRecord),
+            ("display_name", json!("n".repeat(65)), InvalidRecord),
+            ("display_name", json!(7), InvalidRecord),
             ("upstream", json!("v2.k.AAAA"), InvalidRecord),
             ("upstream", json!(42), InvalidRecord),
             ("method", json!("Password"), InvalidRecord),
