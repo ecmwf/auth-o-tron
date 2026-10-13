@@ -17,7 +17,7 @@ use crate::{
     oidc::mock::SUBJECT,
 };
 use serde_json::json;
-use std::sync::atomic::Ordering;
+use std::{sync::atomic::Ordering, time::Duration};
 
 /// The upstream refresh token the family of `token` currently holds.
 async fn held(coupled: &Coupled, token: &RefreshToken) -> String {
@@ -236,5 +236,22 @@ async fn an_unverified_refreshed_id_token_keeps_the_family_and_its_rotation() {
     assert_ne!(rotated, original);
     assert!(coupled.idp.state.refresh_token_live(&rotated));
     *coupled.idp.state.claims.lock().unwrap() = json!({});
+    coupled.refresh(&token).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_cancelled_refresh_still_stores_the_rotation_and_releases_the_lock() {
+    let coupled = coupled(|_| {}).await;
+    let (token, original) = live_family(&coupled).await;
+    let state = &coupled.idp.state;
+    state.token_delay_ms.store(300, Ordering::SeqCst);
+    let abandoned = tokio::time::timeout(Duration::from_millis(100), coupled.refresh(&token));
+    assert!(abandoned.await.is_err());
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    state.token_delay_ms.store(0, Ordering::SeqCst);
+    // The client's token was never rotated, but the provider's rotation was stored.
+    let rotated = held(&coupled, &token).await;
+    assert_ne!(rotated, original);
+    assert!(state.refresh_token_live(&rotated));
     coupled.refresh(&token).await.unwrap();
 }

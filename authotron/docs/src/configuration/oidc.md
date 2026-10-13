@@ -284,9 +284,9 @@ family's user or client; Valkey holds only ciphertext.
 users the `offline_access` realm role (part of the default roles). With "Revoke
 Refresh Token" enabled and "Refresh Token Max Reuse" 0, every upstream refresh
 rotates the offline token; the lock and the stored generation keep concurrent
-refreshes from using a spent token. Set "Offline Session Idle" no shorter than the
-client's `idle_ttl_seconds`, so an idle family does not outlive its offline
-session.
+refreshes from using a spent token. Set "Offline Session Idle" to the client's
+`idle_ttl_seconds`: a shorter value ends idle families early, a longer one keeps
+the offline sessions of expired families alive longer.
 
 Not covered:
 
@@ -299,7 +299,9 @@ Not covered:
   session lasts until its idle timeout, though no family holds its token.
 - If the provider rotates the token but the new one cannot be stored, or the lock
   expires while a refresh is stalled, the rotated token is lost and the family
-  fails at its next refresh. The lock lives for `http_timeout_ms` plus 5 seconds.
+  fails at its next refresh. The lock lives for three times `http_timeout_ms`
+  (metadata, token and key requests) plus 5 seconds. The locked section finishes
+  even when the client abandons its refresh request.
 
 Metrics: `authotron_oauth_upstream_tokens_total{event}` (see
 [metrics](../reference/metrics.md#metric-families)).

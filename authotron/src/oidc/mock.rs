@@ -26,7 +26,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -124,6 +124,8 @@ pub(crate) struct MockState {
     pub signer: Mutex<(usize, String)>,
     pub token_requests: AtomicUsize,
     pub discovery_requests: AtomicUsize,
+    /// Milliseconds the token endpoint waits after answering, before the answer is sent.
+    pub token_delay_ms: AtomicU64,
     /// Answer `offline_access` requests with a refresh token.
     pub issue_offline_tokens: AtomicBool,
     /// Advertise the RFC 7009 revocation endpoint.
@@ -202,7 +204,10 @@ impl MockIdp {
                 post({
                     let (state, issuer) = (state.clone(), issuer_cell.clone());
                     move |headers: HeaderMap, body: String| async move {
-                        token(&state, issuer.get().unwrap(), &headers, &body)
+                        let answer = token(&state, issuer.get().unwrap(), &headers, &body);
+                        let delay = state.token_delay_ms.load(Ordering::SeqCst);
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        answer
                     }
                 }),
             )

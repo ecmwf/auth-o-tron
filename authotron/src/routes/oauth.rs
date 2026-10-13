@@ -31,7 +31,7 @@ use cookie::{Cookie, SameSite, time::Duration};
 use maud::html;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, net::SocketAddr};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 const TX: &str = "__Host-authotron_oauth";
 const BROWSER: &str = "__Host-authotron_oauth_browser";
@@ -595,7 +595,7 @@ async fn token(
 }
 async fn refresh_token(
     state: &AppState,
-    runtime: &OAuthRuntime,
+    runtime: &Arc<OAuthRuntime>,
     fields: &HashMap<String, String>,
 ) -> Response {
     let Some(token) = fields.get("refresh_token") else {

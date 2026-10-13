@@ -28,6 +28,7 @@ use crate::{
     metrics::{Metrics, RefreshTokenEvent},
     models::user::User,
 };
+use std::sync::Arc;
 
 pub(crate) enum RefreshBackend {
     Memory(Box<MemoryRefreshStore>),
@@ -197,7 +198,7 @@ impl OAuthRuntime {
     }
 
     pub(crate) async fn refresh(
-        &self,
+        self: &Arc<Self>,
         request: RefreshRequest<'_>,
         auth: &Auth,
         browser: &BrowserLoginState,

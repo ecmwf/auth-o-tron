@@ -8,12 +8,13 @@
 
 //! The upstream step of refreshing a coupled family. Under a per-family lock the
 //! current sealed grant is re-read, refreshed at the provider, and any rotated upstream
-//! token is stored before anything else can fail, so a later step never loses it. The
-//! refreshed identity must keep its `sub` and username; its mapped roles replace the
-//! family's provider roles for this refresh.
+//! token is stored before anything else can fail, so a later step never loses it. This
+//! locked section runs as its own task: a cancelled refresh request still stores the
+//! rotation and releases the lock. The refreshed identity must keep its `sub` and
+//! username; its mapped roles replace the family's provider roles for this refresh.
 
 use super::{
-    refresh::{Presented, RefreshFamily, UpstreamStored, random_id},
+    refresh::{EndedUpstream, Presented, RefreshFamily, UpstreamStored, random_id},
     refresh_grant::{RefreshBackend, RefreshGrantError, refresh_dispatch},
     runtime::OAuthRuntime,
     upstream::binding,
@@ -24,24 +25,30 @@ use crate::{
     metrics::{Metrics, RefreshTokenEvent, UpstreamTokenEvent},
     oidc::{OidcError, method::OidcMethod, upstream::UpstreamGrant},
 };
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 /// How long a refresh waits for another replica's upstream refresh of the same family.
 const LOCK_WAIT: Duration = Duration::from_secs(2);
 const LOCK_POLL: Duration = Duration::from_millis(100);
-/// Lock lifetime beyond the provider request timeout.
+/// The locked section makes up to three provider requests (metadata, token, keys).
+const LOCK_REQUESTS: u64 = 3;
+/// Lock lifetime beyond those requests' timeouts.
 const LOCK_MARGIN_MS: u64 = 5_000;
 
-/// What the provider's answer means for the family.
+/// What the locked section means for the family.
 enum Outcome {
     /// The refreshed identity's mapped provider roles.
     Roles(Vec<String>),
     /// 503; the family is kept.
     Unavailable,
+    /// Another refresh of the family held the lock for the whole wait.
+    Busy,
     /// The upstream grant is gone or cannot be opened: end the family only.
     Dead,
     /// The identity changed: end the family and its upstream grant.
     Changed,
+    /// The presented token turned out to be reused; the store ended the family.
+    Reused(Option<EndedUpstream>),
 }
 
 impl OAuthRuntime {
@@ -49,46 +56,29 @@ impl OAuthRuntime {
     /// provider roles to augment. Families whose upstream grant is dead or whose identity
     /// changed are revoked.
     pub(super) async fn refresh_upstream(
-        &self,
+        self: &Arc<Self>,
         backend: &RefreshBackend,
         family: &RefreshFamily,
         presented: &[u8; 32],
-        oidc: &OidcMethod,
+        oidc: &Arc<OidcMethod>,
         browser: &BrowserLoginState,
         metrics: &Metrics,
     ) -> Result<Vec<String>, RefreshGrantError> {
         use RefreshGrantError::*;
-        let id = &family.family_id;
-        let holder = random_id()?;
-        let lifetime = oidc.config().http_timeout_ms + LOCK_MARGIN_MS;
-        let deadline = tokio::time::Instant::now() + LOCK_WAIT;
-        loop {
-            let now = self.now().await.map_err(|_| Unavailable)?;
-            if refresh_dispatch!(backend, lock_upstream(id, &holder, now, now + lifetime))? {
-                break;
-            }
-            if tokio::time::Instant::now() + LOCK_POLL > deadline {
-                tracing::warn!(
-                    event_name = "oauth.upstream.lock_busy",
-                    event_domain = "oauth",
-                    method = %family.grant.method,
-                    "another refresh of this family is still renewing its upstream grant"
-                );
-                metrics.record_upstream_token(UpstreamTokenEvent::Unavailable);
-                return Err(Unavailable);
-            }
-            tokio::time::sleep(LOCK_POLL).await;
-        }
-        let outcome = self
-            .renew(backend, family, presented, oidc, browser, metrics)
-            .await;
-        refresh_dispatch!(backend, unlock_upstream(id, &holder))?;
+        let task = {
+            let (runtime, oidc, metrics) = (self.clone(), oidc.clone(), metrics.clone());
+            let (id, presented) = (family.family_id.clone(), *presented);
+            tokio::spawn(async move { runtime.locked(&id, &presented, &oidc, &metrics).await })
+        };
+        let outcome = task.await.map_err(|_| Unavailable)?;
         let event = match &outcome {
             Ok(Outcome::Roles(_)) => Some(UpstreamTokenEvent::Refreshed),
-            Ok(Outcome::Unavailable) | Err(Unavailable) => Some(UpstreamTokenEvent::Unavailable),
+            Ok(Outcome::Unavailable | Outcome::Busy) | Err(Unavailable) => {
+                Some(UpstreamTokenEvent::Unavailable)
+            }
             Ok(Outcome::Dead) => Some(UpstreamTokenEvent::InvalidGrant),
             Ok(Outcome::Changed) => Some(UpstreamTokenEvent::IdentityChanged),
-            Err(_) => None,
+            Ok(Outcome::Reused(_)) | Err(_) => None,
         };
         if let Some(event) = event {
             metrics.record_upstream_token(event);
@@ -96,8 +86,23 @@ impl OAuthRuntime {
         match outcome? {
             Outcome::Roles(roles) => Ok(roles),
             Outcome::Unavailable => Err(Unavailable),
+            Outcome::Busy => {
+                tracing::warn!(
+                    event_name = "oauth.upstream.lock_busy",
+                    event_domain = "oauth",
+                    method = %family.grant.method,
+                    "another refresh of this family is still renewing its upstream grant"
+                );
+                Err(Unavailable)
+            }
+            Outcome::Reused(ended) => {
+                metrics.record_refresh_token(RefreshTokenEvent::ReuseDetected);
+                metrics.record_refresh_token(RefreshTokenEvent::FamilyRevoked);
+                self.end_upstream(ended, browser, metrics);
+                Err(InvalidGrant)
+            }
             ended @ (Outcome::Dead | Outcome::Changed) => {
-                let revoked = refresh_dispatch!(backend, revoke_family(id))?;
+                let revoked = refresh_dispatch!(backend, revoke_family(&family.family_id))?;
                 metrics.record_refresh_token(RefreshTokenEvent::FamilyRevoked);
                 if matches!(ended, Outcome::Changed) {
                     self.end_upstream(revoked, browser, metrics);
@@ -107,14 +112,41 @@ impl OAuthRuntime {
         }
     }
 
+    /// Takes the family's lock (waiting up to [`LOCK_WAIT`]), renews and releases it.
+    async fn locked(
+        &self,
+        id: &str,
+        presented: &[u8; 32],
+        oidc: &OidcMethod,
+        metrics: &Metrics,
+    ) -> Result<Outcome, RefreshGrantError> {
+        use RefreshGrantError::*;
+        let backend = self.refresh.as_ref().ok_or(InvalidGrant)?;
+        let holder = random_id()?;
+        let lifetime = LOCK_REQUESTS * oidc.config().http_timeout_ms + LOCK_MARGIN_MS;
+        let deadline = tokio::time::Instant::now() + LOCK_WAIT;
+        loop {
+            let now = self.now().await.map_err(|_| Unavailable)?;
+            if refresh_dispatch!(backend, lock_upstream(id, &holder, now, now + lifetime))? {
+                break;
+            }
+            if tokio::time::Instant::now() + LOCK_POLL > deadline {
+                return Ok(Outcome::Busy);
+            }
+            tokio::time::sleep(LOCK_POLL).await;
+        }
+        let outcome = self.renew(backend, id, presented, oidc, metrics).await;
+        refresh_dispatch!(backend, unlock_upstream(id, &holder))?;
+        outcome
+    }
+
     /// The locked section: re-read, refresh at the provider, store a rotated token.
     async fn renew(
         &self,
         backend: &RefreshBackend,
-        family: &RefreshFamily,
+        id: &str,
         presented: &[u8; 32],
         oidc: &OidcMethod,
-        browser: &BrowserLoginState,
         metrics: &Metrics,
     ) -> Result<Outcome, RefreshGrantError> {
         let now = self
@@ -123,12 +155,9 @@ impl OAuthRuntime {
             .map_err(|_| RefreshGrantError::Unavailable)?;
         // Another holder may have refreshed meanwhile: use the newest sealed grant.
         let current = match refresh_dispatch!(backend, lookup(presented, now))? {
-            Presented::Current(current) if current.family_id == family.family_id => current,
+            Presented::Current(current) if current.family_id == id => current,
             Presented::Reused { ended, .. } => {
-                metrics.record_refresh_token(RefreshTokenEvent::ReuseDetected);
-                metrics.record_refresh_token(RefreshTokenEvent::FamilyRevoked);
-                self.end_upstream(ended.map(|ended| *ended), browser, metrics);
-                return Err(RefreshGrantError::InvalidGrant);
+                return Ok(Outcome::Reused(ended.map(|ended| *ended)));
             }
             _ => return Err(RefreshGrantError::InvalidGrant),
         };
