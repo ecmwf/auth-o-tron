@@ -37,6 +37,7 @@ pub async fn build_app(
     let browser = Arc::new(browser);
     if direct_login {
         browser.start_cleanup_task();
+        browser.start_oidc_discovery_task();
         let methods: Vec<String> = browser
             .methods()
             .iter()

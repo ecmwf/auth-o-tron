@@ -21,6 +21,7 @@ use std::sync::LazyLock;
 
 use super::homepage::FAVICON_PATH;
 use crate::config::UiConfig;
+use crate::oidc::discovery::Availability;
 use crate::state::AppState;
 
 const STYLESHEET: &str = include_str!("../static/login.css");
@@ -115,6 +116,9 @@ async fn login(State(state): State<AppState>, headers: axum::http::HeaderMap) ->
             id: &method.flow.method,
             label: &method.label,
             redirect: method.oidc().is_some(),
+            available: method
+                .oidc()
+                .is_none_or(|oidc| oidc.availability() != Availability::Unavailable),
         })
         .collect();
     let mut response =
@@ -191,11 +195,12 @@ async fn aviso_logo() -> Response {
 }
 
 /// One chooser button. Credential methods open in the dialog; redirect (OIDC) methods
-/// are plain navigation.
+/// are plain navigation, shown disabled while their provider is known to be unavailable.
 struct ChooserMethod<'a> {
     id: &'a str,
     label: &'a str,
     redirect: bool,
+    available: bool,
 }
 
 /// `methods` are in chooser order; labels are escaped.
@@ -235,8 +240,10 @@ fn render_login(config: &UiConfig, methods: &[ChooserMethod]) -> String {
                     @for method in methods {
                         @if !method.redirect {
                             a class="login-action" href=(super::browser_login::method_path(method.id)) data-login-dialog="method" { (method.label) }
-                        } @else {
+                        } @else if method.available {
                             a class="login-action" href=(super::browser_login::method_path(method.id)) { (method.label) }
+                        } @else {
+                            button class="login-action" type="button" disabled { (method.label) " (temporarily unavailable)" }
                         }
                     }
                     @for action in &config.sso {

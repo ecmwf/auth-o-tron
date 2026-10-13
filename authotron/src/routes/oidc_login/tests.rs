@@ -278,6 +278,30 @@ async fn provider_errors_and_failed_verification_show_generic_pages() {
 }
 
 #[tokio::test]
+async fn unreachable_providers_are_refused_and_shown_unavailable() {
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let issuer = format!("http://{}/realms/test", closed.local_addr().unwrap());
+    drop(closed);
+    let fixture = fixture(|config| config["ui"]["oidc"][0]["issuer"] = json!(issuer)).await;
+    let response = get(&fixture.app, "/login/method/demo-sso", &Jar::default()).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .next()
+            .is_none()
+    );
+    assert!(text(response).await.contains("cannot be reached"));
+    let html = text(get(&fixture.app, "/login", &Jar::default()).await).await;
+    assert!(html.contains(
+        "<button class=\"login-action\" type=\"button\" disabled>Demo SSO (temporarily unavailable)</button>"
+    ));
+    assert!(!html.contains("href=\"/login/method/demo-sso\""));
+}
+
+#[tokio::test]
 async fn credential_and_callback_routes_stay_separate() {
     let fixture = fixture(|_| {}).await;
     let jar = Jar::default();

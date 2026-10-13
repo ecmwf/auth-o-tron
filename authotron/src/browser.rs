@@ -40,6 +40,7 @@ const MAX_INFLIGHT: usize = 8;
 #[cfg(test)]
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
+const OIDC_DISCOVERY_INTERVAL: Duration = Duration::from_secs(60);
 pub const FORM_TTL: u64 = 300;
 
 const IDENTITY_TEXT_LIMIT: usize = 256;
@@ -907,6 +908,39 @@ impl BrowserLoginState {
 
     pub(crate) fn start_cleanup_task(self: &Arc<Self>) {
         self.cleanup_task(CLEANUP_INTERVAL);
+    }
+
+    /// Fetches OIDC provider metadata now and then periodically, so the chooser reflects
+    /// provider availability and a recovered provider becomes usable without a click.
+    pub(crate) fn start_oidc_discovery_task(self: &Arc<Self>) {
+        if self.methods.iter().all(|method| method.oidc().is_none()) {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(OIDC_DISCOVERY_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let Some(state) = weak.upgrade() else {
+                    break;
+                };
+                for method in &state.methods {
+                    let Some(oidc) = method.oidc() else {
+                        continue;
+                    };
+                    if let Err(error) = oidc.metadata().await {
+                        tracing::warn!(
+                            event_name = "browser.oidc.discovery_failed",
+                            event_domain = "browser",
+                            method = %method.flow.method,
+                            reason = error.label(),
+                            "OIDC provider metadata unavailable"
+                        );
+                    }
+                }
+            }
+        });
     }
 
     fn cleanup_task(self: &Arc<Self>, period: Duration) -> tokio::task::JoinHandle<()> {
