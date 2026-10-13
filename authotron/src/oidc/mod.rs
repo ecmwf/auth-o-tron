@@ -39,3 +39,17 @@ pub enum OidcError {
     /// Validated claims do not form an acceptable identity.
     InvalidIdentity,
 }
+
+impl OidcError {
+    /// Fixed label for logs and metrics.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::InvalidResponse => "invalid_response",
+            Self::Rejected => "rejected",
+            Self::ClientRejected => "client_rejected",
+            Self::InvalidIdToken => "invalid_id_token",
+            Self::InvalidIdentity => "invalid_identity",
+        }
+    }
+}

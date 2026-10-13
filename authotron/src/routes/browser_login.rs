@@ -29,7 +29,7 @@ use cookie::{Cookie, SameSite, time::Duration};
 use maud::{Markup, html};
 use serde::Deserialize;
 
-const FORM_COOKIE: &str = "__Host-authotron_form";
+pub(super) const FORM_COOKIE: &str = "__Host-authotron_form";
 const SESSION_COOKIE: &str = "__Host-authotron_session";
 const ERROR: &str = "Key invalid or could not be verified";
 
@@ -48,11 +48,11 @@ pub(super) fn private_ui(state: &AppState) -> UiConfig {
     config
 }
 
-fn private_page(state: &AppState, card: Markup) -> String {
+pub(super) fn private_page(state: &AppState, card: Markup) -> String {
     render_page(&private_ui(state), card)
 }
 
-fn private_response(response: Response) -> Response {
+pub(super) fn private_response(response: Response) -> Response {
     let mut response = secure_response(response, true);
     response.headers_mut().insert(header::CONTENT_SECURITY_POLICY,
         "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'".parse().expect("static policy"));
@@ -119,7 +119,7 @@ pub(super) async fn login_fallback(State(state): State<AppState>) -> Response {
 }
 
 /// Valid: `__Host-authotron_session=opaque`. Invalid: duplicate session cookies.
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(super) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let mut found = None;
     for header in headers.get_all(header::COOKIE) {
         for parsed in Cookie::split_parse(header.to_str().ok()?) {
@@ -135,7 +135,7 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     found
 }
 
-fn set_cookie(response: &mut Response, name: &'static str, value: String, ttl: u64) {
+pub(super) fn set_cookie(response: &mut Response, name: &'static str, value: String, ttl: u64) {
     let cookie = Cookie::build((name, value))
         .secure(true)
         .http_only(true)
@@ -275,6 +275,9 @@ async fn method_form(
     };
     if let Some(response) = super::oauth::login_entry_recovery(&state, &headers).await {
         return response;
+    }
+    if let Some(oidc) = method.oidc() {
+        return super::oidc_login::start(&state, &headers, method, oidc).await;
     }
     form_response(&state, &headers, method, StatusCode::OK, false).await
 }

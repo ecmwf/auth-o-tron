@@ -112,6 +112,20 @@ impl Serialize for ProviderConfig {
     }
 }
 
+impl ProviderConfig {
+    /// Realm assigned to identities this provider verifies.
+    pub fn realm(&self) -> &str {
+        match self {
+            Self::EcmwfApi(config) => &config.realm,
+            Self::EcmwfTokenGenerator(config) => &config.realm,
+            Self::EfasApiProvider(config) => &config.realm,
+            Self::Jwt(config) => &config.realm,
+            Self::OpenIDOffline(config) => &config.realm,
+            Self::Plain(config) => &config.realm,
+        }
+    }
+}
+
 /// An authentication provider must be able to return a User or an error.
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync {

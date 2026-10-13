@@ -784,7 +784,7 @@
       }
     },
     "UiConfig": {
-      "description": "Controls branding, trusted SSO links, and the shared direct-login session.\n\nDirect browser login methods are declared by `browser` blocks on `plain`\nand `ecmwf-api` providers.",
+      "description": "Controls branding, trusted SSO links, and the shared direct-login session.\n\nDirect browser login methods are declared by `browser` blocks on `plain`\nand `ecmwf-api` providers and by OpenID Connect methods in `oidc`.",
       "type": "object",
       "properties": {
         "enabled": {
@@ -806,6 +806,14 @@
             "$ref": "#/$defs/BrowserSignInAction"
           },
           "default": []
+        },
+        "oidc": {
+          "description": "OpenID Connect sign-in methods, offered after provider methods.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/OidcMethodConfig"
+          },
+          "maxItems": 16
         },
         "browser_session": {
           "anyOf": [
@@ -874,6 +882,213 @@
       "required": [
         "label",
         "start_url"
+      ]
+    },
+    "OidcMethodConfig": {
+      "description": "One identity provider offered as a browser sign-in method. The redirect URI\nregistered at the provider is `<public_origin>/login/method/<id>/callback`.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Stable method id shared with provider `browser` ids; used in routes and metrics.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-z0-9][a-z0-9-]{0,31}$",
+          "not": {
+            "enum": [
+              "callback",
+              "new",
+              "account"
+            ]
+          }
+        },
+        "label": {
+          "description": "Chooser button text, trimmed, 1-64 characters, no control characters.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "realm": {
+          "description": "Realm of identities signed in with this method; unique across providers.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "issuer": {
+          "description": "Issuer identifier, compared exactly with the discovery document.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "client_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "client_auth": {
+          "$ref": "#/$defs/OidcClientAuth",
+          "default": "client_secret_basic"
+        },
+        "client_secret_file": {
+          "description": "Absolute path of a file holding the client secret; required unless `client_auth` is `none`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopes": {
+          "description": "Scopes requested in addition to `openid`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "default": []
+        },
+        "id_token_algorithms": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/IdTokenAlgorithm"
+          },
+          "minItems": 1,
+          "maxItems": 9,
+          "default": [
+            "RS256",
+            "PS256",
+            "ES256"
+          ]
+        },
+        "username_claim": {
+          "$ref": "#/$defs/UsernameClaim",
+          "default": "sub"
+        },
+        "roles_claim": {
+          "description": "Dotted path to a string-array claim of upstream roles, e.g. `realm_access.roles`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+){0,3}$"
+        },
+        "role_map": {
+          "description": "Upstream role to local role; upstream roles without an entry are dropped.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "maxProperties": 64
+        },
+        "max_authentication_age_seconds": {
+          "description": "Sent as `max_age`; the ID token must then carry a recent enough `auth_time`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 60,
+          "maximum": 86400
+        },
+        "prompt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OidcPrompt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "additional_endpoint_origins": {
+          "description": "Origins besides the issuer's that may host provider endpoints, e.g. a separate key host.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "default": []
+        },
+        "clock_skew_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "maximum": 300,
+          "default": 60
+        },
+        "http_timeout_ms": {
+          "description": "Bound on each provider request, including connection setup.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 500,
+          "maximum": 30000,
+          "default": 5000
+        },
+        "refresh_max_lifetime_seconds": {
+          "description": "Upper bound on the absolute lifetime of OAuth refresh-token families started\nby a login with this method; the client's `absolute_ttl_seconds` still applies.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 300,
+          "maximum": 34560000
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "realm",
+        "issuer",
+        "client_id"
+      ]
+    },
+    "OidcClientAuth": {
+      "description": "Token-endpoint client authentication.",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "client_secret_basic",
+            "client_secret_post"
+          ]
+        },
+        {
+          "description": "Public client; the code is protected by PKCE only.",
+          "type": "string",
+          "const": "none"
+        }
+      ]
+    },
+    "IdTokenAlgorithm": {
+      "description": "Asymmetric JWS algorithms accepted for ID tokens; symmetric and `none` are never offered.",
+      "type": "string",
+      "enum": [
+        "RS256",
+        "RS384",
+        "RS512",
+        "PS256",
+        "PS384",
+        "PS512",
+        "ES256",
+        "ES384",
+        "EdDSA"
+      ]
+    },
+    "UsernameClaim": {
+      "description": "Claim that becomes the Auth-O-Tron username. `email` requires `email_verified: true`.",
+      "type": "string",
+      "enum": [
+        "sub",
+        "preferred_username",
+        "email"
+      ]
+    },
+    "OidcPrompt": {
+      "type": "string",
+      "enum": [
+        "login",
+        "consent",
+        "select_account"
       ]
     },
     "BrowserSessionConfig": {

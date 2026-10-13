@@ -105,11 +105,17 @@ async fn login(State(state): State<AppState>, headers: axum::http::HeaderMap) ->
     if oauth_pending {
         config.sso.clear();
     }
-    let methods: Vec<(&str, &str)> = state
+    let methods: Vec<ChooserMethod> = state
         .browser
         .methods()
         .iter()
-        .map(|method| (&*method.flow.method, method.label.as_str()))
+        // OIDC sign-in completes browser sessions only, not pending authorizations.
+        .filter(|method| !(oauth_pending && method.oidc().is_some()))
+        .map(|method| ChooserMethod {
+            id: &method.flow.method,
+            label: &method.label,
+            redirect: method.oidc().is_some(),
+        })
         .collect();
     let mut response =
         secure_response(Html(render_login(&config, &methods)).into_response(), false);
@@ -184,8 +190,16 @@ async fn aviso_logo() -> Response {
     response
 }
 
-/// `methods` holds `(id, label)` pairs in chooser order; labels are escaped.
-fn render_login(config: &UiConfig, methods: &[(&str, &str)]) -> String {
+/// One chooser button. Credential methods open in the dialog; redirect (OIDC) methods
+/// are plain navigation.
+struct ChooserMethod<'a> {
+    id: &'a str,
+    label: &'a str,
+    redirect: bool,
+}
+
+/// `methods` are in chooser order; labels are escaped.
+fn render_login(config: &UiConfig, methods: &[ChooserMethod]) -> String {
     let direct_login = !methods.is_empty();
     let available = !config.sso.is_empty() || direct_login;
     render_page_with_dialog(
@@ -218,8 +232,12 @@ fn render_login(config: &UiConfig, methods: &[(&str, &str)]) -> String {
                 "Use direct identity verification or a configured browser sign-in flow."
                 }
                 div class="login-actions" {
-                    @for (id, label) in methods {
-                        a class="login-action" href=(super::browser_login::method_path(id)) data-login-dialog="method" { (label) }
+                    @for method in methods {
+                        @if !method.redirect {
+                            a class="login-action" href=(super::browser_login::method_path(method.id)) data-login-dialog="method" { (method.label) }
+                        } @else {
+                            a class="login-action" href=(super::browser_login::method_path(method.id)) { (method.label) }
+                        }
                     }
                     @for action in &config.sso {
                         a class="login-action" href=(action.start_url.as_str()) { (&action.label) }

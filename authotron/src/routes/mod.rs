@@ -20,6 +20,7 @@ mod homepage;
 mod login;
 mod metrics;
 mod oauth;
+mod oidc_login;
 mod providers;
 mod tokens;
 mod whoami;

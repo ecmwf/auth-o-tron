@@ -15,13 +15,17 @@ use serde::{Deserialize, Serialize};
 /// Controls branding, trusted SSO links, and the shared direct-login session.
 ///
 /// Direct browser login methods are declared by `browser` blocks on `plain`
-/// and `ecmwf-api` providers.
+/// and `ecmwf-api` providers and by OpenID Connect methods in `oidc`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct UiConfig {
     pub enabled: bool,
     pub branding: BrandingConfig,
     pub sso: Vec<BrowserSignInAction>,
+    /// OpenID Connect sign-in methods, offered after provider methods.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schemars(length(max = 16))]
+    pub oidc: Vec<super::OidcMethodConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub browser_session: Option<Box<BrowserSessionConfig>>,
 }
@@ -145,11 +149,13 @@ impl BrowserMethodKind {
     }
 }
 
-/// A provider offered for direct browser login, listed in `providers` order.
+/// Configuration behind a direct browser method: a provider in `providers` order, then
+/// the OpenID Connect methods in `ui.oidc` order.
 #[derive(Debug, Clone, Copy)]
 pub enum BrowserMethodProvider<'a> {
     Plain(&'a crate::providers::plain_provider::PlainAuthConfig),
     EcmwfApi(&'a crate::providers::ecmwfapi_provider::EcmwfApiProviderConfig),
+    Oidc(&'a super::OidcMethodConfig),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -165,15 +171,24 @@ impl BrowserMethodConfig<'_> {
         match self.provider {
             BrowserMethodProvider::Plain(_) => BrowserMethodKind::Basic,
             BrowserMethodProvider::EcmwfApi(_) => BrowserMethodKind::ApiKey,
+            BrowserMethodProvider::Oidc(_) => BrowserMethodKind::Oidc,
         }
     }
 }
 
-/// Browser-enabled providers in configuration order, without validation.
-pub fn browser_methods(
-    providers: &[crate::providers::ProviderConfig],
-) -> Vec<BrowserMethodConfig<'_>> {
+/// Browser-enabled providers in configuration order followed by the OIDC methods,
+/// without validation.
+pub fn browser_methods<'a>(
+    providers: &'a [crate::providers::ProviderConfig],
+    oidc: &'a [super::OidcMethodConfig],
+) -> Vec<BrowserMethodConfig<'a>> {
     use crate::providers::ProviderConfig;
+    let oidc = oidc.iter().map(|method| BrowserMethodConfig {
+        id: &method.id,
+        label: &method.label,
+        refresh_max_lifetime_seconds: method.refresh_max_lifetime_seconds,
+        provider: BrowserMethodProvider::Oidc(method),
+    });
     providers
         .iter()
         .filter_map(|provider| match provider {
@@ -193,6 +208,7 @@ pub fn browser_methods(
             }
             _ => None,
         })
+        .chain(oidc)
         .collect()
 }
 
@@ -438,25 +454,37 @@ impl BrowserSessionConfig {
 impl UiConfig {
     /// Validates browser methods against the session settings and returns them in
     /// chooser order. Ids must be unique so routes are unambiguous; labels must be
-    /// unique ignoring case so buttons are unambiguous.
+    /// unique ignoring case so buttons are unambiguous. Each OIDC method's realm must
+    /// differ from every provider realm and other OIDC realm, so its identities are
+    /// never conflated with ones verified elsewhere.
     pub fn validate_browser_login<'a>(
-        &self,
+        &'a self,
         providers: &'a [crate::providers::ProviderConfig],
     ) -> Result<Vec<BrowserMethodConfig<'a>>, &'static str> {
-        let methods = browser_methods(providers);
+        let methods = browser_methods(providers, &self.oidc);
         if methods.len() > MAX_BROWSER_METHODS {
-            return Err("at most 16 providers may declare a browser block");
+            return Err(
+                "at most 16 browser methods (provider browser blocks and ui.oidc entries) are allowed",
+            );
         }
         let mut ids = std::collections::HashSet::new();
         if methods.iter().any(|method| !ids.insert(method.id)) {
-            return Err("provider browser ids must be unique");
+            return Err("browser method ids must be unique across providers and ui.oidc");
         }
         let mut labels = std::collections::HashSet::new();
         if methods
             .iter()
             .any(|method| !labels.insert(method.label.to_lowercase()))
         {
-            return Err("provider browser labels must be unique (case-insensitive)");
+            return Err("browser method labels must be unique (case-insensitive)");
+        }
+        for method in &self.oidc {
+            method.validate()?;
+        }
+        let mut realms: std::collections::HashSet<&str> =
+            providers.iter().map(|provider| provider.realm()).collect();
+        if self.oidc.iter().any(|method| !realms.insert(&method.realm)) {
+            return Err("ui.oidc realms must differ from every provider realm and from each other");
         }
         if methods.iter().any(|method| {
             method.refresh_max_lifetime_seconds.is_some_and(|seconds| {
@@ -468,7 +496,7 @@ impl UiConfig {
             );
         }
         if !methods.is_empty() && self.browser_session.is_none() {
-            return Err("provider browser login requires ui.browser_session");
+            return Err("browser login methods require ui.browser_session");
         }
         if let Some(settings) = &self.browser_session {
             settings.validate()?;
@@ -875,6 +903,56 @@ mod tests {
         assert_eq!(property["maximum"], 34_560_000);
     }
 
+    fn oidc(id: &str, label: &str, realm: &str) -> super::super::OidcMethodConfig {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "label": label, "realm": realm, "issuer": "https://idp.example.test",
+            "client_id": "authotron", "client_auth": "none"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn oidc_methods_follow_providers_and_share_ids_labels_and_the_cap() {
+        let mut ui = direct_config("https://login.example.test", 300);
+        ui.oidc = vec![oidc("sso", "Single sign-on", "idp")];
+        let providers = [plain("a", Some("Staff"))];
+        let methods = ui.validate_browser_login(&providers).unwrap();
+        let summary: Vec<_> = methods.iter().map(|m| (m.id, m.kind())).collect();
+        assert_eq!(
+            summary,
+            [
+                ("a", BrowserMethodKind::Basic),
+                ("sso", BrowserMethodKind::Oidc)
+            ]
+        );
+        for (method, error) in [
+            (oidc("a", "Other", "idp"), "ids must be unique"),
+            (oidc("sso2", "staff", "idp2"), "labels must be unique"),
+            (oidc("sso2", "Other", "r"), "realms must differ"),
+            (oidc("sso2", "Other", "idp"), "realms must differ"),
+            (oidc("sso2", "Other", " "), "OIDC realm"),
+        ] {
+            let mut ui = ui.clone();
+            ui.oidc.push(method);
+            let error_text = ui.validate_browser_login(&providers).unwrap_err();
+            assert!(error_text.contains(error), "{error_text}");
+        }
+        let mut full = ui.clone();
+        full.oidc = (0..MAX_BROWSER_METHODS)
+            .map(|n| oidc(&format!("s{n}"), &format!("SSO {n}"), &format!("r{n}")))
+            .collect();
+        assert!(full.validate_browser_login(&[]).is_ok());
+        assert!(full.validate_browser_login(&providers).is_err());
+        let mut no_session = ui.clone();
+        no_session.browser_session = None;
+        assert!(
+            no_session
+                .validate_browser_login(&[])
+                .unwrap_err()
+                .contains("browser_session")
+        );
+    }
+
     #[test]
     fn browser_labels_and_unsupported_provider_types_are_rejected() {
         for (label, valid) in [
@@ -941,7 +1019,7 @@ mod tests {
             serde_json::json!({"type": "ecmwf-api", "name": "k", "realm": "r", "uri": "https://api.example.test/v1", "browser": null}),
         ] {
             let config = serde_json::from_value::<crate::providers::ProviderConfig>(json).unwrap();
-            assert!(browser_methods(std::slice::from_ref(&config)).is_empty());
+            assert!(browser_methods(std::slice::from_ref(&config), &[]).is_empty());
         }
     }
 
@@ -1094,7 +1172,13 @@ mod tests {
             "ProviderBrowserConfig",
             "BrowserSessionConfig",
             "BrowserBackendConfig",
+            "OidcMethodConfig",
+            "OidcClientAuth",
+            "IdTokenAlgorithm",
+            "UsernameClaim",
+            "OidcPrompt",
         ] {
+            assert!(generated["$defs"][name].is_object(), "{name}");
             assert_eq!(checked_in["$defs"][name], generated["$defs"][name]);
         }
         assert_eq!(

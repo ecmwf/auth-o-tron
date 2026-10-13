@@ -14,6 +14,7 @@
 use crate::{
     auth::Auth,
     metrics::Metrics,
+    oidc::method::OidcMethod,
     providers::{Provider, plain_provider::PlainAuthProvider},
 };
 use crate::{config::ConfigV2, models::user::User, providers::ecmwfapi_provider::EcmwfApiProvider};
@@ -184,6 +185,7 @@ impl LoginFlow {
 enum MethodVerifier {
     Plain(PlainAuthProvider),
     EcmwfApi(EcmwfApiProvider),
+    Oidc(Arc<OidcMethod>),
 }
 
 /// One direct browser method, verified only by its own provider instance.
@@ -200,6 +202,15 @@ impl BrowserMethod {
         match &self.verifier {
             MethodVerifier::Plain(provider) => provider.account_still_exists(username),
             MethodVerifier::EcmwfApi(provider) => provider.account_still_exists(username),
+            MethodVerifier::Oidc(_) => None,
+        }
+    }
+
+    /// The provider client of an OpenID Connect method.
+    pub fn oidc(&self) -> Option<&Arc<OidcMethod>> {
+        match &self.verifier {
+            MethodVerifier::Oidc(method) => Some(method),
+            _ => None,
         }
     }
 }
@@ -299,29 +310,34 @@ impl Entries {
 impl BrowserLoginState {
     /// Validate before constructing clients or any application store.
     pub fn new(config: &ConfigV2) -> Result<Self, Box<dyn std::error::Error>> {
-        let methods = config
-            .ui
-            .validate_browser_login(&config.providers)?
-            .into_iter()
-            .map(|method| BrowserMethod {
-                label: method.label.to_owned(),
-                flow: LoginFlow {
-                    method: method.id.into(),
-                    kind: method.kind(),
-                },
-                refresh_max_lifetime_seconds: method.refresh_max_lifetime_seconds,
-                verifier: match method.provider {
-                    BrowserMethodProvider::Plain(c) => {
-                        MethodVerifier::Plain(PlainAuthProvider::new(c))
-                    }
-                    BrowserMethodProvider::EcmwfApi(c) => {
-                        MethodVerifier::EcmwfApi(EcmwfApiProvider::new(c))
-                    }
-                },
-            })
-            .collect();
+        let validated = config.ui.validate_browser_login(&config.providers)?;
         let settings = config.ui.browser_session.as_ref();
         let origin = settings.map(|s| s.origin()).transpose()?;
+        let methods = validated
+            .into_iter()
+            .map(|method| {
+                Ok(BrowserMethod {
+                    label: method.label.to_owned(),
+                    flow: LoginFlow {
+                        method: method.id.into(),
+                        kind: method.kind(),
+                    },
+                    refresh_max_lifetime_seconds: method.refresh_max_lifetime_seconds,
+                    verifier: match method.provider {
+                        BrowserMethodProvider::Plain(c) => {
+                            MethodVerifier::Plain(PlainAuthProvider::new(c))
+                        }
+                        BrowserMethodProvider::EcmwfApi(c) => {
+                            MethodVerifier::EcmwfApi(EcmwfApiProvider::new(c))
+                        }
+                        // Validation guarantees a browser session, hence an origin.
+                        BrowserMethodProvider::Oidc(c) => MethodVerifier::Oidc(Arc::new(
+                            OidcMethod::new(c, origin.as_deref().unwrap_or_default())?,
+                        )),
+                    },
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(
                 settings
