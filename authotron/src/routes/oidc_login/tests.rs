@@ -140,6 +140,18 @@ fn attempts(state: &AppState, outcome: &str, count: usize) -> bool {
 }
 
 #[tokio::test]
+async fn chooser_offers_oidc_methods_as_plain_navigation() {
+    let fixture = fixture(|_| {}).await;
+    let html = text(get(&fixture.app, "/login", &Jar::default()).await).await;
+    assert!(
+        html.contains("<a class=\"login-action\" href=\"/login/method/demo-sso\">Demo SSO</a>")
+    );
+    assert!(
+        html.contains("href=\"/login/method/password\" data-login-dialog=\"method\">Password</a>")
+    );
+}
+
+#[tokio::test]
 async fn browser_sign_in_starts_a_session_for_the_provider_subject() {
     let fixture = fixture(|_| {}).await;
     let mut jar = Jar::default();
@@ -170,4 +182,128 @@ async fn browser_sign_in_starts_a_session_for_the_provider_subject() {
     let replay = get(&fixture.app, &callback, &jar).await;
     assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
     assert!(text(replay).await.contains("Sign-in expired"));
+}
+
+#[tokio::test]
+async fn callbacks_complete_only_in_the_browser_that_started_them() {
+    let fixture = fixture(|_| {}).await;
+    let mut jar = Jar::default();
+    let authorization = start(&fixture, &mut jar).await;
+    let callback = local(&fixture.idp.authorize(&authorization));
+    let mut other = Jar::default();
+    start(&fixture, &mut other).await;
+    for (cookies, target) in [
+        (&other, callback.clone()),
+        (&Jar::default(), callback.clone()),
+        (&jar, callback.replace("state=", "state=x")),
+        (&jar, "/login/method/demo-sso/callback".into()),
+        (
+            &jar,
+            "/login/method/demo-sso/callback?code=a&error=b&state=c".into(),
+        ),
+    ] {
+        let response = get(&fixture.app, &target, cookies).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{target}");
+        assert!(text(response).await.contains("Sign-in expired"));
+    }
+    // Rejected attempts leave the browser's state usable.
+    let response = get(&fixture.app, &callback, &jar).await;
+    assert_eq!(location(&response), "/login/account");
+    assert!(attempts(&fixture.state, "malformed", 2));
+    assert!(attempts(&fixture.state, "csrf", 3));
+}
+
+#[tokio::test]
+async fn provider_errors_and_failed_verification_show_generic_pages() {
+    let fixture = fixture(|_| {}).await;
+    let mut jar = Jar::default();
+    let authorization = start(&fixture, &mut jar).await;
+    let denied = local(&fixture.idp.deny(&authorization));
+    let response = get(&fixture.app, &denied, &jar).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let page = text(response).await;
+    assert!(page.contains("Sign-in not completed"));
+    assert!(!page.contains("Declined") && !page.contains("access_denied"));
+    assert!(attempts(&fixture.state, "idp_error", 1));
+    assert_eq!(
+        get(&fixture.app, &denied, &jar).await.status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    let mixed_up = {
+        let authorization = start(&fixture, &mut jar).await;
+        local(&fixture.idp.authorize(&authorization)).replace(
+            &url::form_urlencoded::byte_serialize(fixture.idp.issuer.as_bytes())
+                .collect::<String>(),
+            "https%3A%2F%2Fattacker.example.org",
+        )
+    };
+    let response = get(&fixture.app, &mixed_up, &jar).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(text(response).await.contains("could not be verified"));
+
+    for (setup, status, page) in [
+        (
+            Some((500, json!({}))),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily unavailable",
+        ),
+        (
+            Some((401, json!({"error": "invalid_client"}))),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "temporarily unavailable",
+        ),
+        (None, StatusCode::BAD_REQUEST, "could not be verified"),
+    ] {
+        *fixture.idp.state.token_answer.lock().unwrap() = setup.clone();
+        if setup.is_none() {
+            *fixture.idp.state.claims.lock().unwrap() = json!({"nonce": "replayed"});
+        }
+        let authorization = start(&fixture, &mut jar).await;
+        let callback = local(&fixture.idp.authorize(&authorization));
+        let response = get(&fixture.app, &callback, &jar).await;
+        assert_eq!(response.status(), status);
+        let body = text(response).await;
+        assert!(body.contains(page), "{body}");
+        assert!(!body.contains("mock-access-token") && !body.contains("invalid_client"));
+    }
+    *fixture.idp.state.claims.lock().unwrap() = json!({"sub": "s".repeat(129)});
+    let authorization = start(&fixture, &mut jar).await;
+    let callback = local(&fixture.idp.authorize(&authorization));
+    let response = get(&fixture.app, &callback, &jar).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(text(response).await.contains("not permitted"));
+    assert!(attempts(&fixture.state, "idp_unavailable", 2));
+    assert!(attempts(&fixture.state, "rejected", 3));
+}
+
+#[tokio::test]
+async fn credential_and_callback_routes_stay_separate() {
+    let fixture = fixture(|_| {}).await;
+    let jar = Jar::default();
+    let post = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::post("/login/method/demo-sso")
+                .header(header::ORIGIN, ORIGIN)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("username=alice&password=fixture-only&csrf=x"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(post.status(), StatusCode::NOT_FOUND);
+    for target in [
+        "/login/method/password/callback?code=a&state=s",
+        "/login/method/unknown/callback?code=a&state=s",
+        "/login/method/demo%2Dsso/callback?code=a&state=s",
+        "/login/method/demo-sso/callback/?code=a&state=s",
+    ] {
+        assert_eq!(
+            get(&fixture.app, target, &jar).await.status(),
+            StatusCode::NOT_FOUND,
+            "{target}"
+        );
+    }
 }

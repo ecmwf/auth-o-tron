@@ -200,6 +200,18 @@ impl MockIdp {
         self.callback(&query, &[("code", &code)])
     }
 
+    /// The callback URL for a user who declined at the provider.
+    pub(crate) fn deny(&self, request: &Url) -> String {
+        let query: HashMap<String, String> = request.query_pairs().into_owned().collect();
+        self.callback(
+            &query,
+            &[
+                ("error", "access_denied"),
+                ("error_description", "Declined"),
+            ],
+        )
+    }
+
     fn callback(&self, query: &HashMap<String, String>, result: &[(&str, &str)]) -> String {
         let mut response = url::form_urlencoded::Serializer::new(String::new());
         response.append_pair("state", &query["state"]);
