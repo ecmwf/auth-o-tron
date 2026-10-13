@@ -33,6 +33,8 @@ pub struct ProviderMetadata {
     pub authorization_endpoint: Url,
     pub token_endpoint: Url,
     pub jwks_uri: Url,
+    /// RFC 7009 endpoint for revoking upstream refresh tokens, when the provider has one.
+    pub revocation_endpoint: Option<Url>,
     /// RFC 9207: when advertised, authorization responses must carry a matching `iss`.
     pub authorization_response_iss_parameter_supported: bool,
 }
@@ -44,6 +46,8 @@ struct Document {
     authorization_endpoint: String,
     token_endpoint: String,
     jwks_uri: String,
+    #[serde(default)]
+    revocation_endpoint: Option<String>,
     #[serde(default)]
     response_types_supported: Option<Vec<String>>,
     #[serde(default)]
@@ -107,6 +111,11 @@ pub fn parse_metadata(
         authorization_endpoint: endpoint(&document.authorization_endpoint, origins)?,
         token_endpoint: endpoint(&document.token_endpoint, origins)?,
         jwks_uri: endpoint(&document.jwks_uri, origins)?,
+        revocation_endpoint: document
+            .revocation_endpoint
+            .as_deref()
+            .map(|value| endpoint(value, origins))
+            .transpose()?,
         authorization_response_iss_parameter_supported: document
             .authorization_response_iss_parameter_supported,
     })
@@ -255,6 +264,7 @@ pub(crate) mod tests {
             "authorization_endpoint": format!("{issuer}/protocol/openid-connect/auth"),
             "token_endpoint": format!("{issuer}/protocol/openid-connect/token"),
             "jwks_uri": format!("{issuer}/protocol/openid-connect/certs"),
+            "revocation_endpoint": format!("{issuer}/protocol/openid-connect/revoke"),
             "response_types_supported": ["code", "none", "id_token"],
             "code_challenge_methods_supported": ["plain", "S256"],
             "authorization_response_iss_parameter_supported": true,
@@ -274,6 +284,10 @@ pub(crate) mod tests {
             parse_metadata(document(issuer).to_string().as_bytes(), issuer, &origins).unwrap();
         assert!(metadata.authorization_response_iss_parameter_supported);
         assert_eq!(
+            metadata.revocation_endpoint.unwrap().as_str(),
+            "https://idp.example.org/realms/demo/protocol/openid-connect/revoke"
+        );
+        assert_eq!(
             metadata.token_endpoint.as_str(),
             "https://idp.example.org/realms/demo/protocol/openid-connect/token"
         );
@@ -282,6 +296,7 @@ pub(crate) mod tests {
         assert!(parse_metadata(separate_keys.to_string().as_bytes(), issuer, &origins).is_ok());
         let mut minimal = document(issuer);
         for field in [
+            "revocation_endpoint",
             "response_types_supported",
             "code_challenge_methods_supported",
             "authorization_response_iss_parameter_supported",
@@ -290,6 +305,7 @@ pub(crate) mod tests {
         }
         let minimal = parse_metadata(minimal.to_string().as_bytes(), issuer, &origins).unwrap();
         assert!(!minimal.authorization_response_iss_parameter_supported);
+        assert!(minimal.revocation_endpoint.is_none());
         for (field, value) in [
             ("issuer", json!("https://idp.example.org/realms/demo/")),
             ("issuer", json!("https://IDP.example.org/realms/demo")),
@@ -307,6 +323,10 @@ pub(crate) mod tests {
             ("authorization_endpoint", json!("/auth")),
             ("jwks_uri", json!("https://idp.example.org:8443/certs")),
             ("jwks_uri", json!(42)),
+            (
+                "revocation_endpoint",
+                json!("https://other.example.org/revoke"),
+            ),
             ("response_types_supported", json!(["id_token"])),
             ("code_challenge_methods_supported", json!(["plain"])),
         ] {

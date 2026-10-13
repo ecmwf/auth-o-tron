@@ -145,7 +145,7 @@ impl OidcMethod {
         ) {
             return Err(OidcError::Rejected);
         }
-        let token = exchange_code(
+        let tokens = exchange_code(
             &self.http,
             &metadata.token_endpoint,
             &self.credentials(),
@@ -154,6 +154,7 @@ impl OidcMethod {
             secrets.verifier(),
         )
         .await?;
+        let token = tokens.id_token.ok_or(OidcError::InvalidResponse)?;
         let (alg, kid) = inspect(&token, &self.config.id_token_algorithms)?;
         let key = self
             .jwks
