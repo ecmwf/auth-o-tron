@@ -10,6 +10,7 @@
 //! talk to identity providers and validate their answers; they create no sessions,
 //! consent records or authorization grants.
 
+pub mod claims;
 pub mod discovery;
 pub mod http;
 pub mod id_token;
@@ -28,4 +29,6 @@ pub enum OidcError {
     InvalidResponse,
     /// The ID token's signature, key or claims failed validation.
     InvalidIdToken,
+    /// Validated claims do not form an acceptable identity.
+    InvalidIdentity,
 }

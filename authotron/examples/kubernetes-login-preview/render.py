@@ -101,6 +101,7 @@ SOURCE_FILES = (
     "authotron/src/oauth/valkey_refresh.rs",
     "authotron/src/oauth/valkey_transactions.lua",
     "authotron/src/oauth/valkey_transactions.rs",
+    "authotron/src/oidc/claims.rs",
     "authotron/src/oidc/discovery.rs",
     "authotron/src/oidc/http.rs",
     "authotron/src/oidc/id_token.rs",
