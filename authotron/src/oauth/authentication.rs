@@ -14,6 +14,7 @@ use crate::{
     browser::{BrowserCredentials, BrowserLoginState, BrowserVerifyError},
     metrics::Metrics,
     models::user::User,
+    oidc::upstream,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -32,6 +33,7 @@ pub struct VerifiedOAuthIdentity {
     provider_roles: Vec<String>,
     method: String,
     verified_at_ms: u64,
+    upstream: Option<String>,
 }
 impl VerifiedOAuthIdentity {
     pub fn as_user(&self) -> &User {
@@ -48,6 +50,10 @@ impl VerifiedOAuthIdentity {
     /// Browser method id (`browser.id`) whose provider verified the credentials.
     pub fn method(&self) -> &str {
         &self.method
+    }
+    /// The sealed upstream grant an OIDC sign-in obtained for a coupled refresh family.
+    pub fn upstream(&self) -> Option<&str> {
+        self.upstream.as_deref()
     }
 }
 
@@ -84,6 +90,7 @@ pub async fn verify_identity(
             provider_roles,
             method: method.into(),
             verified_at_ms,
+            upstream: None,
         })
     })
     .await
@@ -108,13 +115,21 @@ fn now_ms() -> Result<u64, AuthenticationError> {
 /// Identity from a completed OIDC sign-in whose ID token the caller has validated and
 /// whose callback state was bound to the same authorization request. The mapped
 /// provider roles go through strict augmentation; the identity is verified now.
+/// `upstream` is the sealed upstream grant for a coupled refresh family, if any.
 /// The caller bounds the time spent, as for credential sign-in.
 pub(crate) async fn oidc_identity(
     method: &str,
     user: User,
+    upstream: Option<String>,
     auth: &Auth,
     metrics: &Metrics,
 ) -> Result<VerifiedOAuthIdentity, AuthenticationError> {
+    if upstream
+        .as_deref()
+        .is_some_and(|sealed| !upstream::well_formed(sealed))
+    {
+        return Err(AuthenticationError::Rejected);
+    }
     let provider_roles = user.roles.clone();
     let user = auth
         .check_augmenters_strict(user, metrics)
@@ -128,6 +143,7 @@ pub(crate) async fn oidc_identity(
         provider_roles,
         method: method.into(),
         verified_at_ms: now_ms()?,
+        upstream,
     })
 }
 
@@ -169,11 +185,16 @@ pub(super) fn restore_from_trusted_storage(
     provider_roles: Vec<String>,
     method: String,
     verified_at_ms: u64,
+    upstream: Option<String>,
 ) -> Result<VerifiedOAuthIdentity, AuthenticationError> {
     validate_identity_fields(&username, &realm, &roles)
         .and_then(|()| validate_identity_fields(&username, &realm, &provider_roles))
         .map_err(|_| AuthenticationError::Rejected)?;
-    if !crate::config::ui::valid_browser_id(&method) {
+    if !crate::config::ui::valid_browser_id(&method)
+        || upstream
+            .as_deref()
+            .is_some_and(|sealed| !upstream::well_formed(sealed))
+    {
         return Err(AuthenticationError::Rejected);
     }
     if !valid_time(verified_at_ms) {
@@ -184,6 +205,7 @@ pub(super) fn restore_from_trusted_storage(
         provider_roles,
         method,
         verified_at_ms,
+        upstream,
     })
 }
 
@@ -445,10 +467,17 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let proof = oidc_identity("sso", mapped(vec!["reader".into()]), &auth, &metrics)
-            .await
-            .unwrap();
+        let proof = oidc_identity(
+            "sso",
+            mapped(vec!["reader".into()]),
+            Some("v1.k1.AAAA".into()),
+            &auth,
+            &metrics,
+        )
+        .await
+        .unwrap();
         assert_eq!(proof.method(), "sso");
+        assert_eq!(proof.upstream(), Some("v1.k1.AAAA"));
         assert_eq!(proof.provider_roles(), ["reader"]);
         assert_eq!(proof.as_user().roles, ["reader", "derived"]);
         assert!(proof.as_user().attributes.is_empty());
@@ -456,13 +485,19 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         let (_, failing, metrics, _) = fixture("http://127.0.0.1:1", "alice", true, false);
         assert_eq!(
-            oidc_identity("sso", mapped(vec![]), &failing, &metrics)
+            oidc_identity("sso", mapped(vec![]), None, &failing, &metrics)
                 .await
                 .err(),
             Some(AuthenticationError::Rejected)
         );
         assert_eq!(
-            oidc_identity("sso", mapped(vec!["r\n".into()]), &auth, &metrics)
+            oidc_identity("sso", mapped(vec!["r\n".into()]), None, &auth, &metrics)
+                .await
+                .err(),
+            Some(AuthenticationError::Rejected)
+        );
+        assert_eq!(
+            oidc_identity("sso", mapped(vec![]), Some("v1 k".into()), &auth, &metrics)
                 .await
                 .err(),
             Some(AuthenticationError::Rejected)

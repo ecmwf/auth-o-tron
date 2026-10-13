@@ -130,19 +130,22 @@ impl OAuthRuntime {
             realm: code.as_user().realm.clone(),
             provider_roles: code.provider_roles().to_vec(),
             method: code.method().into(),
-            upstream_coupled: false,
+            upstream_coupled: code.upstream().is_some(),
         };
+        let upstream = code.upstream().map(str::to_owned);
         let response = self
             .token(proof)
             .map_err(|_| RefreshGrantError::Unavailable)?;
         Ok(self
-            .with_new_family(response, &grant, browser, metrics)
+            .with_new_family(response, &grant, upstream.as_deref(), browser, metrics)
             .await)
     }
+    /// `upstream` is the sealed upstream grant of a coupled family.
     async fn with_new_family(
         &self,
         response: TokenResponse,
         grant: &RefreshGrant,
+        upstream: Option<&str>,
         browser: &BrowserLoginState,
         metrics: &Metrics,
     ) -> TokenResponse {
@@ -160,7 +163,7 @@ impl OAuthRuntime {
                 .now()
                 .await
                 .map_err(|_| RefreshStoreError::Unavailable)?;
-            refresh_dispatch!(backend, issue(grant, token.hash(), now, policy, None))?;
+            refresh_dispatch!(backend, issue(grant, token.hash(), now, policy, upstream))?;
             Ok::<_, RefreshStoreError>(token)
         };
         match issued.await {
@@ -453,20 +456,41 @@ mod tests {
                 .unwrap()
         };
         let response = runtime
-            .with_new_family(issued(), &grant(), &browser, &metrics)
+            .with_new_family(issued(), &grant(), None, &browser, &metrics)
             .await;
         assert!(serde_json::to_value(response).unwrap()["refresh_token"].is_string());
+        // A sealed upstream grant from the sign-in couples the new family.
+        let coupled = RefreshGrant {
+            upstream_coupled: true,
+            ..grant()
+        };
+        let response = runtime
+            .with_new_family(issued(), &coupled, Some("v1.k.AAAA"), &browser, &metrics)
+            .await;
+        let token = serde_json::to_value(response).unwrap()["refresh_token"]
+            .as_str()
+            .map(|token| RefreshToken::parse(token).unwrap())
+            .unwrap();
+        let RefreshBackend::Memory(store) = runtime.refresh.as_ref().unwrap() else {
+            unreachable!()
+        };
+        let now = runtime.now().await.unwrap();
+        let Presented::Current(family) = store.lookup(&token.hash(), now).await.unwrap() else {
+            panic!("expected the coupled family");
+        };
+        assert!(family.grant.upstream_coupled);
+        assert_eq!(family.upstream.unwrap().sealed, "v1.k.AAAA");
         let mut oversized = grant();
         oversized.provider_roles = vec!["r".repeat(64); 1024];
         let response = runtime
-            .with_new_family(issued(), &oversized, &browser, &metrics)
+            .with_new_family(issued(), &oversized, None, &browser, &metrics)
             .await;
         let body = serde_json::to_value(response).unwrap();
         assert!(body["access_token"].is_string());
         assert!(body.get("refresh_token").is_none());
         let output = metrics.render().unwrap();
         for line in [
-            "authotron_oauth_refresh_tokens_total{event=\"issued\"} 1",
+            "authotron_oauth_refresh_tokens_total{event=\"issued\"} 2",
             "authotron_oauth_refresh_tokens_total{event=\"issue_failed\"} 1",
         ] {
             assert!(output.contains(line), "{line}");
@@ -517,7 +541,7 @@ mod tests {
             )
             .unwrap();
         let response = runtime
-            .with_new_family(response, &grant(), &capped, &metrics)
+            .with_new_family(response, &grant(), None, &capped, &metrics)
             .await;
         let token = serde_json::to_value(response).unwrap()["refresh_token"]
             .as_str()

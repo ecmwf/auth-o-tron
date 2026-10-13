@@ -294,7 +294,7 @@ async fn authorize(
                     Err(error) => return Ok(Err(SignInError::Provider(error))),
                 };
                 Ok(
-                    oidc_identity(&method.flow.method, user, &state.auth, &state.metrics)
+                    oidc_identity(&method.flow.method, user, None, &state.auth, &state.metrics)
                         .await
                         .map_err(|_| SignInError::Augmentation),
                 )

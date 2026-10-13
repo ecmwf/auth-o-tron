@@ -229,6 +229,10 @@ impl CodeGrant {
     pub fn method(&self) -> &str {
         self.context.method()
     }
+    /// The sealed upstream grant that couples the refresh family started at exchange.
+    pub fn upstream(&self) -> Option<&str> {
+        self.context.upstream()
+    }
     pub fn client_id(&self) -> &str {
         self.request().client_id()
     }

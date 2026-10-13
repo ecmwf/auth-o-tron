@@ -49,6 +49,7 @@ struct ContextDto {
     verified_at_ms: u64,
     transaction: String,
     source_transaction_id_hash: Option<[u8; 32]>,
+    upstream: Option<String>,
 }
 
 /// Owns verification proof/snapshot and validated input. No Debug, Clone or public serialization.
@@ -172,6 +173,9 @@ impl AuthenticatedAuthorization {
     pub fn method(&self) -> &str {
         self.identity.method()
     }
+    pub fn upstream(&self) -> Option<&str> {
+        self.identity.upstream()
+    }
     /// Eligible scopes only; this accessor conveys no consent decision.
     pub fn authorized_scopes(&self) -> &[String] {
         &self.scopes
@@ -186,7 +190,7 @@ impl AuthenticatedAuthorization {
             .encode()
             .map_err(|_| ContextError::InvalidTransaction)?;
         let dto = ContextDto {
-            version: 4,
+            version: 5,
             username: user.username.clone(),
             realm: user.realm.clone(),
             roles: user.roles.clone(),
@@ -195,6 +199,7 @@ impl AuthenticatedAuthorization {
             verified_at_ms: self.verified_at_ms(),
             transaction: URL_SAFE_NO_PAD.encode(transaction),
             source_transaction_id_hash: self.source_transaction_id_hash,
+            upstream: self.upstream().map(str::to_owned),
         };
         let bytes = serde_json::to_vec(&dto).map_err(|_| ContextError::InvalidRecord)?;
         if bytes.len() > MAX_AUTHENTICATED_CONTEXT_BYTES {
@@ -283,7 +288,7 @@ fn decode_parts(
         return Err(TooLarge);
     }
     let dto: ContextDto = serde_json::from_slice(bytes).map_err(|_| InvalidRecord)?;
-    if dto.version != 4 {
+    if dto.version != 5 {
         return Err(UnsupportedVersion);
     }
     if dto.transaction.len() > (MAX_TRANSACTION_BYTES * 4).div_ceil(3) {
@@ -307,6 +312,7 @@ fn decode_parts(
         dto.provider_roles,
         dto.method,
         dto.verified_at_ms,
+        dto.upstream,
     )
     .map_err(|error| match error {
         AuthenticationError::Unavailable => InvalidTime,
@@ -375,10 +381,18 @@ pub(super) mod tests {
         names.sort_unstable();
         assert_eq!(
             names.join(" "),
-            "method provider_roles realm roles source_transaction_id_hash transaction username verified_at_ms version"
+            "method provider_roles realm roles source_transaction_id_hash transaction upstream username verified_at_ms version"
         );
         let restored = AuthenticatedAuthorization::decode(&bytes, &config, &[7; 32], now).unwrap();
         assert_eq!(restored.encode().unwrap(), bytes);
+        assert!(value["upstream"].is_null() && restored.upstream().is_none());
+        let mut coupled = value.clone();
+        coupled["upstream"] = json!("v1.k1.AAAA");
+        let coupled = serde_json::to_vec(&coupled).unwrap();
+        let restored =
+            AuthenticatedAuthorization::decode(&coupled, &config, &[7; 32], now).unwrap();
+        assert_eq!(restored.upstream(), Some("v1.k1.AAAA"));
+        assert_eq!(restored.encode().unwrap(), coupled);
         assert!(restored.as_user().attributes.is_empty() && restored.as_user().scopes.is_empty());
         config.max_authentication_age_seconds = 1;
         let restored =
@@ -406,8 +420,10 @@ pub(super) mod tests {
         let bytes = context.encode().unwrap();
         let original: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         for (field, replacement, error) in [
-            ("version", json!(5), UnsupportedVersion),
-            ("version", json!(3), UnsupportedVersion),
+            ("version", json!(6), UnsupportedVersion),
+            ("version", json!(4), UnsupportedVersion),
+            ("upstream", json!("v2.k.AAAA"), InvalidRecord),
+            ("upstream", json!(42), InvalidRecord),
             ("method", json!("Password"), InvalidRecord),
             ("method", json!(""), InvalidRecord),
             ("provider_roles", json!(vec!["reader"; 65]), InvalidRecord),

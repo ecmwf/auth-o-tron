@@ -336,8 +336,8 @@ restoration does not rerun upstream verification.
 Private codecs are wire-bounded: Pending 16 KiB, authenticated context 64 KiB,
 ConsentReady/code grant 96 KiB. Trusted authenticated storage is required, not a MAC
 against compromised cache contents. Code envelopes bind their actual code hash and
-originating literal issuer. Valkey namespaces are `:oauth:authorization-transactions:v6:`
-and `:oauth:authorization-codes:v3:`; code hashes contain exactly code_hash/issuer/expiry/payload.
+originating literal issuer. Valkey namespaces are `:oauth:authorization-transactions:v7:`
+and `:oauth:authorization-codes:v4:`; code hashes contain exactly code_hash/issuer/expiry/payload.
 Shared issuance atomically persists code while consuming consent; redemption compares
 all code fields/index score/effective deadline before atomic deletion and proof release.
 Expected failures preserve unexpired state. Unexpected write failures, OOM, cancellation

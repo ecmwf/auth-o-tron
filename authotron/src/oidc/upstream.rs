@@ -81,6 +81,17 @@ pub struct UpstreamCipher {
     random: SystemRandom,
 }
 
+/// Shape of a sealed grant read from storage, checked without opening it: the `v1.`
+/// prefix and at most [`MAX_SEALED_BYTES`] of printable ASCII without spaces.
+/// Valid: `v1.k1.AAAA`. Invalid: `v2.k1.AAAA`, `v1.k1.A A`, an empty string.
+pub fn well_formed(sealed: &str) -> bool {
+    sealed.len() <= MAX_SEALED_BYTES
+        && sealed
+            .strip_prefix(FORMAT)
+            .is_some_and(|rest| rest.starts_with('.'))
+        && sealed.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
 /// Exactly 32 bytes in standard Base64 with padding.
 /// Valid: the 44 characters `openssl rand -base64 32` writes. Invalid: the same without
 /// `=` padding, 64 hex digits, or a 16-byte key.
@@ -269,7 +280,14 @@ pub(crate) mod tests {
     fn sealed_tokens_open_only_with_their_binding_and_key() {
         let cipher = cipher("k1", &["k1"]);
         let sealed = cipher.seal(&binding(), &grant()).unwrap();
-        assert!(sealed.starts_with("v1.k1."));
+        assert!(sealed.starts_with("v1.k1.") && well_formed(&sealed));
+        for invalid in ["", "v1", "v2.k1.AAAA", "v1.k1.A A", "v1.k1.\u{e9}"] {
+            assert!(!well_formed(invalid), "{invalid}");
+        }
+        assert!(!well_formed(&format!(
+            "v1.{}",
+            "A".repeat(MAX_SEALED_BYTES)
+        )));
         assert!(!sealed.contains("offline.token.value"));
         assert_ne!(sealed, cipher.seal(&binding(), &grant()).unwrap());
         let opened = cipher.open(&binding(), &sealed).unwrap();

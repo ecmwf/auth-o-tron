@@ -92,8 +92,8 @@ impl ValkeyTransactionStore {
         Ok(Self {
             config,
             connection,
-            prefix: format!("{key_prefix}:oauth:authorization-transactions:v6:"),
-            code_prefix: format!("{key_prefix}:oauth:authorization-codes:v3:"),
+            prefix: format!("{key_prefix}:oauth:authorization-transactions:v7:"),
+            code_prefix: format!("{key_prefix}:oauth:authorization-codes:v4:"),
         })
     }
     fn keys(&self, id: &TransactionId) -> [String; 2] {
