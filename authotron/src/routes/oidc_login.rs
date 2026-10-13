@@ -383,4 +383,6 @@ fn sign_in_failure(
 }
 
 #[cfg(test)]
+mod authorization_tests;
+#[cfg(test)]
 mod tests;

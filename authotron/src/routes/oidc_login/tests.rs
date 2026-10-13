@@ -28,7 +28,7 @@ pub(super) const ORIGIN: &str = "https://login.example.test";
 
 /// Cookies set by responses, sent back on later requests like a browser.
 #[derive(Clone, Default)]
-pub(super) struct Jar(HashMap<String, String>);
+pub(super) struct Jar(pub(super) HashMap<String, String>);
 impl Jar {
     pub(super) fn update(&mut self, response: &Response) {
         for value in response.headers().get_all(header::SET_COOKIE) {
@@ -42,7 +42,7 @@ impl Jar {
             }
         }
     }
-    fn header(&self) -> String {
+    pub(super) fn header(&self) -> String {
         self.0
             .iter()
             .map(|(name, value)| format!("{name}={value}"))
