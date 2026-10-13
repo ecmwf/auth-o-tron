@@ -7,18 +7,22 @@
 // does it submit to any jurisdiction.
 
 //! OpenID Connect sign-in: `GET /login/method/{id}` redirects to the provider with a
-//! single-use state bound to this browser, and `GET /login/method/{id}/callback`
-//! verifies the provider's answer and starts a browser session. Pages are generic;
-//! provider error text, codes and tokens are never shown or logged.
+//! single-use state bound to this browser (and to its pending authorization request,
+//! if any), and `GET /login/method/{id}/callback` verifies the provider's answer. The
+//! verified identity then either starts a browser session or continues the pending
+//! authorization to consent. Pages are generic; provider error text, codes and tokens
+//! are never shown or logged.
 
 use super::browser_login::{
-    FORM_COOKIE, SESSION_COOKIE, cookie_value, error_outcome, not_found_page, private_page,
-    private_response, resolve_method, set_cookie, unavailable,
+    FORM_COOKIE, SESSION_COOKIE, cookie_value, error_outcome, finish_authorization_login,
+    not_found_page, pending_failure, private_page, private_response, resolve_method, set_cookie,
+    unavailable,
 };
 use crate::{
     browser::{BrowserMethod, opaque_id, valid_id},
     metrics::{BrowserAttemptGuard, BrowserOutcome},
     models::user::User,
+    oauth::{authentication::oidc_identity, store::TransactionId},
     oidc::{
         OidcError,
         flow::{self, CallbackResult, FlowSecrets},
@@ -32,6 +36,7 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
 };
 use maud::html;
+use sha2::{Digest, Sha256};
 
 type Notice = (&'static str, &'static str);
 const EXPIRED: Notice = (
@@ -61,6 +66,16 @@ fn notice(state: &AppState, status: StatusCode, (title, detail): Notice) -> Resp
     private_response((status, Html(private_page(state, card))).into_response())
 }
 
+/// Binds a sign-in state to the pending authorization identified by the transaction and
+/// browser cookies, so its callback can only complete that authorization.
+fn authorization_binding(id: &TransactionId, browser: &[u8; 32]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"authotron-oidc-authorization\0");
+    digest.update(id.as_secret_str().as_bytes());
+    digest.update(browser);
+    digest.finalize().into()
+}
+
 /// Redirects to the provider's authorization endpoint. The state record is created only
 /// once provider metadata is available, so an unreachable provider spends no capacity.
 pub(super) async fn start(
@@ -69,10 +84,21 @@ pub(super) async fn start(
     method: &BrowserMethod,
     oidc: &OidcMethod,
 ) -> Response {
-    // Pending authorization requests continue with credential methods.
-    if !matches!(super::oauth::parse_browser_binding(headers), Ok(None)) {
-        return super::oauth::local(StatusCode::CONFLICT);
-    }
+    // The caller has already recovered ended or advanced flows; remaining transaction
+    // cookies name a pending authorization, confirmed here.
+    let authorization = match super::oauth::parse_browser_binding(headers) {
+        Ok(None) => None,
+        Ok(Some((id, browser))) => {
+            let Some(runtime) = &state.oauth else {
+                return super::oauth::local(StatusCode::FORBIDDEN);
+            };
+            if let Err(error) = runtime.bound(&id, &browser).await {
+                return pending_failure(error).0;
+            }
+            Some(authorization_binding(&id, &browser))
+        }
+        Err(status) => return super::oauth::local(status),
+    };
     let metadata = match oidc.metadata().await {
         Ok(metadata) => metadata,
         Err(error) => {
@@ -89,7 +115,7 @@ pub(super) async fn start(
     let form_nonce = cookie_value(headers, FORM_COOKIE)
         .filter(|value| valid_id(value))
         .unwrap_or_else(opaque_id);
-    let binding = flow::binding(&form_nonce, None);
+    let binding = flow::binding(&form_nonce, authorization.as_ref());
     let sign_in_state = match state.browser.form_with_nonce(&method.flow, &binding).await {
         Ok(token) => token,
         Err(error) => return unavailable(error),
@@ -109,7 +135,7 @@ pub(super) async fn start(
 /// Why a callback produced no identity.
 enum SignInError {
     Provider(OidcError),
-    /// Augmentation did not accept the identity.
+    /// Augmentation or identity bounds did not accept the identity.
     Augmentation,
 }
 
@@ -151,12 +177,22 @@ async fn complete(
         attempt.outcome = BrowserOutcome::Malformed;
         return notice(state, StatusCode::BAD_REQUEST, EXPIRED);
     };
-    let Some(form_nonce) = cookie_value(headers, FORM_COOKIE).filter(|value| valid_id(value))
-    else {
+    let (Some(form_nonce), Ok(authorization)) = (
+        cookie_value(headers, FORM_COOKIE).filter(|value| valid_id(value)),
+        super::oauth::parse_browser_binding(headers),
+    ) else {
         attempt.outcome = BrowserOutcome::Csrf;
         return notice(state, StatusCode::BAD_REQUEST, EXPIRED);
     };
-    let binding = flow::binding(&form_nonce, None);
+    // The state was bound to the same cookies at the start: a sign-in begun for a
+    // browser session cannot complete an authorization request, and vice versa.
+    let binding = flow::binding(
+        &form_nonce,
+        authorization
+            .as_ref()
+            .map(|(id, browser)| authorization_binding(id, browser))
+            .as_ref(),
+    );
     match state
         .browser
         .consume_with_nonce(&callback.state, &binding, &method.flow)
@@ -187,6 +223,17 @@ async fn complete(
         }
     };
     let secrets = FlowSecrets::derive(&form_nonce, &callback.state);
+    if let Some((id, browser)) = authorization {
+        return authorize(
+            state,
+            method,
+            oidc,
+            (&id, &browser),
+            (callback.iss.as_deref(), &code, &secrets),
+            attempt,
+        )
+        .await;
+    }
     let verified = state
         .browser
         .admitted_with_metrics(
@@ -213,6 +260,59 @@ async fn complete(
     let mut response = private_response(Redirect::to("/login/account").into_response());
     set_cookie(&mut response, SESSION_COOKIE, sid, state.browser.ttl);
     attempt.outcome = BrowserOutcome::Success;
+    response
+}
+
+/// Continues a pending authorization: the transaction is confirmed before the code is
+/// exchanged, and the identity is strictly augmented, as for credential sign-in.
+async fn authorize(
+    state: &AppState,
+    method: &BrowserMethod,
+    oidc: &OidcMethod,
+    (id, browser): (&TransactionId, &[u8; 32]),
+    (iss, code, secrets): (Option<&str>, &str, &FlowSecrets),
+    attempt: &mut BrowserAttemptGuard,
+) -> Response {
+    let Some(runtime) = &state.oauth else {
+        attempt.outcome = BrowserOutcome::Csrf;
+        return super::oauth::local(StatusCode::FORBIDDEN);
+    };
+    let witness = match runtime.bound(id, browser).await {
+        Ok(witness) => witness,
+        Err(error) => {
+            let (response, outcome) = pending_failure(error);
+            attempt.outcome = outcome;
+            return response;
+        }
+    };
+    let verified = state
+        .browser
+        .admitted_with_metrics(
+            async {
+                let user = match oidc.complete(iss, code, secrets).await {
+                    Ok(user) => user,
+                    Err(error) => return Ok(Err(SignInError::Provider(error))),
+                };
+                Ok(
+                    oidc_identity(&method.flow.method, user, &state.auth, &state.metrics)
+                        .await
+                        .map_err(|_| SignInError::Augmentation),
+                )
+            },
+            Some(&state.metrics),
+        )
+        .await;
+    let identity = match verified {
+        Ok(Ok(identity)) => identity,
+        Ok(Err(error)) => return sign_in_failure(state, method, error, attempt),
+        Err(error) => {
+            attempt.outcome = error_outcome(&error);
+            return unavailable(error);
+        }
+    };
+    let (response, outcome) =
+        finish_authorization_login(runtime, id, browser, witness, identity).await;
+    attempt.outcome = outcome;
     response
 }
 

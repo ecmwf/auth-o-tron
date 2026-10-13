@@ -110,8 +110,6 @@ async fn login(State(state): State<AppState>, headers: axum::http::HeaderMap) ->
         .browser
         .methods()
         .iter()
-        // OIDC sign-in completes browser sessions only, not pending authorizations.
-        .filter(|method| !(oauth_pending && method.oidc().is_some()))
         .map(|method| ChooserMethod {
             id: &method.flow.method,
             label: &method.label,

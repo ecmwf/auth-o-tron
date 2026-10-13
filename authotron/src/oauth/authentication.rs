@@ -73,12 +73,7 @@ pub async fn verify_identity(
                     AuthenticationError::Unavailable
                 }
             })?;
-        let verified_at_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|time| u64::try_from(time.as_millis()).ok())
-            .filter(|ms| valid_time(*ms))
-            .ok_or(AuthenticationError::Unavailable)?;
+        let verified_at_ms = now_ms()?;
         if tokio::time::Instant::now() >= deadline {
             return Err(AuthenticationError::Timeout);
         }
@@ -99,6 +94,41 @@ pub async fn verify_identity(
     } else {
         result
     }
+}
+
+fn now_ms() -> Result<u64, AuthenticationError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|time| u64::try_from(time.as_millis()).ok())
+        .filter(|ms| valid_time(*ms))
+        .ok_or(AuthenticationError::Unavailable)
+}
+
+/// Identity from a completed OIDC sign-in whose ID token the caller has validated and
+/// whose callback state was bound to the same authorization request. The mapped
+/// provider roles go through strict augmentation; the identity is verified now.
+/// The caller bounds the time spent, as for credential sign-in.
+pub(crate) async fn oidc_identity(
+    method: &str,
+    user: User,
+    auth: &Auth,
+    metrics: &Metrics,
+) -> Result<VerifiedOAuthIdentity, AuthenticationError> {
+    let provider_roles = user.roles.clone();
+    let user = auth
+        .check_augmenters_strict(user, metrics)
+        .await
+        .map_err(|_| AuthenticationError::Rejected)?;
+    let user = projection(&user).map_err(|_| AuthenticationError::Rejected)?;
+    validate_identity_fields(&user.username, &user.realm, &provider_roles)
+        .map_err(|_| AuthenticationError::Rejected)?;
+    Ok(VerifiedOAuthIdentity {
+        user,
+        provider_roles,
+        method: method.into(),
+        verified_at_ms: now_ms()?,
+    })
 }
 
 pub(super) fn projection(user: &User) -> Result<User, BrowserVerifyError> {
@@ -398,6 +428,47 @@ mod tests {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
+    #[tokio::test]
+    async fn oidc_identities_keep_mapped_roles_and_are_augmented_strictly() {
+        let (_, auth, metrics, calls) = fixture("http://127.0.0.1:1", "alice", false, false);
+        let mapped = |roles: Vec<String>| {
+            User::new(
+                "local".into(),
+                "f81d4fae-7dec-11d0-a765-00a0c91e6bf6".into(),
+                Some(roles),
+                Some([("email".to_owned(), "alice@example.org".to_owned())].into()),
+                None,
+                None,
+            )
+        };
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let proof = oidc_identity("sso", mapped(vec!["reader".into()]), &auth, &metrics)
+            .await
+            .unwrap();
+        assert_eq!(proof.method(), "sso");
+        assert_eq!(proof.provider_roles(), ["reader"]);
+        assert_eq!(proof.as_user().roles, ["reader", "derived"]);
+        assert!(proof.as_user().attributes.is_empty());
+        assert!(u128::from(proof.verified_at_ms()) >= before);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let (_, failing, metrics, _) = fixture("http://127.0.0.1:1", "alice", true, false);
+        assert_eq!(
+            oidc_identity("sso", mapped(vec![]), &failing, &metrics)
+                .await
+                .err(),
+            Some(AuthenticationError::Rejected)
+        );
+        assert_eq!(
+            oidc_identity("sso", mapped(vec!["r\n".into()]), &auth, &metrics)
+                .await
+                .err(),
+            Some(AuthenticationError::Rejected)
+        );
+    }
+
     #[test]
     fn oauth_projection_bounds_do_not_keep_hidden_fields() {
         let mut user = User::new(
