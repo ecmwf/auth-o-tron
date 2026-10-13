@@ -10,6 +10,7 @@
 //! talk to identity providers and validate their answers; they create no sessions,
 //! consent records or authorization grants.
 
+pub mod discovery;
 pub mod http;
 #[cfg(test)]
 pub(crate) mod mock;
