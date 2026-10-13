@@ -10,6 +10,7 @@
 
 use super::oauth_policy::{ClientResource, OAuthResource};
 use super::oauth_signing::OAuthSigningConfig;
+use super::oauth_upstream::UpstreamTokenEncryptionConfig;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,9 @@ pub struct OAuthConfig {
     #[schemars(length(max = 64))]
     pub resources: Vec<OAuthResource>,
     pub signing: Option<OAuthSigningConfig>,
+    /// Keys sealing the upstream refresh tokens of OIDC sign-ins coupled to refresh
+    /// families; keep them while coupled families may remain.
+    pub upstream_token_encryption: Option<UpstreamTokenEncryptionConfig>,
 }
 
 impl Default for OAuthConfig {
@@ -61,6 +65,7 @@ impl Default for OAuthConfig {
             clients: Vec::new(),
             resources: Vec::new(),
             signing: None,
+            upstream_token_encryption: None,
         }
     }
 }
@@ -69,6 +74,9 @@ impl OAuthConfig {
     pub fn validate(&self) -> Result<(), &'static str> {
         if let Some(signing) = &self.signing {
             signing.validate()?;
+        }
+        if let Some(encryption) = &self.upstream_token_encryption {
+            encryption.validate()?;
         }
         if self.enabled && self.issuer.is_none() {
             return Err("oauth.issuer is required when OAuth is enabled");
@@ -414,6 +422,22 @@ mod tests {
         assert_eq!(config.access_token_ttl_seconds, 300);
         assert!(config.validate().is_ok());
         assert!(serde_json::from_value::<OAuthConfig>(json!({"enable": true})).is_err());
+    }
+
+    #[test]
+    fn upstream_token_encryption_is_validated_with_the_oauth_settings() {
+        let config = |active: &str| -> OAuthConfig {
+            serde_json::from_value(json!({"upstream_token_encryption": {
+                "active_kid": active,
+                "keys": [{"kid": "k1", "key_file": "/run/secrets/upstream/k1"}]
+            }}))
+            .unwrap()
+        };
+        assert!(config("k1").validate().is_ok());
+        assert_eq!(
+            config("k2").validate(),
+            Err("oauth.upstream_token_encryption active_kid must reference a configured key")
+        );
     }
 
     #[test]

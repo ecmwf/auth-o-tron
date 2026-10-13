@@ -27,7 +27,10 @@ use super::{
     valkey_refresh::ValkeyRefreshStore,
     valkey_transactions::ValkeyTransactionStore,
 };
-use crate::config::{ConfigV2, OAuthConfig, ui::BrowserBackendConfig};
+use crate::{
+    config::{ConfigV2, OAuthConfig, ui::BrowserBackendConfig},
+    oidc::upstream::UpstreamCipher,
+};
 use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -167,6 +170,9 @@ impl OAuthRuntime {
                 refresh_durability::report(store.durability().await)
             }
             None => {}
+        }
+        if let Some(encryption) = &cfg.upstream_token_encryption {
+            UpstreamCipher::load(encryption)?;
         }
         let rate_limit = EndpointRateLimiter::new(&cfg.endpoint_rate_limit)?;
         Ok(Some(Arc::new(Self {

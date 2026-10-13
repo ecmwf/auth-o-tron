@@ -1346,6 +1346,18 @@
             }
           ],
           "default": null
+        },
+        "upstream_token_encryption": {
+          "description": "Keys sealing the upstream refresh tokens of OIDC sign-ins coupled to refresh\nfamilies; keep them while coupled families may remain.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UpstreamTokenEncryptionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "additionalProperties": false
@@ -1600,6 +1612,51 @@
         "kid"
       ]
     },
+    "UpstreamTokenEncryptionConfig": {
+      "description": "AES-256 keys for upstream refresh tokens. New tokens are sealed with `active_kid`;\nthe other keys only open tokens sealed before a rotation.",
+      "type": "object",
+      "properties": {
+        "active_kid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UpstreamTokenKey"
+          },
+          "minItems": 1,
+          "maxItems": 4
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "active_kid",
+        "keys"
+      ]
+    },
+    "UpstreamTokenKey": {
+      "description": "One key: a file holding 32 random bytes in standard Base64, such as\n`openssl rand -base64 32` writes.",
+      "type": "object",
+      "properties": {
+        "kid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "key_file": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kid",
+        "key_file"
+      ]
+    },
     "ConfigV2": {
       "type": "object",
       "properties": {
@@ -1688,7 +1745,8 @@
             },
             "clients": [],
             "resources": [],
-            "signing": null
+            "signing": null,
+            "upstream_token_encryption": null
           }
         }
       },
