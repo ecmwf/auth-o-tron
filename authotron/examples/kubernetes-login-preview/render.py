@@ -109,6 +109,7 @@ SOURCE_FILES = (
     "authotron/src/oidc/id_token.rs",
     "authotron/src/oidc/jwks.rs",
     "authotron/src/oidc/method.rs",
+    "authotron/src/oidc/method/refresh_tests.rs",
     "authotron/src/oidc/mock.rs",
     "authotron/src/oidc/mod.rs",
     "authotron/src/oidc/token_client.rs",

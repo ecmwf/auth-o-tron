@@ -23,7 +23,7 @@ use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey, rand_core::OsRng, traits::P
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -102,6 +102,14 @@ struct Grant {
     offline: bool,
 }
 
+/// A live refresh token: the user it was issued for and the original nonce, which
+/// refreshed ID tokens repeat as Keycloak's do.
+#[derive(Clone)]
+struct Offline {
+    subject: String,
+    nonce: String,
+}
+
 /// Mutable behaviour and records of a [`MockIdp`].
 #[derive(Default)]
 pub(crate) struct MockState {
@@ -116,7 +124,19 @@ pub(crate) struct MockState {
     pub signer: Mutex<(usize, String)>,
     pub token_requests: AtomicUsize,
     pub discovery_requests: AtomicUsize,
+    /// Advertise the RFC 7009 revocation endpoint.
+    pub revocation: AtomicBool,
+    /// Refresh responses carry a new refresh token, invalidating the presented one.
+    pub rotate_refresh_tokens: AtomicBool,
+    /// Refresh responses carry a new ID token.
+    pub refresh_id_tokens: AtomicBool,
+    /// Subjects whose refresh tokens are refused, like disabled accounts.
+    pub disabled: Mutex<HashSet<String>>,
+    pub refresh_requests: AtomicUsize,
+    /// Tokens received at the revocation endpoint, in order.
+    pub revoked: Mutex<Vec<String>>,
     grants: Mutex<HashMap<String, Grant>>,
+    offline: Mutex<HashMap<String, Offline>>,
 }
 
 /// An identity provider with discovery, JWKS and a token endpoint, plus an in-process
@@ -131,7 +151,14 @@ impl MockIdp {
         // Key generation is slow in debug builds; finish it before requests have deadlines.
         let _ = (rsa_key(0), rsa_key(1));
         let state = Arc::new(MockState::default());
-        state.iss_parameter.store(true, Ordering::SeqCst);
+        for flag in [
+            &state.iss_parameter,
+            &state.revocation,
+            &state.rotate_refresh_tokens,
+            &state.refresh_id_tokens,
+        ] {
+            flag.store(true, Ordering::SeqCst);
+        }
         *state.subject.lock().unwrap() = SUBJECT.into();
         *state.claims.lock().unwrap() = json!({});
         *state.signer.lock().unwrap() = (0, "k0".into());
@@ -144,7 +171,7 @@ impl MockIdp {
                     move || async move {
                         state.discovery_requests.fetch_add(1, Ordering::SeqCst);
                         let issuer = issuer.get().unwrap();
-                        Json(json!({
+                        let mut document = json!({
                             "issuer": issuer,
                             "authorization_endpoint": format!("{issuer}/auth"),
                             "token_endpoint": format!("{issuer}/token"),
@@ -153,7 +180,11 @@ impl MockIdp {
                             "code_challenge_methods_supported": ["S256"],
                             "authorization_response_iss_parameter_supported":
                                 state.iss_parameter.load(Ordering::SeqCst),
-                        }))
+                        });
+                        if state.revocation.load(Ordering::SeqCst) {
+                            document["revocation_endpoint"] = json!(format!("{issuer}/revoke"));
+                        }
+                        Json(document)
                     }
                 }),
             )
@@ -169,6 +200,15 @@ impl MockIdp {
                     let (state, issuer) = (state.clone(), issuer_cell.clone());
                     move |headers: HeaderMap, body: String| async move {
                         token(&state, issuer.get().unwrap(), &headers, &body)
+                    }
+                }),
+            )
+            .route(
+                "/realms/test/revoke",
+                post({
+                    let state = state.clone();
+                    move |headers: HeaderMap, body: String| async move {
+                        revoke(&state, &headers, &body)
                     }
                 }),
             );
@@ -255,7 +295,8 @@ fn error(status: StatusCode, code: &str) -> (StatusCode, Json<Value>) {
     (status, Json(json!({"error": code})))
 }
 
-/// Token endpoint: one-use codes, exact redirect URI, S256 verifier and client secret.
+/// Token endpoint: one-use codes, exact redirect URI, S256 verifier and client secret;
+/// refresh tokens for live, enabled users.
 fn token(
     state: &MockState,
     issuer: &str,
@@ -272,6 +313,7 @@ fn token(
     }
     match form.get("grant_type").map(String::as_str) {
         Some("authorization_code") => exchange(state, issuer, &form),
+        Some("refresh_token") => refresh(state, issuer, &form),
         _ => error(StatusCode::BAD_REQUEST, "unsupported_grant_type"),
     }
 }
@@ -298,9 +340,62 @@ fn exchange(
         "id_token": id_token(state, issuer, &grant.subject, &grant.nonce)
     });
     if grant.offline {
-        answer["refresh_token"] = json!(format!("offline-{}", uuid::Uuid::new_v4().simple()));
+        answer["refresh_token"] = json!(state.issue_refresh_token(Offline {
+            subject: grant.subject.clone(),
+            nonce: grant.nonce.clone(),
+        }));
     }
     (StatusCode::OK, Json(answer))
+}
+
+fn refresh(
+    state: &MockState,
+    issuer: &str,
+    form: &HashMap<String, String>,
+) -> (StatusCode, Json<Value>) {
+    state.refresh_requests.fetch_add(1, Ordering::SeqCst);
+    let presented = form.get("refresh_token").cloned().unwrap_or_default();
+    let record = state.offline.lock().unwrap().get(&presented).cloned();
+    let Some(record) =
+        record.filter(|record| !state.disabled.lock().unwrap().contains(&record.subject))
+    else {
+        return error(StatusCode::BAD_REQUEST, "invalid_grant");
+    };
+    let mut answer =
+        json!({"access_token": "mock-access-token", "token_type": "Bearer", "expires_in": 60});
+    if state.rotate_refresh_tokens.load(Ordering::SeqCst) {
+        state.offline.lock().unwrap().remove(&presented);
+        answer["refresh_token"] = json!(state.issue_refresh_token(record.clone()));
+    }
+    if state.refresh_id_tokens.load(Ordering::SeqCst) {
+        answer["id_token"] = json!(id_token(state, issuer, &record.subject, &record.nonce));
+    }
+    (StatusCode::OK, Json(answer))
+}
+
+/// RFC 7009 endpoint: records the token and ends it.
+fn revoke(state: &MockState, headers: &HeaderMap, body: &str) -> StatusCode {
+    let form = form(body);
+    if !authenticated(headers, &form) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    if let Some(token) = form.get("token") {
+        state.offline.lock().unwrap().remove(token);
+        state.revoked.lock().unwrap().push(token.clone());
+    }
+    StatusCode::OK
+}
+
+impl MockState {
+    fn issue_refresh_token(&self, record: Offline) -> String {
+        let token = format!("offline-{}", uuid::Uuid::new_v4().simple());
+        self.offline.lock().unwrap().insert(token.clone(), record);
+        token
+    }
+    /// Whether `token` is a live refresh token.
+    pub(crate) fn refresh_token_live(&self, token: &str) -> bool {
+        self.offline.lock().unwrap().contains_key(token)
+    }
 }
 
 /// An ID token for `subject` with the default claims and [`MockState::claims`] merged in.

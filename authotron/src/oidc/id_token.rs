@@ -56,7 +56,9 @@ pub fn inspect(
 pub struct Expected<'a> {
     pub issuer: &'a str,
     pub client_id: &'a str,
-    pub nonce: &'a str,
+    /// Required and compared when set. Refreshed ID tokens are checked without it: the
+    /// nonce belongs to the original authorization request.
+    pub nonce: Option<&'a str>,
     pub now_seconds: u64,
     pub skew_seconds: u64,
     /// `iat` may be at most this much older than now (plus skew).
@@ -139,7 +141,9 @@ fn check_claims(claims: &Map<String, Value>, expected: &Expected<'_>) -> Option<
     if claims.contains_key("nbf") && seconds("nbf")? > now.saturating_add(skew) {
         return None;
     }
-    if !bool::from(text("nonce")?.as_bytes().ct_eq(expected.nonce.as_bytes())) {
+    if let Some(nonce) = expected.nonce
+        && !bool::from(text("nonce")?.as_bytes().ct_eq(nonce.as_bytes()))
+    {
         return None;
     }
     if let Some(max_age) = expected.max_authentication_age_seconds {
@@ -172,7 +176,7 @@ mod tests {
         Expected {
             issuer: ISSUER,
             client_id: "authotron",
-            nonce: "nonce-value",
+            nonce: Some("nonce-value"),
             now_seconds: NOW,
             skew_seconds: 60,
             max_issued_age_seconds: 300,
@@ -317,6 +321,31 @@ mod tests {
         multiple["aud"] = json!(["authotron", "account"]);
         multiple.as_object_mut().unwrap().remove("azp");
         assert!(check(&multiple, None).is_err());
+    }
+
+    #[test]
+    fn refreshed_tokens_are_checked_without_a_nonce() {
+        let refreshed = Expected {
+            nonce: None,
+            ..expected(None)
+        };
+        let verify_claims = |claims: &Value| {
+            let token = sign(claims, Algorithm::RS256, Some("k"), 0);
+            verify(
+                &token,
+                Algorithm::RS256,
+                &key(rsa_jwk(0, "k", None)),
+                &refreshed,
+            )
+        };
+        let mut without = claims();
+        without.as_object_mut().unwrap().remove("nonce");
+        assert!(verify_claims(&without).is_ok());
+        assert!(verify_claims(&claims()).is_ok());
+        assert!(check(&without, None).is_err());
+        let mut foreign = claims();
+        foreign["aud"] = json!("other-client");
+        assert!(verify_claims(&foreign).is_err());
     }
 
     #[test]

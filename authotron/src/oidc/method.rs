@@ -7,8 +7,9 @@
 // does it submit to any jurisdiction.
 
 //! One configured OIDC sign-in method: its client secret, provider metadata and keys,
-//! and the two steps the browser routes need, building the authorization request and
-//! turning a callback code into a verified identity.
+//! the two steps the browser routes need, building the authorization request and
+//! turning a callback code into a verified identity, and refreshing and revoking the
+//! upstream grant of a coupled refresh-token family.
 
 use super::{
     OidcError,
@@ -18,7 +19,7 @@ use super::{
     http::IdpHttp,
     id_token::{Expected, inspect, verify},
     jwks::Jwks,
-    token_client::{ClientCredentials, exchange_code},
+    token_client::{self, ClientCredentials, exchange_code},
 };
 use crate::{
     config::{OidcClientAuth, OidcMethodConfig},
@@ -42,6 +43,14 @@ pub struct SignIn {
     pub user: User,
     pub subject: String,
     pub refresh_token: Option<Zeroizing<String>>,
+}
+
+/// A refreshed upstream grant. `refresh_token` is the rotated token, if any; `identity`
+/// holds the `sub` and mapped identity of a refreshed ID token, `None` when the
+/// provider sent none, or why it failed validation. Deliberately not Debug.
+pub struct Refreshed {
+    pub refresh_token: Option<Zeroizing<String>>,
+    pub identity: Result<Option<(String, User)>, OidcError>,
 }
 
 pub struct OidcMethod {
@@ -153,7 +162,64 @@ impl OidcMethod {
         )
         .await?;
         let id_token = tokens.id_token.ok_or(OidcError::InvalidResponse)?;
-        let (alg, kid) = inspect(&id_token, &self.config.id_token_algorithms)?;
+        let (subject, user) = self
+            .identity(
+                &metadata,
+                &id_token,
+                Some(secrets.nonce()),
+                self.config.max_authentication_age_seconds,
+            )
+            .await?;
+        Ok(SignIn {
+            user,
+            subject,
+            refresh_token: tokens.refresh_token,
+        })
+    }
+
+    /// Refreshes an upstream grant. Transport, client and `invalid_grant` failures are
+    /// errors; a refreshed ID token is validated without the nonce and authentication
+    /// age, which describe the original sign-in.
+    pub async fn refresh(&self, refresh_token: &str) -> Result<Refreshed, OidcError> {
+        let metadata = self.metadata().await?;
+        let tokens = token_client::refresh(
+            &self.http,
+            &metadata.token_endpoint,
+            &self.credentials(),
+            refresh_token,
+        )
+        .await?;
+        let identity = match &tokens.id_token {
+            Some(token) => self.identity(&metadata, token, None, None).await.map(Some),
+            None => Ok(None),
+        };
+        Ok(Refreshed {
+            refresh_token: tokens.refresh_token,
+            identity,
+        })
+    }
+
+    /// Revokes an upstream refresh token (RFC 7009). `Ok(false)` means the provider
+    /// advertises no revocation endpoint.
+    pub async fn revoke(&self, refresh_token: &str) -> Result<bool, OidcError> {
+        let metadata = self.metadata().await?;
+        let Some(endpoint) = &metadata.revocation_endpoint else {
+            return Ok(false);
+        };
+        token_client::revoke(&self.http, endpoint, &self.credentials(), refresh_token).await?;
+        Ok(true)
+    }
+
+    /// Validates `token` and maps its claims to the `sub` and an identity that is not yet
+    /// augmented.
+    async fn identity(
+        &self,
+        metadata: &ProviderMetadata,
+        token: &str,
+        nonce: Option<&str>,
+        max_authentication_age_seconds: Option<u64>,
+    ) -> Result<(String, User), OidcError> {
+        let (alg, kid) = inspect(token, &self.config.id_token_algorithms)?;
         let key = self
             .jwks
             .key(&self.http, &metadata.jwks_uri, kid.as_deref(), alg)
@@ -163,28 +229,26 @@ impl OidcMethod {
             .map_err(|_| OidcError::Unavailable)?
             .as_secs();
         let claims = verify(
-            &id_token,
+            token,
             alg,
             &key,
             &Expected {
                 issuer: &self.config.issuer,
                 client_id: &self.config.client_id,
-                nonce: secrets.nonce(),
+                nonce,
                 now_seconds,
                 skew_seconds: self.config.clock_skew_seconds,
                 max_issued_age_seconds: MAX_ISSUED_AGE_SECONDS,
-                max_authentication_age_seconds: self.config.max_authentication_age_seconds,
+                max_authentication_age_seconds,
             },
         )?;
         let user = map_identity(&self.config, &claims)?;
-        Ok(SignIn {
-            user,
-            subject: claims.sub,
-            refresh_token: tokens.refresh_token,
-        })
+        Ok((claims.sub, user))
     }
 }
 
+#[cfg(test)]
+mod refresh_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,7 +259,10 @@ mod tests {
     const ORIGIN: &str = "https://login.example.org";
     const FORM_NONCE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-    fn method(idp: &MockIdp, changes: serde_json::Value) -> (tempfile::NamedTempFile, OidcMethod) {
+    pub(super) fn method(
+        idp: &MockIdp,
+        changes: serde_json::Value,
+    ) -> (tempfile::NamedTempFile, OidcMethod) {
         let mut secret = tempfile::NamedTempFile::new().unwrap();
         writeln!(secret, "  {CLIENT_SECRET}  ").unwrap();
         let mut value = json!({
@@ -211,7 +278,7 @@ mod tests {
     }
 
     /// Runs the browser leg: authorization URL, provider sign-in, callback parameters.
-    async fn sign_in(
+    pub(super) async fn sign_in(
         idp: &MockIdp,
         method: &OidcMethod,
         state: &str,
