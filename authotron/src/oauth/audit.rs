@@ -71,6 +71,9 @@ impl FamilyEnd {
     }
 }
 
+/// The `family` of lines about an upstream grant that no family holds.
+pub(crate) const NO_FAMILY: &str = "none";
+
 /// Short reference to a family for correlating its log lines: the first 12 hex digits
 /// of SHA-256 over the random family id, e.g. `3f2a9c0b71de`. The id cannot be
 /// recovered from it.
@@ -99,6 +102,7 @@ macro_rules! family_event {
         )
     };
 }
+pub(super) use family_event;
 
 impl OAuthRuntime {
     /// Logs and counts the end of each family and queues revocation of a coupled
@@ -134,7 +138,7 @@ impl OAuthRuntime {
             }
             metrics.record_refresh_token(RefreshTokenEvent::FamilyRevoked);
             if let Some(sealed) = &family.sealed {
-                self.revoke_sealed(&family.grant, sealed, browser, metrics);
+                self.revoke_sealed(&family.grant, sealed, &reference, browser, metrics);
             }
         }
     }

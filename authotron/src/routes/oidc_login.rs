@@ -25,6 +25,7 @@ use crate::{
     oauth::{
         authentication::{VerifiedOAuthIdentity, oidc_identity},
         store::TransactionId,
+        upstream::RevocationAudit,
     },
     oidc::{
         OidcError,
@@ -339,11 +340,18 @@ async fn authorize(
                     username: &user.username,
                 };
                 let grant = UpstreamGrant::new(&subject, token.clone());
+                let audit = RevocationAudit::sign_in(
+                    &client_id,
+                    &method.flow.method,
+                    &user.realm,
+                    &user.username,
+                );
+                let unheld = Some((token, audit));
                 let Some(sealed) = runtime.seal_upstream(&binding, &grant) else {
-                    return Ok((Some(token), Err(SignInError::OfflineAccess)));
+                    return Ok((unheld, Err(SignInError::OfflineAccess)));
                 };
                 let identity = oidc_verified(state, method, user, Some(sealed)).await;
-                Ok((Some(token), identity))
+                Ok((unheld, identity))
             },
             Some(&state.metrics),
         )
@@ -355,9 +363,9 @@ async fn authorize(
             return unavailable(error);
         }
     };
-    let unheld = |token: Option<Zeroizing<String>>| {
-        if let Some(token) = token {
-            runtime.revoke_upstream_token(oidc, token, &state.metrics);
+    let unheld = |token: Option<(Zeroizing<String>, RevocationAudit)>| {
+        if let Some((token, audit)) = token {
+            runtime.revoke_upstream_token(oidc, token, audit, &state.metrics);
         }
     };
     let identity = match identity {

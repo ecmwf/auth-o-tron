@@ -12,9 +12,10 @@
 //! locked section runs as its own task: a cancelled refresh request still stores the
 //! rotation and releases the lock. The refreshed identity must keep its `sub` and
 //! username; its mapped roles replace the family's provider roles for this refresh.
+//! Failures are logged with the family's client, method, realm, username and reference.
 
 use super::{
-    audit::FamilyEnd,
+    audit::{FamilyEnd, family_event, family_ref},
     refresh::{EndedFamily, Presented, RefreshFamily, UpstreamStored, random_id},
     refresh_grant::{RefreshBackend, RefreshGrantError, refresh_dispatch},
     runtime::OAuthRuntime,
@@ -27,6 +28,7 @@ use crate::{
     oidc::{OidcError, method::OidcMethod, upstream::UpstreamGrant},
 };
 use std::{sync::Arc, time::Duration};
+use tracing::Instrument;
 
 /// How long a refresh waits for another replica's upstream refresh of the same family.
 const LOCK_WAIT: Duration = Duration::from_secs(2);
@@ -70,7 +72,8 @@ impl OAuthRuntime {
         let task = {
             let (runtime, oidc, metrics) = (self.clone(), oidc.clone(), metrics.clone());
             let (id, presented) = (family.family_id.clone(), *presented);
-            tokio::spawn(async move { runtime.locked(&id, &presented, &oidc, &metrics).await })
+            let locked = async move { runtime.locked(&id, &presented, &oidc, &metrics).await };
+            tokio::spawn(locked.instrument(tracing::Span::current()))
         };
         let outcome = task.await.map_err(|_| Unavailable)?;
         let event = match &outcome {
@@ -91,10 +94,11 @@ impl OAuthRuntime {
             Outcome::Roles(roles) => Ok(roles),
             Outcome::Unavailable => Err(Unavailable),
             Outcome::Busy => {
-                tracing::warn!(
+                family_event!(
+                    warn,
+                    family.grant,
+                    family_ref(&family.family_id),
                     event_name = "oauth.upstream.lock_busy",
-                    event_domain = "oauth",
-                    method = %family.grant.method,
                     "another refresh of this family is still renewing its upstream grant"
                 );
                 Err(Unavailable)
@@ -160,27 +164,40 @@ impl OAuthRuntime {
             _ => return Err(RefreshGrantError::InvalidGrant),
         };
         let grant = &current.grant;
+        let family = family_ref(&current.family_id);
         let binding = binding(grant, oidc);
         let (Some(upstream), Some(state)) = (&self.upstream, &current.upstream) else {
             return Ok(Outcome::Ended(FamilyEnd::UpstreamUnusable));
         };
         let Ok(opened) = upstream.cipher.open(&binding, &state.sealed) else {
-            tracing::warn!(
+            family_event!(
+                warn,
+                grant,
+                family,
                 event_name = "oauth.upstream.unopenable",
-                event_domain = "oauth",
-                method = %grant.method,
                 "sealed upstream grant cannot be opened with the configured keys"
             );
             return Ok(Outcome::Ended(FamilyEnd::UpstreamUnusable));
         };
         let refreshed = match oidc.refresh(opened.refresh_token()).await {
             Ok(refreshed) => refreshed,
-            Err(OidcError::Rejected) => return Ok(Outcome::Ended(FamilyEnd::UpstreamInvalidGrant)),
+            Err(OidcError::Rejected) => {
+                family_event!(
+                    warn,
+                    grant,
+                    family,
+                    event_name = "oauth.upstream.refresh_rejected",
+                    reason = "invalid_grant",
+                    "provider refused the upstream refresh"
+                );
+                return Ok(Outcome::Ended(FamilyEnd::UpstreamInvalidGrant));
+            }
             Err(error) => {
-                tracing::warn!(
+                family_event!(
+                    warn,
+                    grant,
+                    family,
                     event_name = "oauth.upstream.refresh_unavailable",
-                    event_domain = "oauth",
-                    method = %grant.method,
                     reason = error.label(),
                     "upstream grant not refreshed"
                 );
@@ -199,10 +216,11 @@ impl OAuthRuntime {
                 Err(_) => Ok(UpstreamStored::Stale),
             };
             if !matches!(stored, Ok(UpstreamStored::Stored)) {
-                tracing::error!(
+                family_event!(
+                    error,
+                    grant,
+                    family,
                     event_name = "oauth.upstream.rotation_lost",
-                    event_domain = "oauth",
-                    method = %grant.method,
                     "rotated upstream refresh token could not be stored"
                 );
                 metrics.record_upstream_token(UpstreamTokenEvent::RotationLost);
@@ -219,20 +237,22 @@ impl OAuthRuntime {
                 Outcome::Roles(user.roles)
             }
             Ok(Some(_)) | Err(OidcError::InvalidIdentity) => {
-                tracing::warn!(
+                family_event!(
+                    warn,
+                    grant,
+                    family,
                     event_name = "oauth.upstream.identity_changed",
-                    event_domain = "oauth",
-                    method = %grant.method,
                     "refreshed identity does not match the family"
                 );
                 Outcome::Ended(FamilyEnd::IdentityChanged)
             }
             // An unverifiable ID token may stem from key rotation or clock skew.
             Err(error) => {
-                tracing::warn!(
+                family_event!(
+                    warn,
+                    grant,
+                    family,
                     event_name = "oauth.upstream.id_token_unverified",
-                    event_domain = "oauth",
-                    method = %grant.method,
                     reason = error.label(),
                     "refreshed ID token not verified"
                 );
@@ -246,10 +266,11 @@ impl OAuthRuntime {
                 Outcome::Roles(grant.provider_roles.clone())
             }
             Ok(None) => {
-                tracing::warn!(
+                family_event!(
+                    warn,
+                    grant,
+                    family,
                     event_name = "oauth.upstream.identity_missing",
-                    event_domain = "oauth",
-                    method = %grant.method,
                     "provider sent no ID token to re-check the mapped username or roles"
                 );
                 Outcome::Unavailable

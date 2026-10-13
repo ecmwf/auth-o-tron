@@ -47,6 +47,7 @@ async fn live_family(coupled: &Coupled) -> (RefreshToken, String) {
 }
 
 #[tokio::test]
+#[tracing_test::traced_test]
 async fn refresh_renews_the_upstream_grant_and_stores_its_rotation() {
     let coupled = coupled(|_| {}).await;
     let (first, original) = live_family(&coupled).await;
@@ -71,6 +72,9 @@ async fn refresh_renews_the_upstream_grant_and_stores_its_rotation() {
     for (event, count) in [("refreshed", 3), ("rotated", 2), ("unavailable", 1)] {
         assert_eq!(coupled.upstream_events(event), count, "{event}");
     }
+    // The locked section runs in its own task but logs within the refresh's span.
+    assert!(logs_contain("oauth.upstream.refresh_unavailable"));
+    assert!(logs_contain("reason=\"unavailable\""));
 }
 
 #[tokio::test]
@@ -131,6 +135,36 @@ async fn a_refused_grant_ends_the_family_and_is_revoked_at_the_provider() {
         assert!(logs_contain(&format!("reason=\"{reason}\"")), "{reason}");
     }
     assert!(!logs_contain(&upstream));
+    // The refusal and the revocation of the refused grant are logged with the family.
+    logs_assert(|lines: &[&str]| {
+        let rejected = lines
+            .iter()
+            .find(|line| line.contains("oauth.upstream.refresh_rejected"))
+            .ok_or("no refresh_rejected line")?;
+        for field in [
+            " WARN ",
+            "reason=\"invalid_grant\"",
+            "client_id=desktop",
+            "realm=idp",
+        ] {
+            if !rejected.contains(field) {
+                return Err(format!("{field} missing: {rejected}"));
+            }
+        }
+        let family = rejected
+            .split("family=")
+            .nth(1)
+            .and_then(|rest| rest.get(..12));
+        let revoked = lines.iter().any(|line| {
+            line.contains("oauth.upstream.revocation_sent")
+                && family.is_some_and(|family| line.contains(&format!("family={family}")))
+        });
+        if revoked {
+            Ok(())
+        } else {
+            Err("no revocation line for the family".into())
+        }
+    });
 }
 
 #[tokio::test]

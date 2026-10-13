@@ -10,9 +10,16 @@
 //! and best-effort revocation at the provider (RFC 7009) when a coupled family ends.
 //! Revocations run on one background worker, so token and revocation responses never
 //! wait for the provider. When the queue is full a revocation is skipped and counted;
-//! the provider's own offline-session expiry still ends the grant.
+//! the provider's own offline-session expiry still ends the grant. Every outcome is
+//! logged with the grant's client, method, realm, username and family reference, within
+//! the span of the request that ended the grant.
 
-use super::{context::AuthenticatedAuthorization, refresh::RefreshGrant, runtime::OAuthRuntime};
+use super::{
+    audit::{NO_FAMILY, family_event},
+    context::AuthenticatedAuthorization,
+    refresh::RefreshGrant,
+    runtime::OAuthRuntime,
+};
 use crate::{
     browser::BrowserLoginState,
     metrics::{Metrics, UpstreamTokenEvent},
@@ -23,15 +30,100 @@ use crate::{
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tracing::Instrument;
 use zeroize::Zeroizing;
 
 const REVOCATION_QUEUE: usize = 256;
+
+/// Whose upstream grant a revocation ends, for its outcome log line.
+pub(crate) struct RevocationAudit {
+    client_id: String,
+    method: String,
+    realm: String,
+    username: String,
+    /// A family reference, or [`NO_FAMILY`].
+    family: String,
+}
+
+impl RevocationAudit {
+    /// A sign-in's upstream grant that never reached a family.
+    pub(crate) fn sign_in(client_id: &str, method: &str, realm: &str, username: &str) -> Self {
+        Self {
+            client_id: client_id.into(),
+            method: method.into(),
+            realm: realm.into(),
+            username: username.into(),
+            family: NO_FAMILY.into(),
+        }
+    }
+    fn of(grant: &RefreshGrant, family: &str) -> Self {
+        Self {
+            client_id: grant.client_id.clone(),
+            method: grant.method.clone(),
+            realm: grant.realm.clone(),
+            username: grant.username.clone(),
+            family: family.to_owned(),
+        }
+    }
+    fn skipped(&self, metrics: &Metrics) {
+        family_event!(
+            warn,
+            self,
+            self.family,
+            event_name = "oauth.upstream.revocation_skipped",
+            "upstream refresh token not revoked: queue full, or grant cannot be opened"
+        );
+        metrics.record_upstream_token(UpstreamTokenEvent::RevocationSkipped);
+    }
+}
 
 /// One revocation for the worker. Deliberately not Debug.
 struct Revocation {
     method: Arc<OidcMethod>,
     refresh_token: Zeroizing<String>,
     metrics: Metrics,
+    audit: RevocationAudit,
+    span: tracing::Span,
+}
+
+impl Revocation {
+    async fn run(self) {
+        let audit = &self.audit;
+        let event = match self.method.revoke(&self.refresh_token).await {
+            Ok(true) => {
+                family_event!(
+                    info,
+                    audit,
+                    audit.family,
+                    event_name = "oauth.upstream.revocation_sent",
+                    "upstream refresh token revoked"
+                );
+                UpstreamTokenEvent::RevocationSent
+            }
+            Ok(false) => {
+                family_event!(
+                    info,
+                    audit,
+                    audit.family,
+                    event_name = "oauth.upstream.revocation_unsupported",
+                    "provider advertises no revocation endpoint"
+                );
+                UpstreamTokenEvent::RevocationUnsupported
+            }
+            Err(error) => {
+                family_event!(
+                    warn,
+                    audit,
+                    audit.family,
+                    event_name = "oauth.upstream.revocation_failed",
+                    reason = error.label(),
+                    "upstream refresh token not revoked"
+                );
+                UpstreamTokenEvent::RevocationFailed
+            }
+        };
+        self.metrics.record_upstream_token(event);
+    }
 }
 
 /// Sealing keys and the revocation queue. Deliberately not Debug.
@@ -46,21 +138,8 @@ impl Upstream {
         let (revocations, mut queue) = mpsc::channel::<Revocation>(REVOCATION_QUEUE);
         tokio::spawn(async move {
             while let Some(job) = queue.recv().await {
-                let event = match job.method.revoke(&job.refresh_token).await {
-                    Ok(true) => UpstreamTokenEvent::RevocationSent,
-                    Ok(false) => UpstreamTokenEvent::RevocationUnsupported,
-                    Err(error) => {
-                        tracing::warn!(
-                            event_name = "oauth.upstream.revocation_failed",
-                            event_domain = "oauth",
-                            method = %job.method.config().id,
-                            reason = error.label(),
-                            "upstream refresh token not revoked"
-                        );
-                        UpstreamTokenEvent::RevocationFailed
-                    }
-                };
-                job.metrics.record_upstream_token(event);
+                let span = job.span.clone();
+                job.run().instrument(span).await;
             }
         });
         Self {
@@ -68,20 +147,23 @@ impl Upstream {
             revocations,
         }
     }
-    /// Queues a revocation; `false` when the queue is full.
+    /// Queues a revocation; on a full queue it is returned for the skip log.
     fn queue(
         &self,
         method: &Arc<OidcMethod>,
         refresh_token: Zeroizing<String>,
+        audit: RevocationAudit,
         metrics: &Metrics,
-    ) -> bool {
+    ) -> Result<(), RevocationAudit> {
         self.revocations
             .try_send(Revocation {
                 method: method.clone(),
                 refresh_token,
                 metrics: metrics.clone(),
+                audit,
+                span: tracing::Span::current(),
             })
-            .is_ok()
+            .map_err(|error| error.into_inner().audit)
     }
 }
 
@@ -123,14 +205,14 @@ impl OAuthRuntime {
         &self,
         method: &Arc<OidcMethod>,
         refresh_token: Zeroizing<String>,
+        audit: RevocationAudit,
         metrics: &Metrics,
     ) {
-        let queued = self
-            .upstream
-            .as_ref()
-            .is_some_and(|upstream| upstream.queue(method, refresh_token, metrics));
-        if !queued {
-            metrics.record_upstream_token(UpstreamTokenEvent::RevocationSkipped);
+        let Some(upstream) = &self.upstream else {
+            return audit.skipped(metrics);
+        };
+        if let Err(audit) = upstream.queue(method, refresh_token, audit, metrics) {
+            audit.skipped(metrics);
         }
     }
 
@@ -155,39 +237,32 @@ impl OAuthRuntime {
             method: context.method().into(),
             upstream_coupled: true,
         };
-        self.revoke_sealed(&grant, sealed, browser, metrics);
+        self.revoke_sealed(&grant, sealed, NO_FAMILY, browser, metrics);
     }
 
     /// Queues upstream revocation of the sealed grant of `grant`, which no family holds
-    /// any more. A grant whose method or key no longer opens it is skipped and counted.
+    /// any more; `family` is the ended family's reference or [`NO_FAMILY`]. A grant whose
+    /// method or key no longer opens it is skipped and counted.
     pub(super) fn revoke_sealed(
         &self,
         grant: &RefreshGrant,
         sealed: &str,
+        family: &str,
         browser: &BrowserLoginState,
         metrics: &Metrics,
     ) {
-        let queued = self.upstream.as_ref().is_some_and(|upstream| {
-            let Some(method) = browser
-                .method(&grant.method)
-                .and_then(|method| method.oidc())
-            else {
-                return false;
-            };
-            let Ok(opened) = upstream.cipher.open(&binding(grant, method), sealed) else {
-                return false;
-            };
-            let refresh_token = Zeroizing::new(opened.refresh_token().to_owned());
-            upstream.queue(method, refresh_token, metrics)
+        let audit = RevocationAudit::of(grant, family);
+        let opened = self.upstream.as_ref().and_then(|upstream| {
+            let method = browser.method(&grant.method)?.oidc()?;
+            let opened = upstream.cipher.open(&binding(grant, method), sealed).ok()?;
+            Some((upstream, method, opened))
         });
-        if !queued {
-            tracing::warn!(
-                event_name = "oauth.upstream.revocation_skipped",
-                event_domain = "oauth",
-                method = %grant.method,
-                "upstream refresh token of an ended family not revoked"
-            );
-            metrics.record_upstream_token(UpstreamTokenEvent::RevocationSkipped);
+        let Some((upstream, method, opened)) = opened else {
+            return audit.skipped(metrics);
+        };
+        let refresh_token = Zeroizing::new(opened.refresh_token().to_owned());
+        if let Err(audit) = upstream.queue(method, refresh_token, audit, metrics) {
+            audit.skipped(metrics);
         }
     }
 }

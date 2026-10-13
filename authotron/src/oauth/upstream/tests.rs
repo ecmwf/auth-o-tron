@@ -187,6 +187,7 @@ impl Coupled {
 }
 
 #[tokio::test]
+#[tracing_test::traced_test]
 async fn reuse_detection_and_client_revocation_revoke_the_upstream_grant() {
     let coupled = coupled(|_| {}).await;
     let original = coupled.idp.state.offline_token(SUBJECT);
@@ -214,9 +215,33 @@ async fn reuse_detection_and_client_revocation_revoke_the_upstream_grant() {
         .unwrap();
     assert_eq!(coupled.revoked(2).await[1], "offline-revoked");
     assert_eq!(coupled.upstream_events("revocation_sent"), 2);
+    // The worker logs each outcome within the span of the request that ended the grant.
+    logs_assert(|lines: &[&str]| {
+        let sent: Vec<_> = lines
+            .iter()
+            .filter(|line| line.contains("oauth.upstream.revocation_sent"))
+            .collect();
+        let expected = [" INFO ", "client_id=desktop", "method=sso", "realm=idp"];
+        match sent.as_slice() {
+            [first, second]
+                if [first, second].iter().all(|line| {
+                    expected.iter().all(|field| line.contains(field))
+                        && line.contains(&format!("username={SUBJECT}"))
+                        && !line.contains("family=none")
+                }) =>
+            {
+                Ok(())
+            }
+            other => Err(format!("unexpected revocation lines: {other:?}")),
+        }
+    });
+    for token in [&original, newest, "offline-revoked"] {
+        assert!(!logs_contain(token));
+    }
 }
 
 #[tokio::test]
+#[tracing_test::traced_test]
 async fn unopenable_grants_are_skipped_and_unsupported_providers_counted() {
     let coupled = coupled(|_| {}).await;
     // Sealed for another client: the binding does not match the family's grant.
@@ -226,6 +251,7 @@ async fn unopenable_grants_are_skipped_and_unsupported_providers_counted() {
     coupled.runtime.revoke_sealed(
         &coupled.grant(),
         &sealed,
+        NO_FAMILY,
         &coupled.browser,
         &coupled.metrics,
     );
@@ -254,6 +280,23 @@ async fn unopenable_grants_are_skipped_and_unsupported_providers_counted() {
     }
     assert_eq!(coupled.upstream_events("revocation_unsupported"), 1);
     assert!(coupled.idp.state.revoked.lock().unwrap().is_empty());
+    logs_assert(|lines: &[&str]| {
+        let line = |event: &str| {
+            lines
+                .iter()
+                .find(|line| line.contains(event))
+                .ok_or(format!("no {event} line"))
+        };
+        let skipped = line("oauth.upstream.revocation_skipped")?;
+        let unsupported = line("oauth.upstream.revocation_unsupported")?;
+        if !(skipped.contains(" WARN ") && skipped.contains("family=none")) {
+            return Err(format!("skip line: {skipped}"));
+        }
+        if !(unsupported.contains(" INFO ") && unsupported.contains("client_id=desktop")) {
+            return Err(format!("unsupported line: {unsupported}"));
+        }
+        Ok(())
+    });
 }
 
 #[tokio::test]

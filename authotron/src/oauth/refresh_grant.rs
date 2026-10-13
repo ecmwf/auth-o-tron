@@ -10,7 +10,7 @@
 //! revocation. Every refresh re-runs augmentation and current policy before rotating.
 
 use super::{
-    audit::FamilyEnd,
+    audit::{FamilyEnd, NO_FAMILY},
     authentication::projection,
     refresh::{
         Presented, RefreshGrant, RefreshStoreError, RefreshToken, Revocation, Rotated,
@@ -155,7 +155,7 @@ impl OAuthRuntime {
     ) -> TokenResponse {
         let unheld = || {
             if let Some(sealed) = upstream {
-                self.revoke_sealed(grant, sealed, browser, metrics);
+                self.revoke_sealed(grant, sealed, NO_FAMILY, browser, metrics);
             }
         };
         let (Some(backend), Some(policy), Some(method)) = (
