@@ -216,6 +216,15 @@ It registers one extra resource (scope `aviso:read`) for the pre-registered MCP
 clients below. The URL must be a canonical HTTPS resource identifier: lowercase
 host, no default `:443`, a path, and no query, fragment or userinfo.
 
+`--trusted-proxy CIDR` is optional, repeatable (at most 64) and also requires
+`--oauth-secret-file`. It sets `oauth.endpoint_rate_limit.trusted_proxies` so the
+`/oauth/token` and `/oauth/revoke` limits key on the client address from
+`X-Forwarded-For` instead of the ingress peer. List only the ingress source
+addresses as canonical CIDRs; `/0` is rejected. On the playground the ingress-nginx
+controllers are ordinary pods, so the peer is each controller pod IP (`/32`), e.g.
+`kubectl -n kube-system get pods -o wide | grep ingress-nginx`; re-render when those
+pods are rescheduled.
+
 The OAuth file holds **only `private-key-pem`**: an unencrypted RSA-2048 PKCS8 PEM
 generated on first use with mode `0600` and reused afterwards. It follows the same
 ownership, single-link, no-symlink, outside-Git/archive and distinct-path rules as

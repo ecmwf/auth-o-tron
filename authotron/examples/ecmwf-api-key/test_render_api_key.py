@@ -1393,6 +1393,55 @@ class RendererTests(unittest.TestCase):
                 oauth_aviso_resource=AVISO,
             )
 
+    def test_oauth_trusted_proxies_are_opt_in_and_guarded(self):
+        baseline, _ = self.baseline()
+        proxies = ("10.70.13.40/32", "10.26.28.0/24")
+        options = dict(
+            valkey_password=VALKEY_PASSWORD,
+            oauth_key=OAUTH_KEY,
+            oauth_trusted_proxies=proxies,
+        )
+        resources = renderer.transform(baseline, HOST, TOKEN, BASIC, **options)
+        renderer.validate_resources(
+            resources, baseline, HOST, IMAGE, TOKEN, BASIC, **options
+        )
+        oauth = yaml.safe_load(find(resources, "ConfigMap")["data"]["config.yaml"])[
+            "oauth"
+        ]
+        self.assertEqual(
+            oauth["endpoint_rate_limit"], {"trusted_proxies": list(proxies)}
+        )
+        for other in ((), proxies[:1]):
+            with self.assertRaises(ValueError):
+                renderer.validate_resources(
+                    resources,
+                    baseline,
+                    HOST,
+                    IMAGE,
+                    TOKEN,
+                    BASIC,
+                    **{**options, "oauth_trusted_proxies": other},
+                )
+        self.assertNotIn(
+            "endpoint_rate_limit", renderer.oauth_config(HOST, "kid", ["ecmwf"])
+        )
+        self.assertEqual(renderer.checked_trusted_proxies([], False), ())
+        for bad in (
+            ["0.0.0.0/0"],
+            ["::/0"],
+            ["10.26.28.1/24"],
+            ["10.70.13.40"],
+            ["010.70.13.40/32"],
+            ["not-a-cidr"],
+            ["10.70.13.40/32", "10.70.13.40/32"],
+            [f"10.0.0.{i}/32" for i in range(65)],
+        ):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    renderer.checked_trusted_proxies(bad, True)
+        with self.assertRaises(ValueError):
+            renderer.checked_trusted_proxies(proxies, False)
+
     def test_oauth_aviso_policy_admits_any_browser_realm_user(self):
         config = renderer.oauth_config(HOST, "kid", ["browser-demo", "ecmwf"], AVISO)
         aviso = config["resources"][1]

@@ -6,6 +6,7 @@ import base64
 import copy
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import os
 import re
@@ -727,6 +728,27 @@ def checked_aviso_resource(value, oauth_enabled):
     return value
 
 
+def checked_trusted_proxies(values, oauth_enabled):
+    """Canonical CIDRs of the reverse proxies whose X-Forwarded-For is trusted.
+    Valid: 10.70.13.40/32, 10.26.28.0/24. Invalid: 10.26.28.1/24 (host bits),
+    0.0.0.0/0 (trusts every client), 10.70.13.40 (no prefix)."""
+    values = tuple(values)
+    if not values:
+        return ()
+    if not oauth_enabled:
+        raise ValueError("--trusted-proxy requires the OAuth profile")
+    if len(values) > 64 or len(set(values)) != len(values):
+        raise ValueError("at most 64 distinct trusted proxy CIDRs")
+    for value in values:
+        try:
+            network = ipaddress.ip_network(value, strict=True)
+        except (TypeError, ValueError):
+            raise ValueError("invalid trusted proxy CIDR") from None
+        if "/" not in value or str(network) != value or network.prefixlen == 0:
+            raise ValueError("invalid trusted proxy CIDR")
+    return values
+
+
 def oauth_clients(aviso_resource=None):
     """mcp-local first (its fixed callback and local-only binding are unchanged),
     then the MCP client table bound to the local and optional Aviso resources."""
@@ -746,7 +768,7 @@ def oauth_clients(aviso_resource=None):
     )
 
 
-def oauth_config(host, kid, realms, aviso_resource=None):
+def oauth_config(host, kid, realms, aviso_resource=None, trusted_proxies=()):
     realms = list(dict.fromkeys(realms))
     resources = [
         {
@@ -765,7 +787,7 @@ def oauth_config(host, kid, realms, aviso_resource=None):
                 "scopes": [{"name": OAUTH_AVISO_SCOPE, "required_roles": []}],
             }
         )
-    return {
+    config = {
         "enabled": True,
         "issuer": f"https://{host}/",
         "access_token_ttl_seconds": OAUTH_ACCESS_TOKEN_TTL_SECONDS,
@@ -779,6 +801,9 @@ def oauth_config(host, kid, realms, aviso_resource=None):
         "clients": oauth_clients(aviso_resource),
         "resources": resources,
     }
+    if trusted_proxies:
+        config["endpoint_rate_limit"] = {"trusted_proxies": list(trusted_proxies)}
+    return config
 
 
 def private_write(parent, name, text):
@@ -826,6 +851,7 @@ def transform(
     oauth_key=None,
     oauth_allow_ecmwf_uids=(),
     oauth_aviso_resource=None,
+    oauth_trusted_proxies=(),
 ):
     checked_session_options(
         valkey_password, replicas, session_ttl_seconds, transaction_ttl_seconds
@@ -833,6 +859,7 @@ def transform(
     checked_oauth_profile(oauth_key is not None, valkey_password)
     ecmwf_uids = checked_ecmwf_uids(oauth_allow_ecmwf_uids, oauth_key is not None)
     aviso = checked_aviso_resource(oauth_aviso_resource, oauth_key is not None)
+    proxies = checked_trusted_proxies(oauth_trusted_proxies, oauth_key is not None)
     checked_token(token)
     resources = copy.deepcopy(baseline)
     config_map = next(d for d in resources if d["kind"] == "ConfigMap" and "data" in d)
@@ -901,7 +928,9 @@ def transform(
             OAUTH_API_KEY_REFRESH_MAX_LIFETIME_SECONDS
         )
         realms = [p["realm"] for p in config["providers"] if p.get("browser")]
-        config["oauth"] = oauth_config(host, oauth_kid(oauth_key), realms, aviso)
+        config["oauth"] = oauth_config(
+            host, oauth_kid(oauth_key), realms, aviso, proxies
+        )
     config["metrics"] = {"enabled": True, "port": METRICS_PORT}
     config_map["data"]["config.yaml"] = yaml.safe_dump(config)
     service = next(d for d in resources if d["kind"] == "Service")
@@ -1032,6 +1061,7 @@ def validate_resources(
     oauth_key=None,
     oauth_allow_ecmwf_uids=(),
     oauth_aviso_resource=None,
+    oauth_trusted_proxies=(),
 ):
     """Compare the full output to the narrowly transformed, validated prototype."""
     preview.validate_inputs(host, image)
@@ -1081,6 +1111,7 @@ def validate_resources(
             oauth_key=oauth_key,
             oauth_allow_ecmwf_uids=oauth_allow_ecmwf_uids,
             oauth_aviso_resource=oauth_aviso_resource,
+            oauth_trusted_proxies=oauth_trusted_proxies,
         )
     )
     if resource_map(resources) != expected:
@@ -1105,6 +1136,7 @@ def render_api_key(
     oauth_key=None,
     oauth_allow_ecmwf_uids=(),
     oauth_aviso_resource=None,
+    oauth_trusted_proxies=(),
 ):
     preview.validate_inputs(host, image)
     checked_token(token)
@@ -1114,6 +1146,7 @@ def render_api_key(
     checked_oauth_profile(oauth_key is not None, valkey_password)
     ecmwf_uids = checked_ecmwf_uids(oauth_allow_ecmwf_uids, oauth_key is not None)
     aviso = checked_aviso_resource(oauth_aviso_resource, oauth_key is not None)
+    proxies = checked_trusted_proxies(oauth_trusted_proxies, oauth_key is not None)
     if oauth_key is not None:
         checked_oauth_key({"private-key-pem": oauth_key})
     if basic is not None:
@@ -1131,6 +1164,8 @@ def render_api_key(
         options["oauth_allow_ecmwf_uids"] = ecmwf_uids
     if aviso is not None:
         options["oauth_aviso_resource"] = aviso
+    if proxies:
+        options["oauth_trusted_proxies"] = proxies
     resources = transform(baseline, host, token, basic, **options)
     validate_resources(resources, baseline, host, image, token, basic, **options)
     return resources, archive
@@ -1160,6 +1195,15 @@ def main():
         metavar="URL",
         help=f"also register this Aviso MCP resource with scope {OAUTH_AVISO_SCOPE}",
     )
+    parser.add_argument(
+        "--trusted-proxy",
+        action="append",
+        default=[],
+        dest="oauth_trusted_proxies",
+        metavar="CIDR",
+        help="trust X-Forwarded-For from this ingress CIDR for OAuth rate limits "
+        "(repeatable)",
+    )
     parser.add_argument("--replicas", type=int, default=1)
     parser.add_argument("--session-ttl-seconds", type=int, default=300)
     parser.add_argument("--transaction-ttl-seconds", type=int, default=300)
@@ -1175,6 +1219,7 @@ def main():
     checked_oauth_profile(bool(args.oauth_secret_file), args.valkey_secret_file)
     checked_ecmwf_uids(args.oauth_allow_ecmwf_uids, bool(args.oauth_secret_file))
     checked_aviso_resource(args.oauth_aviso_resource, bool(args.oauth_secret_file))
+    checked_trusted_proxies(args.oauth_trusted_proxies, bool(args.oauth_secret_file))
     project = Path(__file__).resolve().parents[3]
     output_dir = checked_output_directory(args.output_dir, project)
     credential_paths = [
@@ -1240,6 +1285,8 @@ def main():
         oauth["oauth_allow_ecmwf_uids"] = tuple(args.oauth_allow_ecmwf_uids)
     if args.oauth_aviso_resource:
         oauth["oauth_aviso_resource"] = args.oauth_aviso_resource
+    if args.oauth_trusted_proxies:
+        oauth["oauth_trusted_proxies"] = tuple(args.oauth_trusted_proxies)
     resources, _ = render_api_key(
         project,
         args.chart,
