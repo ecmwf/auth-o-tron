@@ -3,8 +3,9 @@
 The login UI is an optional branded browser entry page, disabled by default.
 Without SSO links or browser-enabled providers it remains a **branding preview**.
 SSO links navigate to application-owned browser login flows. Browser-enabled
-`plain` and `ecmwf-api` providers verify credentials on Auth-O-Tron and establish a
-short-lived augmented identity-view session. These paths do not make this page an OAuth
+`plain` and `ecmwf-api` providers verify credentials on Auth-O-Tron, and
+[OpenID Connect methods](oidc.md) verify a sign-in at an external provider; both
+establish a short-lived augmented identity-view session. These paths do not make this page an OAuth
 authorization server or issue authorization codes.
 
 The `ui` section is supported only by ConfigV2 (`version: "2.0.0"`). Migrating a v1 configuration leaves the UI disabled.
@@ -19,10 +20,12 @@ The `ui` section is supported only by ConfigV2 (`version: "2.0.0"`). Migrating a
 | `ui.branding.title` | optional string | `null` | Page title; when null or blank, renders `Sign in to {application_name}` |
 | `ui.branding.description` | optional string | `null` | Description; omitted when null or blank |
 | `ui.sso` | array | `[]` | Operator-configured SSO navigation links (`label`, `start_url`); not providers |
-| `ui.browser_session` | optional object | omitted | Required when any provider has a `browser` block; shared HTTPS public origin, session TTL and backend |
+| `ui.oidc` | array | `[]` | [OpenID Connect sign-in methods](oidc.md), listed after provider methods |
+| `ui.browser_session` | optional object | omitted | Required when any provider has a `browser` block or `ui.oidc` is non-empty; shared HTTPS public origin, session TTL and backend |
 
-Direct browser login methods are configured on providers, not under `ui`; see
-[Choosing browser methods](#choosing-browser-methods). The `ui` section rejects
+Credential browser login methods are configured on providers; see
+[Choosing browser methods](#choosing-browser-methods). OpenID Connect methods are
+configured in `ui.oidc`; see [OpenID Connect sign-in](oidc.md). The `ui` section rejects
 unknown fields, so configurations containing unsupported keys fail to load.
 
 ## Choosing Browser Methods
@@ -83,6 +86,7 @@ Rules, checked at startup:
 - A non-null `browser` block on any other provider type rejects the
   configuration. `browser: null` is the same as omitting it (API-only).
 - Ids are unique; labels are unique case-insensitively; at most 16 browser methods.
+  These rules span provider methods and [`ui.oidc` methods](oidc.md).
 - Any browser method requires `ui.browser_session` with an explicit `backend`.
 - Enabled OAuth requires at least one browser method.
 
@@ -90,7 +94,7 @@ Each method is served at `/login/method/{id}` (for example
 `/login/method/ecmwf-api-key`). Ids are matched exactly against the raw request
 path; unknown, reserved or differently cased ids, and any percent-escaped spelling
 (for example `/login/method/pass%77ord`), return the branded 404 page. The chooser lists methods in
-provider order by label, followed by SSO links. Startup logs the configured
+provider order by label, then `ui.oidc` methods, followed by SSO links. Startup logs the configured
 methods by id at INFO level. Reordering providers or changing a label keeps every
 method URL; changing an `id` changes that method's URL.
 
@@ -153,8 +157,9 @@ URL and label checks.
 
 ## Same-Page Direct Login
 
-When direct login is configured, its chooser links open an accessible native
-dialog on `/login`. The selected form is fetched only when opened, obtaining a
+When direct login is configured, its credential method links open an accessible
+native dialog on `/login`; OpenID Connect methods are ordinary navigation to the
+provider. The selected form is fetched only when opened, obtaining a
 fresh cookie-bound CSRF transaction bound to that method. Forms for different
 methods do not share a pre-generated token. Configured SSO links remain ordinary navigation.
 

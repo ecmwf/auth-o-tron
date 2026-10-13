@@ -47,6 +47,7 @@ Auth-O-Tron can be configured to use a variety of authentication providers simul
 * **Basic auth** (plain provider) — static username/password lists
 * **JWT/JWKS** — validate Bearer tokens against a JWKS endpoint
 * **OpenID Connect offline tokens** — introspect and exchange offline tokens for access tokens
+* **OpenID Connect sign-in** — browser sign-in at an external identity provider on the login page
 * **ECMWF API keys** — validate tokens against the ECMWF identity service
 * **EFAS API keys** — validate tokens against the EFAS identity service
 * **ECMWF Token Generator** — validate and exchange tokens via the ECMWF token generator

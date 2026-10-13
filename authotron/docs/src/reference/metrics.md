@@ -34,15 +34,18 @@ API/CLI `auth_requests_total` semantics. The unlabeled in-flight gauge is expose
 at zero on idle processes, including pods with configured browser methods; no login
 is needed before an HPA scrape sees it.
 
-`flow` has exactly two values, determined by the method's provider type rather
-than its id or label: `basic` for `plain` methods and `ecmwf-api-key` for
-`ecmwf-api` methods. `method` is the configured `browser.id` (for example
+`flow` has exactly three values, determined by the method's kind rather than its
+id or label: `basic` for `plain` methods, `ecmwf-api-key` for `ecmwf-api` methods
+and `oidc` for [OpenID Connect methods](../configuration/oidc.md), whose attempts
+are their callbacks. `method` is the configured `browser.id` (for example
 `password` or `ecmwf-api-key`); at most 16 browser methods bound its values, and
 it stays stable when providers are reordered or relabelled. Series appear on the
-first POST to each method; they are not pre-initialised. `outcome` has the fixed
+first POST (or OIDC callback) to each method; they are not pre-initialised. `outcome` has the fixed
 values `success`, `rejected`, `denied`, `malformed`, `origin`, `csrf`, `limited`,
-`backend_unavailable`, `capacity`, `timeout`, `cancelled`. They describe the actual
-POST result: successful verification followed by a failed session write is a
+`backend_unavailable`, `capacity`, `timeout`, `cancelled`, `idp_error`,
+`idp_unavailable`. The last two are OIDC only: the provider returned an
+authorization error, or it was unreachable, refused the client or answered off
+protocol. They describe the actual POST or callback result: successful verification followed by a failed session write is a
 failure, not `success`. If a replacement form cannot be issued, its capacity,
 quota or backend failure becomes the final outcome. `timeout` means the total
 verification/augmentation deadline expired; upstream failures reported as generic
@@ -64,10 +67,10 @@ requests. RAII guards reset it on success, error, timeout and cancellation.
 
 No browser metric labels include credentials, usernames, session IDs, prefixes,
 URLs, provider names, chooser labels or raw diagnostic strings. Each method id has
-one fixed `flow`, and `outcome` is one of 11 fixed values (`success`, `rejected`,
+one fixed `flow`, and `outcome` is one of 13 fixed values (`success`, `rejected`,
 `denied`, `malformed`, `origin`, `csrf`, `limited`, `backend_unavailable`,
-`capacity`, `timeout`, `cancelled`), so there are at most 16 methods × 11 outcomes
-per counter/histogram family. `denied` is recorded only when the `access_denied`
+`capacity`, `timeout`, `cancelled`, `idp_error`, `idp_unavailable`), so there are
+at most 16 methods × 13 outcomes per counter/histogram family. `denied` is recorded only when the `access_denied`
 redirect is issued; if a concurrent request already consumed the transaction the
 400 response is counted as `rejected`. Server-side clock or configuration faults
 while building the authenticated context (`InvalidTime`, `Configuration`) return

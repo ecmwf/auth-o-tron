@@ -228,7 +228,8 @@ They return 404 when disabled. See [Login UI](../configuration/ui.md).
 
 | Endpoint | Request / response |
 |----------|--------------------|
-| `GET /login/method/{id}` | Form headed by the method label, with form-nonce cookie and independent transaction/challenge in `csrf`; field set follows the provider type; never consumes query credentials |
+| `GET /login/method/{id}` | Form headed by the method label, with form-nonce cookie and independent transaction/challenge in `csrf`; field set follows the provider type; never consumes query credentials. For an [OIDC method](../configuration/oidc.md): 303 to the provider with a single-use state, or 503 when the provider is unavailable |
+| `GET /login/method/{id}/callback` | OIDC methods only: provider redirect target; 303 `/login/account` (browser session) or `/oauth/continue` (authorization request), otherwise a generic 400/403/503 page |
 | `POST /login/method/{id}` (`plain`) | URL-encoded `username`, `password`, `csrf` (plus `oauth_transaction` during OAuth) only; username ≤256 UTF-8 bytes, password ≤1,024 UTF-8 bytes; Unicode/whitespace password preserved |
 | `POST /login/method/{id}` (`ecmwf-api`) | URL-encoded `api_key`, `csrf` (plus `oauth_transaction` during OAuth) only; key ≤512 bytes |
 | `GET /login/account` | Session-only augmented identity, escaped roles, and allowlisted `ecmwf-email`, `email`, `display_name`; no session →303 `/login` |
@@ -268,5 +269,6 @@ Session cookies are not accepted by `/authenticate`, `/whoami`, or token APIs.
 | GET | / | 8080 | None | Service info |
 | GET | /login | 8080 | None | Configured login entry or preview (only when `ui.enabled: true`) |
 | GET | /static/login.css | 8080 | None | Preview stylesheet (only when `ui.enabled: true`) |
-| GET/POST | /login/method/{id} | 8080 | Form + CSRF on POST | Browser login for the provider whose `browser.id` is `id` |
+| GET/POST | /login/method/{id} | 8080 | Form + CSRF on POST | Browser login for the method whose id is `id`; OIDC methods answer GET only |
+| GET | /login/method/{id}/callback | 8080 | Bound sign-in state | OIDC provider callback |
 | GET | /login/account | 8080 | Browser session | Augmented browser identity view |

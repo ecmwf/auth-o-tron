@@ -76,8 +76,10 @@ oauth:
 ```
 
 OAuth login uses the same browser methods as `/login`: every `plain` or
-`ecmwf-api` provider with a `browser: {id: ..., label: ...}` block, and at least one is
-required when OAuth is enabled. Providers without `browser` stay API-only. See
+`ecmwf-api` provider with a `browser: {id: ..., label: ...}` block and every
+[`ui.oidc` method](oidc.md), and at least one is required when OAuth is enabled.
+An OIDC sign-in started during an authorization request is bound to that request
+and continues to consent. Providers without `browser` stay API-only. See
 [Choosing browser methods](ui.md#choosing-browser-methods). Several methods may
 coexist; submitted fields cannot select another provider or realm. OAuth uses fresh verification
 and **strict** augmentation, never a cached best-effort browser session.
