@@ -12,6 +12,7 @@
 
 pub mod claims;
 pub mod discovery;
+pub mod flow;
 pub mod http;
 pub mod id_token;
 pub mod jwks;
