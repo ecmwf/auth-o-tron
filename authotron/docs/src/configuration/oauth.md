@@ -493,8 +493,11 @@ their `exp`.
 - With the Memory backend, families are per process. A refresh token works only on the
   replica that issued it and is lost on restart. Multi-replica deployments need Valkey.
 - Metrics: `authotron_oauth_refresh_tokens_total{event}` with `issued`, `rotated`,
-  `reuse_detected`, `family_revoked` and `issue_failed`, and
-  `authotron_oauth_upstream_tokens_total{event}` for coupled families.
+  `reuse_detected`, `family_revoked` (every revoked family, including per-user cap
+  evictions) and `issue_failed`, and `authotron_oauth_upstream_tokens_total{event}`
+  for coupled families.
+- Every revoked family is logged as `oauth.refresh_token.family_revoked` with its
+  reason ([audit events](logging.md#oauth-audit-events)).
 
 ### Durable refresh-token storage
 

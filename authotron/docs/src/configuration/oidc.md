@@ -307,7 +307,8 @@ Not covered:
   even when the client abandons its refresh request.
 
 Metrics: `authotron_oauth_upstream_tokens_total{event}` (see
-[metrics](../reference/metrics.md#metric-families)).
+[metrics](../reference/metrics.md#metric-families)). Log events:
+[OAuth audit events](logging.md#oauth-audit-events).
 
 ## Limitations
 
