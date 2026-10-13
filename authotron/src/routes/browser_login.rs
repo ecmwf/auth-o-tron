@@ -639,7 +639,7 @@ async fn account(State(state): State<AppState>, headers: HeaderMap) -> Response 
                     }
                 }
             }
-            p class="login-card-detail" { "Session expires at " (expiry.to_rfc3339()) ". Next sign-in requires password or API-key re-entry; there is no automatic refresh." }
+            p class="login-card-detail" { "Session expires at " (expiry.to_rfc3339()) ". Next sign-in requires verifying your identity again; there is no automatic refresh." }
             p class="login-card-detail" { "This session displays your Auth-O-Tron identity. Application sign-in handoff is separate." }
         },
     );

@@ -258,7 +258,7 @@ assertion. No JWT or OAuth token is issued by these browser routes.
 Successful login rotates an opaque host-only Secure/HttpOnly/SameSite=Lax
 cookie. Only a bounded projection of the augmented identity and absolute expiry
 are retained in the selected browser backend.
-There is no refresh or sliding expiry; credential re-entry is required after expiry.
+There is no refresh or sliding expiry; a new sign-in is required after expiry.
 Upstream revocation is observed on a later verification, so an existing session
 can remain usable until its configured deadline. Browser cookies do not
 authenticate the existing bearer APIs.

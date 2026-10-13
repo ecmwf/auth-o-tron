@@ -362,7 +362,7 @@ async fn verified_login_uses_uncached_query_rotated_secure_cookie_and_safe_ident
             "ecmwf",
             "public@example.test",
             "Session expires at",
-            "key re-entry",
+            "verifying your identity again",
             "handoff is separate",
         ] {
             assert!(html.contains(expected));
