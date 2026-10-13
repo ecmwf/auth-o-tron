@@ -1,0 +1,246 @@
+// (C) Copyright 2026- ECMWF and individual contributors.
+//
+// This software is licensed under the terms of the Apache Licence Version 2.0
+// which can be obtained at http://www.apache.org/licenses/LICENSE-2.0.
+// In applying this licence, ECMWF does not waive the privileges and immunities
+// granted to it by virtue of its status as an intergovernmental organisation nor
+// does it submit to any jurisdiction.
+
+//! Coupled refresh families against the in-process identity provider.
+
+use super::*;
+use crate::{
+    auth::Auth,
+    config::ConfigV2,
+    oauth::{
+        refresh::RefreshToken,
+        refresh_grant::{RefreshBackend, RefreshGrantError, RefreshRequest},
+    },
+    oidc::{
+        mock::{CLIENT_ID, CLIENT_SECRET, MockIdp, SUBJECT, rsa_key},
+        upstream::UpstreamGrant,
+    },
+    store::no_store::NoStore,
+};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+use serde_json::{Value, json};
+use std::{io::Write, time::Duration};
+use tempfile::NamedTempFile;
+
+pub(in crate::oauth) const RESOURCE: &str = "https://mcp.example.org/mcp";
+
+/// An OAuth server whose only sign-in method is the OIDC method `sso` at a test
+/// identity provider, with upstream token encryption and refresh tokens for `desktop`.
+pub(in crate::oauth) struct Coupled {
+    pub idp: MockIdp,
+    pub config: ConfigV2,
+    pub runtime: Arc<OAuthRuntime>,
+    pub browser: BrowserLoginState,
+    pub auth: Auth,
+    pub metrics: Metrics,
+    _files: [NamedTempFile; 3],
+}
+
+fn file(content: &str) -> NamedTempFile {
+    let mut file = NamedTempFile::new().unwrap();
+    file.write_all(content.as_bytes()).unwrap();
+    file
+}
+
+/// `edit` adjusts the configuration JSON before the server starts.
+pub(in crate::oauth) async fn coupled(edit: impl FnOnce(&mut Value)) -> Coupled {
+    let idp = MockIdp::start().await;
+    let signing = file(&rsa_key(1).to_pkcs8_pem(LineEnding::LF).unwrap());
+    let secret = file(CLIENT_SECRET);
+    let key = file(&STANDARD.encode([5u8; 32]));
+    let mut value = json!({
+        "store": {"enabled": false}, "services": [], "augmenters": [], "providers": [],
+        "server": {"port": 0}, "jwt": {"iss": "fixture", "exp": 300, "secret": "fixture-only"},
+        "logging": {"level": "warn", "format": "console"},
+        "ui": {"enabled": true,
+            "browser_session": {"public_origin": "https://login.example.org", "backend": {"type": "memory"}},
+            "oidc": [{"id": "sso", "label": "SSO", "realm": "idp", "issuer": idp.issuer,
+                "client_id": CLIENT_ID, "client_secret_file": secret.path()}]},
+        "oauth": {"enabled": true, "issuer": "https://login.example.org/",
+            "signing": {"active_kid": "k", "keys": [{"kid": "k", "private_key_file": signing.path()}]},
+            "upstream_token_encryption": {"active_kid": "u1", "keys": [{"kid": "u1", "key_file": key.path()}]},
+            "clients": [{"client_id": "desktop", "display_name": "Desktop", "redirect_uris": ["https://app.example.org/cb"],
+                "resources": [{"resource": RESOURCE, "scopes": ["read"]}],
+                "refresh_tokens": {"enabled": true, "idle_ttl_seconds": 600, "absolute_ttl_seconds": 3600}}],
+            "resources": [{"resource": RESOURCE, "allowed_realms": ["idp"], "scopes": [{"name": "read", "required_roles": []}]}]}
+    });
+    edit(&mut value);
+    let config: ConfigV2 = serde_json::from_value(value).unwrap();
+    let runtime = OAuthRuntime::initialize(&config).await.unwrap().unwrap();
+    let browser = BrowserLoginState::new(&config).unwrap();
+    let auth = Auth::new(
+        &config.providers,
+        &[],
+        Arc::new(NoStore),
+        config.auth.clone(),
+    );
+    Coupled {
+        idp,
+        config,
+        runtime,
+        browser,
+        auth,
+        metrics: Metrics::new(),
+        _files: [signing, secret, key],
+    }
+}
+
+impl Coupled {
+    pub(in crate::oauth) fn grant(&self) -> RefreshGrant {
+        RefreshGrant {
+            client_id: "desktop".into(),
+            resource: RESOURCE.into(),
+            scopes: vec!["read".into()],
+            username: SUBJECT.into(),
+            realm: "idp".into(),
+            provider_roles: vec![],
+            method: "sso".into(),
+            upstream_coupled: true,
+        }
+    }
+    pub(in crate::oauth) fn seal(&self, grant: &RefreshGrant, upstream_token: &str) -> String {
+        let method = self.browser.method("sso").unwrap().oidc().unwrap();
+        let upstream = self.runtime.upstream.as_ref().unwrap();
+        let sealed = UpstreamGrant::new(SUBJECT, Zeroizing::new(upstream_token.into()));
+        upstream
+            .cipher
+            .seal(&binding(grant, method), &sealed)
+            .unwrap()
+    }
+    /// Starts a coupled family at `now_ms` holding `upstream_token`.
+    pub(in crate::oauth) async fn family_at(
+        &self,
+        upstream_token: &str,
+        now_ms: u64,
+    ) -> RefreshToken {
+        let grant = self.grant();
+        let sealed = self.seal(&grant, upstream_token);
+        let token = RefreshToken::generate().unwrap();
+        let Some(RefreshBackend::Memory(store)) = &self.runtime.refresh else {
+            unreachable!()
+        };
+        let policy = &self.config.oauth.clients[0].refresh_tokens;
+        store
+            .issue(&grant, token.hash(), now_ms, policy, Some(&sealed))
+            .await
+            .unwrap();
+        token
+    }
+    pub(in crate::oauth) async fn family(&self, upstream_token: &str) -> RefreshToken {
+        self.family_at(upstream_token, self.runtime.now().await.unwrap())
+            .await
+    }
+    pub(in crate::oauth) async fn refresh(
+        &self,
+        token: &RefreshToken,
+    ) -> Result<RefreshToken, RefreshGrantError> {
+        let request = RefreshRequest {
+            token: token.as_secret_str(),
+            client_id: "desktop",
+            scope: None,
+            resource: None,
+        };
+        let response = self
+            .runtime
+            .refresh(request, &self.auth, &self.browser, &self.metrics)
+            .await?;
+        let body = serde_json::to_value(response).unwrap();
+        Ok(RefreshToken::parse(body["refresh_token"].as_str().unwrap()).unwrap())
+    }
+    /// Waits for the worker to send `count` revocations and returns them in order.
+    pub(in crate::oauth) async fn revoked(&self, count: usize) -> Vec<String> {
+        for _ in 0..300 {
+            let revoked = self.idp.state.revoked.lock().unwrap().clone();
+            if revoked.len() >= count {
+                return revoked;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("expected {count} upstream revocations");
+    }
+    pub(in crate::oauth) fn upstream_events(&self, event: &str) -> u64 {
+        let output = self.metrics.render().unwrap();
+        let line = format!("authotron_oauth_upstream_tokens_total{{event=\"{event}\"}} ");
+        output
+            .lines()
+            .find_map(|candidate| candidate.strip_prefix(&line))
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn reuse_detection_and_client_revocation_revoke_the_upstream_grant() {
+    let coupled = coupled(|_| {}).await;
+    let first = coupled.family("offline-reused").await;
+    let second = coupled.refresh(&first).await.unwrap();
+    coupled.refresh(&second).await.unwrap();
+    // A token two rotations old is reuse: the family ends, upstream too.
+    assert_eq!(
+        coupled.refresh(&first).await.err(),
+        Some(RefreshGrantError::InvalidGrant)
+    );
+    assert_eq!(coupled.revoked(1).await, ["offline-reused"]);
+    let other = coupled.family("offline-revoked").await;
+    coupled
+        .runtime
+        .revoke(
+            other.as_secret_str(),
+            "desktop",
+            &coupled.browser,
+            &coupled.metrics,
+        )
+        .await
+        .unwrap();
+    assert_eq!(coupled.revoked(2).await[1], "offline-revoked");
+    assert_eq!(coupled.upstream_events("revocation_sent"), 2);
+}
+
+#[tokio::test]
+async fn unopenable_grants_are_skipped_and_unsupported_providers_counted() {
+    let coupled = coupled(|_| {}).await;
+    // Sealed for another client: the binding does not match the family's grant.
+    let mut grant = coupled.grant();
+    grant.client_id = "other".into();
+    let sealed = coupled.seal(&grant, "offline-foreign");
+    coupled.runtime.end_upstream(
+        [EndedUpstream {
+            grant: coupled.grant(),
+            sealed,
+        }],
+        &coupled.browser,
+        &coupled.metrics,
+    );
+    assert_eq!(coupled.upstream_events("revocation_skipped"), 1);
+    coupled
+        .idp
+        .state
+        .revocation
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let token = coupled.family("offline-kept").await;
+    coupled
+        .runtime
+        .revoke(
+            token.as_secret_str(),
+            "desktop",
+            &coupled.browser,
+            &coupled.metrics,
+        )
+        .await
+        .unwrap();
+    for _ in 0..300 {
+        if coupled.upstream_events("revocation_unsupported") == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(coupled.upstream_events("revocation_unsupported"), 1);
+    assert!(coupled.idp.state.revoked.lock().unwrap().is_empty());
+}

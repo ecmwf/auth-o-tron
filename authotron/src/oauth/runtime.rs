@@ -24,6 +24,7 @@ use super::{
         TransactionId,
     },
     tokens::{TokenError, TokenIssuer, TokenResponse},
+    upstream::Upstream,
     valkey_refresh::ValkeyRefreshStore,
     valkey_transactions::ValkeyTransactionStore,
 };
@@ -68,6 +69,8 @@ pub struct OAuthRuntime {
     pub(crate) rate_limit: EndpointRateLimiter,
     /// Present only when at least one client enables refresh tokens.
     pub(super) refresh: Option<RefreshBackend>,
+    /// Present when `upstream_token_encryption` is configured.
+    pub(super) upstream: Option<Upstream>,
 }
 macro_rules! dispatch {
     ($self:expr, $method:ident($($arg:expr),*)) => {
@@ -171,9 +174,10 @@ impl OAuthRuntime {
             }
             None => {}
         }
-        if let Some(encryption) = &cfg.upstream_token_encryption {
-            UpstreamCipher::load(encryption)?;
-        }
+        let upstream = match &cfg.upstream_token_encryption {
+            Some(encryption) => Some(Upstream::start(UpstreamCipher::load(encryption)?)),
+            None => None,
+        };
         let rate_limit = EndpointRateLimiter::new(&cfg.endpoint_rate_limit)?;
         Ok(Some(Arc::new(Self {
             config: cfg,
@@ -182,6 +186,7 @@ impl OAuthRuntime {
             backend,
             rate_limit,
             refresh,
+            upstream,
         })))
     }
     pub(crate) async fn create(

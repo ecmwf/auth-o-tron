@@ -96,6 +96,8 @@ SOURCE_FILES = (
     "authotron/src/oauth/runtime.rs",
     "authotron/src/oauth/store.rs",
     "authotron/src/oauth/tokens.rs",
+    "authotron/src/oauth/upstream.rs",
+    "authotron/src/oauth/upstream/tests.rs",
     "authotron/src/oauth/valkey_issue_code.lua",
     "authotron/src/oauth/valkey_redeem_code.lua",
     "authotron/src/oauth/valkey_refresh.lua",

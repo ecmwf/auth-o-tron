@@ -660,7 +660,12 @@ async fn revoke(
         return token_error(StatusCode::BAD_REQUEST, "invalid_client");
     }
     match runtime
-        .revoke(&fields["token"], &fields["client_id"], &state.metrics)
+        .revoke(
+            &fields["token"],
+            &fields["client_id"],
+            &state.browser,
+            &state.metrics,
+        )
         .await
     {
         Ok(()) => secure_oauth_response(StatusCode::OK.into_response()),

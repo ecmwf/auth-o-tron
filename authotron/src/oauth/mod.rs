@@ -17,5 +17,6 @@ pub mod refresh_store;
 pub mod runtime;
 pub mod store;
 pub mod tokens;
+pub mod upstream;
 pub mod valkey_refresh;
 pub mod valkey_transactions;

@@ -198,9 +198,10 @@ impl OAuthRuntime {
         let now = self.now().await.map_err(|_| Unavailable)?;
         let family = match refresh_dispatch!(backend, lookup(&hash, now))? {
             Presented::Current(family) => family,
-            Presented::Reused { .. } => {
+            Presented::Reused { ended, .. } => {
                 metrics.record_refresh_token(RefreshTokenEvent::ReuseDetected);
                 metrics.record_refresh_token(RefreshTokenEvent::FamilyRevoked);
+                self.end_upstream(ended.map(|ended| *ended), browser, metrics);
                 return Err(InvalidGrant);
             }
             Presented::Grace | Presented::Missing => return Err(InvalidGrant),
@@ -299,15 +300,17 @@ impl OAuthRuntime {
         &self,
         token: &str,
         client_id: &str,
+        browser: &BrowserLoginState,
         metrics: &Metrics,
     ) -> Result<(), RefreshGrantError> {
         let (Some(backend), Some(token)) = (&self.refresh, RefreshToken::parse(token)) else {
             return Ok(());
         };
-        if let Revocation::Revoked(_) =
+        if let Revocation::Revoked(ended) =
             refresh_dispatch!(backend, revoke_token(&token.hash(), client_id))?
         {
             metrics.record_refresh_token(RefreshTokenEvent::FamilyRevoked);
+            self.end_upstream(ended, browser, metrics);
         }
         Ok(())
     }
