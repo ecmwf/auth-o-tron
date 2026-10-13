@@ -112,13 +112,13 @@ Landing page with service info and version.
 
 ### GET /login
 
-Serves the branded login entry when ConfigV2 `ui.enabled: true`. Without SSO links
-or browser methods it remains a preview. The chooser lists browser methods in
-provider order by label, then `ui.sso` links. SSO links navigate to approved browser
-clients; a browser method opens its credential form (`/login/method/{id}`) in a
-same-page dialog, with standalone navigation as the JavaScript-free fallback.
-An existing browser session redirects to `/login/account` only when exactly one
-browser method and no SSO links are configured; otherwise the chooser stays visible.
+Serves the branded login entry when ConfigV2 `ui.enabled: true`. Without browser
+methods it remains a preview. The chooser lists provider browser methods in provider
+order, then OpenID Connect methods (`ui.oidc`). A provider method opens its
+credential form (`/login/method/{id}`) in a same-page dialog, with standalone
+navigation as the JavaScript-free fallback; an OIDC method navigates to its
+provider. An existing browser session redirects to `/login/account` only when
+exactly one browser method is configured; otherwise the chooser stays visible.
 With opt-in OAuth enabled and a bound authorization transaction, the same method
 forms perform fresh strict verification and continue to explicit consent instead
 of creating an ordinary browser session. See [OAuth](../configuration/oauth.md)
@@ -133,7 +133,7 @@ unconfigured or reserved method ids) returns `404` with a branded "Page not foun
 | Aspect | Details |
 |--------|---------|
 | **Auth** | None |
-| **Success (200)** | HTML login entry or preview; signed-in direct sessions receive a 303 identity-view redirect only when exactly one browser method and no SSO links are configured |
+| **Success (200)** | HTML login entry or preview; signed-in direct sessions receive a 303 identity-view redirect only when exactly one browser method is configured |
 | **Failure (503)** | Generic, private response if a direct browser session lookup fails against its backend; no missing-session redirect or new cookie |
 | **Availability** | Main application port only; route is not registered when UI is disabled |
 
@@ -152,7 +152,7 @@ Serves the login preview stylesheet when ConfigV2 `ui.enabled: true`.
 When `ui.enabled: true`, the application port serves the bundled progressive
 dialog enhancement as JavaScript and the official Aviso example logo as PNG.
 These assets return 404 when UI is disabled or on the metrics router. The script
-is loaded only by choosers offering direct login; it does not intercept SSO links.
+is loaded only by choosers offering direct login; it does not intercept OIDC methods.
 No runtime request to an external logo host is needed for the bundled artwork.
 
 These endpoints do not change `/` or `/authenticate`. See [Login UI](../configuration/ui.md) for branding settings and logo constraints. The chart's default image `0.3.6` lacks these endpoints; use an image built from `feat/login-ui-shell` for testing, or an eventual released version containing the UI.

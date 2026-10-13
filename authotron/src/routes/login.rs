@@ -91,21 +91,14 @@ async fn login(State(state): State<AppState>, headers: axum::http::HeaderMap) ->
     } else {
         None
     };
-    if state.browser.methods().len() == 1
-        && state.config.ui.sso.is_empty()
-        && session.is_some()
-        && !oauth_pending
-    {
+    if state.browser.methods().len() == 1 && session.is_some() && !oauth_pending {
         return secure_response(Redirect::to("/login/account").into_response(), true);
     }
-    let mut config = if direct_login {
+    let config = if direct_login {
         super::browser_login::private_ui(&state)
     } else {
         state.config.ui.clone()
     };
-    if oauth_pending {
-        config.sso.clear();
-    }
     let methods: Vec<ChooserMethod> = state
         .browser
         .methods()
@@ -204,7 +197,6 @@ struct ChooserMethod<'a> {
 /// `methods` are in chooser order; labels are escaped.
 fn render_login(config: &UiConfig, methods: &[ChooserMethod]) -> String {
     let direct_login = !methods.is_empty();
-    let available = !config.sso.is_empty() || direct_login;
     render_page_with_dialog(
         config,
         html! {
@@ -216,11 +208,11 @@ fn render_login(config: &UiConfig, methods: &[ChooserMethod]) -> String {
                     path d="M8 10V7a4 4 0 0 1 8 0v3" {}
                 }
                 span class="login-status-badge" {
-                    @if available { "Browser sign-in" } @else { "UI preview" }
+                    @if direct_login { "Browser sign-in" } @else { "UI preview" }
                 }
             }
             h2 id="login-card-title" { "Sign in" }
-            @if !available {
+            @if !direct_login {
                 p id="login-status" class="login-card-message" {
                     "Interactive sign-in is not available on this page."
                 }
@@ -243,9 +235,6 @@ fn render_login(config: &UiConfig, methods: &[ChooserMethod]) -> String {
                         } @else {
                             button class="login-action" type="button" disabled { (method.label) " (temporarily unavailable)" }
                         }
-                    }
-                    @for action in &config.sso {
-                        a class="login-action" href=(action.start_url.as_str()) { (&action.label) }
                     }
                 }
             }

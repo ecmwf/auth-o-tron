@@ -1,8 +1,7 @@
 # Login UI
 
 The login UI is an optional branded browser entry page, disabled by default.
-Without SSO links or browser-enabled providers it remains a **branding preview**.
-SSO links navigate to application-owned browser login flows. Browser-enabled
+Without browser sign-in methods it remains a **branding preview**. Browser-enabled
 `plain` and `ecmwf-api` providers verify credentials on Auth-O-Tron, and
 [OpenID Connect methods](oidc.md) verify a sign-in at an external provider; both
 establish a short-lived augmented identity-view session. These paths do not make this page an OAuth
@@ -19,14 +18,15 @@ The `ui` section is supported only by ConfigV2 (`version: "2.0.0"`). Migrating a
 | `ui.branding.logo_url` | optional string | `null` | Validated HTTPS absolute URL or root-relative path |
 | `ui.branding.title` | optional string | `null` | Page title; when null or blank, renders `Sign in to {application_name}` |
 | `ui.branding.description` | optional string | `null` | Description; omitted when null or blank |
-| `ui.sso` | array | `[]` | Operator-configured SSO navigation links (`label`, `start_url`); not providers |
 | `ui.oidc` | array | `[]` | [OpenID Connect sign-in methods](oidc.md), listed after provider methods |
 | `ui.browser_session` | optional object | omitted | Required when any provider has a `browser` block or `ui.oidc` is non-empty; shared HTTPS public origin, session TTL and backend |
 
 Credential browser login methods are configured on providers; see
 [Choosing browser methods](#choosing-browser-methods). OpenID Connect methods are
 configured in `ui.oidc`; see [OpenID Connect sign-in](oidc.md). The `ui` section rejects
-unknown fields, so configurations containing unsupported keys fail to load.
+unknown fields, so configurations containing unsupported keys fail to load. The
+former `ui.sso` navigation links were removed; offer an external identity provider
+as an [OpenID Connect method](oidc.md) instead.
 
 ## Choosing Browser Methods
 
@@ -60,9 +60,6 @@ providers:
     users: []
 ui:
   enabled: true
-  sso:
-    - label: Continue with SSO
-      start_url: https://app.example.org/oauth2/start?rd=%2Faccount
   browser_session:
     public_origin: https://auth.example.org
     backend:
@@ -94,7 +91,7 @@ Each method is served at `/login/method/{id}` (for example
 `/login/method/ecmwf-api-key`). Ids are matched exactly against the raw request
 path; unknown, reserved or differently cased ids, and any percent-escaped spelling
 (for example `/login/method/pass%77ord`), return the branded 404 page. The chooser lists methods in
-provider order by label, then `ui.oidc` methods, followed by SSO links. Startup logs the configured
+provider order, then `ui.oidc` methods. Startup logs the configured
 methods by id at INFO level. Reordering providers or changing a label keeps every
 method URL; changing an `id` changes that method's URL.
 
@@ -111,7 +108,7 @@ artwork designed for a light background.
 Branding is public information on an unauthenticated page. Do not put secrets in
 branding text or logo URLs.
 
-External HTTPS logos on previews or SSO-only choosers are fetched by the browser,
+External HTTPS logos on previews are fetched by the browser,
 not the server. Their `no-referrer` policy prevents sending the page URL, but the
 image host still receives the browser's network request. Direct-login choosers,
 credential forms and account pages retain only same-origin logos and use
@@ -127,41 +124,13 @@ URL validation occurs during configuration loading; the generated JSON schema
 describes URLs as strings and does not enforce the URL restrictions itself.
 Arbitrary mounted-logo assets and configurable colors are not implemented.
 
-## SSO Links
-
-Each `ui.sso` entry has a nonblank `label` and a validated `start_url` with the same
-HTTPS/root-relative restrictions as logo URLs. The destination must be an
-application-owned endpoint that starts an approved login flow, not a token
-endpoint or an arbitrary request-supplied callback. For example:
-
-```yaml
-ui:
-  enabled: true
-  sso:
-    - label: Continue with demo SSO
-      start_url: https://aviso-browser.example.org/oauth2/start?rd=%2Faccount
-```
-
-Labels and URLs are escaped. Only configured destinations appear: query
-parameters such as `start_url`, `redirect_uri`, or `return_to` never select the
-destination. Operators are responsible for trusting the configured application
-origin. A safe URL alone does not make a third-party application trustworthy.
-The identity provider must separately register the browser client's exact
-callback, and the client must enforce state, nonce, PKCE, issuer/audience checks,
-and safe post-login destinations. These links are not an OAuth authorization
-server or a substitute for that protocol.
-
-The schema describes SSO labels as strings; the runtime also rejects blank
-labels and unknown SSO fields. Schema validation alone does not enforce all
-URL and label checks.
-
 ## Same-Page Direct Login
 
 When direct login is configured, its credential method links open an accessible
 native dialog on `/login`; OpenID Connect methods are ordinary navigation to the
 provider. The selected form is fetched only when opened, obtaining a
 fresh cookie-bound CSRF transaction bound to that method. Forms for different
-methods do not share a pre-generated token. Configured SSO links remain ordinary navigation.
+methods do not share a pre-generated token.
 
 Loading, invalid credentials and retry states stay inside the dialog. Credentials
 are cleared after dispatch and on close; closing is inhibited during a POST.
@@ -208,16 +177,15 @@ public-client code/S256 flow through the browser method forms and explicit conse
 When OAuth is disabled, standalone browser verification and the preview retain their
 existing behavior. OAuth requests are transaction-bound and do not reuse browser sessions.
 
-Branding and SSO links do not register an authentication client or callback.
-The browser sign-in flow must register an exact callback URI for each application
-client, such as the Aviso backend's `/auth/callback`, and use authorization codes
-with state and PKCE checks rather than redirecting with access tokens. External
-SSO may have a separate callback into the auth authority before the application
-callback is reached.
+Branding does not register an authentication client or callback. An application
+must register an exact callback URI as an OAuth client, such as the Aviso
+backend's `/auth/callback`, and use authorization codes with state and PKCE checks
+rather than redirecting with access tokens. An OpenID Connect method has its own
+callback into Auth-O-Tron before the application callback is reached.
 
 ## Direct ECMWF API-Key Login
 
-This path is independent of Keycloak, OIDC clients and SSO links:
+This path is independent of Keycloak and OIDC methods:
 
 ```yaml
 providers:
@@ -267,7 +235,7 @@ Direct login requires an **explicit backend selection**, with no implicit memory
 backend or fallback. `memory` is for single-replica development: restarting it
 signs users out. `valkey` shares forms, sessions, capacity, quotas and optional verification
 leases between replicas using the same endpoint and prefix. The browser backend
-is separate from the existing API-token store and the browser-SSO demo's state.
+is separate from the existing API-token store.
 
 ### Browser Backend and Limits
 
@@ -432,7 +400,7 @@ local configuration. Ordinary workspace tests are self-contained without Docker.
 ## Direct Username/Password Login and Shared Sessions
 
 Each browser-enabled `plain` provider is its own method, independent of other
-methods and SSO links. Only providers with a `browser` block are offered; other
+methods. Only providers with a `browser` block are offered; other
 providers in the same realm stay API-only. Invalid `browser` blocks, origins and
 TTLs fail startup before stores are created. The existing CLI/API Basic authentication behavior is unchanged.
 
@@ -472,9 +440,6 @@ ui:
     session_ttl_seconds: 300
     backend:
       type: memory
-  sso:
-    - label: Continue with SSO
-      start_url: https://app.example.org/oauth2/start?rd=%2Faccount
 ```
 
 `browser_session` contains the shared origin, lifetimes, backend and limits for
@@ -575,9 +540,8 @@ see [LDAP limits](augmenters.md#ldap-result-and-cache-limits). These are
 application-data limits, not an end-to-end hard memory guarantee for the LDAP
 transport decoder, its internal queues, or trusted configuration.
 
-The chooser stays visible when more than one browser method or any SSO link is
-configured, even when already signed in. With exactly one method and no SSO links,
-`/login` redirects a signed-in browser to the account view. Successful sign-in
+The chooser stays visible when more than one browser method is configured, even
+when already signed in. With exactly one method, `/login` redirects a signed-in browser to the account view. Successful sign-in
 rotates only the submitting browser's previous session; other sessions remain
 independent. No browser method route mints a JWT, treats the cookie as API bearer
 authentication, or signs the user into a different-origin application.
@@ -593,14 +557,9 @@ different-origin Aviso application. Application session/callback handoff is a
 separate, registered-client integration; no generic JWT redirect is implied.
 
 The page does not issue codes or act on request `redirect_uri`/`return_to`
-parameters. Selecting a configured SSO link navigates to the client that starts
-authorization and owns its callback. The isolated browser SSO demo under
-`authotron/examples/browser-sso` uses Keycloak, OAuth2-proxy and ephemeral Valkey
-sessions; it does not use Auth-O-Tron's token store or connect to real Aviso data.
-Its renderer tests do not establish live ingress TLS/forwarded-header behavior,
-the proxy-native identity endpoint's response headers, or callback/refresh
-acceptance. Those checks remain deployment prerequisites, not guarantees supplied
-by rendering Kubernetes objects.
+parameters. The disposable Keycloak realm under `authotron/examples/browser-sso`
+is offered by the login playground as an [OpenID Connect method](oidc.md); it
+connects to no real Aviso data.
 
 ## Endpoints and Image Requirement
 

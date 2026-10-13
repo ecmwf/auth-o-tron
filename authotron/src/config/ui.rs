@@ -12,7 +12,7 @@ use http::Uri;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Controls branding, trusted SSO links, and the shared direct-login session.
+/// Controls branding and the shared direct-login session.
 ///
 /// Direct browser login methods are declared by `browser` blocks on `plain`
 /// and `ecmwf-api` providers and by OpenID Connect methods in `oidc`.
@@ -21,7 +21,6 @@ use serde::{Deserialize, Serialize};
 pub struct UiConfig {
     pub enabled: bool,
     pub branding: BrandingConfig,
-    pub sso: Vec<BrowserSignInAction>,
     /// OpenID Connect sign-in methods, offered after provider methods.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[schemars(length(max = 16))]
@@ -505,25 +504,6 @@ impl UiConfig {
     }
 }
 
-/// An operator-configured entry into an application's browser login flow.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct BrowserSignInAction {
-    #[serde(deserialize_with = "nonempty_label")]
-    pub label: String,
-    pub start_url: UiUrl,
-}
-
-fn nonempty_label<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
-    let label = String::deserialize(deserializer)?;
-    if label.trim().is_empty() {
-        return Err(serde::de::Error::custom(
-            "sign-in action label must not be blank",
-        ));
-    }
-    Ok(label)
-}
-
 /// Application-owned branding; all text is rendered as escaped plain text.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(default)]
@@ -545,7 +525,7 @@ impl Default for BrandingConfig {
     }
 }
 
-/// A URL for escaped UI image and navigation attributes.
+/// A URL for escaped UI attributes, such as the logo, and the browser public origin.
 ///
 /// HTTPS URLs and root-relative paths such as `/assets/aviso.png` are accepted.
 /// Scheme-relative URLs such as `//other.example/logo.png`, script URLs such
@@ -1031,7 +1011,8 @@ mod tests {
         assert!(config.branding.logo_url.is_none());
         assert!(config.branding.title.is_none());
         assert!(config.branding.description.is_none());
-        assert!(config.sso.is_empty());
+        // SSO navigation links were removed; OIDC methods replace them.
+        assert!(serde_json::from_str::<UiConfig>(r#"{"sso": []}"#).is_err());
     }
 
     #[test]
@@ -1052,7 +1033,6 @@ mod tests {
     fn custom_branding_round_trips_as_plain_strings() {
         let json = serde_json::json!({
             "enabled": true,
-            "sso": [],
             "branding": {
                 "application_name": "Aviso",
                 "logo_url": "https://aviso.example.org/assets/logo.png",
@@ -1168,7 +1148,6 @@ mod tests {
             "UiConfig",
             "BrandingConfig",
             "UiUrl",
-            "BrowserSignInAction",
             "ProviderBrowserConfig",
             "BrowserSessionConfig",
             "BrowserBackendConfig",
@@ -1185,23 +1164,5 @@ mod tests {
             checked_in["$defs"]["ConfigV2"]["properties"]["ui"],
             generated["$defs"]["ConfigV2"]["properties"]["ui"]
         );
-    }
-
-    #[test]
-    fn browser_sign_in_actions_require_safe_urls_and_nonempty_labels() {
-        let action = serde_json::json!({
-            "label": "Continue with demo SSO",
-            "start_url": "https://app.example.org/oauth2/start?rd=%2Faccount"
-        });
-        let parsed: BrowserSignInAction = serde_json::from_value(action.clone()).unwrap();
-        assert_eq!(parsed.label, "Continue with demo SSO");
-        for invalid in [
-            serde_json::json!({"label": " ", "start_url": "/oauth2/start"}),
-            serde_json::json!({"label": "SSO", "start_url": "javascript:alert(1)"}),
-            serde_json::json!({"label": "SSO", "start_url": "//other.example"}),
-            serde_json::json!({"label": "SSO", "start_url": "/oauth2/start", "redirect_uri": "https://other.example"}),
-        ] {
-            assert!(serde_json::from_value::<BrowserSignInAction>(invalid).is_err());
-        }
     }
 }

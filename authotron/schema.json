@@ -784,7 +784,7 @@
       }
     },
     "UiConfig": {
-      "description": "Controls branding, trusted SSO links, and the shared direct-login session.\n\nDirect browser login methods are declared by `browser` blocks on `plain`\nand `ecmwf-api` providers and by OpenID Connect methods in `oidc`.",
+      "description": "Controls branding and the shared direct-login session.\n\nDirect browser login methods are declared by `browser` blocks on `plain`\nand `ecmwf-api` providers and by OpenID Connect methods in `oidc`.",
       "type": "object",
       "properties": {
         "enabled": {
@@ -799,13 +799,6 @@
             "title": null,
             "description": null
           }
-        },
-        "sso": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/BrowserSignInAction"
-          },
-          "default": []
         },
         "oidc": {
           "description": "OpenID Connect sign-in methods, offered after provider methods.",
@@ -864,25 +857,8 @@
       }
     },
     "UiUrl": {
-      "description": "A URL for escaped UI image and navigation attributes.\n\nHTTPS URLs and root-relative paths such as `/assets/aviso.png` are accepted.\nScheme-relative URLs such as `//other.example/logo.png`, script URLs such\nas `javascript:alert(1)`, and URLs containing credentials are rejected.",
+      "description": "A URL for escaped UI attributes, such as the logo, and the browser public origin.\n\nHTTPS URLs and root-relative paths such as `/assets/aviso.png` are accepted.\nScheme-relative URLs such as `//other.example/logo.png`, script URLs such\nas `javascript:alert(1)`, and URLs containing credentials are rejected.",
       "type": "string"
-    },
-    "BrowserSignInAction": {
-      "description": "An operator-configured entry into an application's browser login flow.",
-      "type": "object",
-      "properties": {
-        "label": {
-          "type": "string"
-        },
-        "start_url": {
-          "$ref": "#/$defs/UiUrl"
-        }
-      },
-      "additionalProperties": false,
-      "required": [
-        "label",
-        "start_url"
-      ]
     },
     "OidcMethodConfig": {
       "description": "One identity provider offered as a browser sign-in method. The redirect URI\nregistered at the provider is `<public_origin>/login/method/<id>/callback`.",
@@ -1730,8 +1706,7 @@
               "logo_url": null,
               "title": null,
               "description": null
-            },
-            "sso": []
+            }
           }
         },
         "oauth": {

@@ -40,7 +40,6 @@ fn config(uri: &str, enabled: bool) -> ConfigV2 {
         "jwt": {"iss": "public-test", "exp": 300, "secret": "public-test-only-secret"},
         "logging": {"level": "warn", "format": "console"},
         "ui": {"enabled": enabled, "branding": {"application_name": "Public <Application>"},
-            "sso": [{"label": "Continue with SSO", "start_url": "/sso/start"}],
             "browser_session": {"public_origin": ORIGIN, "backend": {"type": "memory"}}}
     })).unwrap()
 }
@@ -306,7 +305,6 @@ async fn verified_login_uses_uncached_query_rotated_secure_cookie_and_safe_ident
         .unwrap();
     let login = text(get(app.clone(), "/login").await).await;
     assert!(login.contains("href=\"/login/method/ecmwf-api-key\""));
-    assert!(login.contains("href=\"/sso/start\""));
     let mut previous = None;
     for _ in 0..2 {
         let (form_cookie, csrf) = transaction(app.clone()).await;
@@ -376,10 +374,9 @@ async fn verified_login_uses_uncached_query_rotated_secure_cookie_and_safe_ident
                 .unwrap(),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let chooser = text(response).await;
-        assert!(chooser.contains("href=\"/login/method/ecmwf-api-key\""));
-        assert!(chooser.contains("href=\"/sso/start\""));
+        // With a single browser method, a signed-in browser goes to its identity view.
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers()[header::LOCATION], "/login/account");
         let mut api_request = Request::get("/authenticate")
             .header(
                 header::COOKIE,
@@ -803,7 +800,7 @@ async fn both_direct_flows_store_augmented_identities_and_render_only_safe_escap
         .await
         .unwrap();
     let chooser = text(get(app.clone(), "/login").await).await;
-    for link in [BASIC, PATH, "/sso/start"] {
+    for link in [BASIC, PATH] {
         assert!(chooser.contains(link));
     }
     let mut sessions = Vec::new();
@@ -1301,6 +1298,7 @@ async fn browser_configuration_requires_session_unique_labels_and_is_opt_in() {
         json!({"basic": {"provider_name": "Local"}}),
         json!({"ecmwf_api_key": {"provider_name": "ECMWF API Provider"}}),
         json!({"sign_in_actions": []}),
+        json!({"sso": []}),
     ] {
         assert!(serde_json::from_value::<authotron::config::UiConfig>(legacy).is_err());
     }
@@ -1325,15 +1323,10 @@ async fn multiple_plain_methods_verify_only_their_own_users_and_bind_forms() {
     );
     let (app, state) = startup::build_app(Arc::new(cfg)).await.unwrap();
     let chooser = text(get(app.clone(), "/login").await).await;
-    let order: Vec<usize> = [
-        "ECMWF API key",
-        "Local account",
-        "Other accounts",
-        "Continue with SSO",
-    ]
-    .iter()
-    .map(|label| chooser.find(&format!(">{label}</a>")).unwrap())
-    .collect();
+    let order: Vec<usize> = ["ECMWF API key", "Local account", "Other accounts"]
+        .iter()
+        .map(|label| chooser.find(&format!(">{label}</a>")).unwrap())
+        .collect();
     assert!(order.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(chooser.contains(&format!("href=\"{OTHER}\" data-login-dialog=\"method\"")));
     for (path, password, accepted) in [
@@ -1933,10 +1926,8 @@ async fn cancelled_augmentation_releases_all_admission_permits_without_sessions(
 }
 
 #[tokio::test]
-async fn basic_exhausts_shared_verification_quota_and_both_direct_chooser_stays_visible_without_sso()
- {
-    let mut cfg = combined_config("http://127.0.0.1:1");
-    cfg.ui.sso.clear();
+async fn basic_exhausts_shared_verification_quota_and_both_direct_chooser_stays_visible() {
+    let cfg = combined_config("http://127.0.0.1:1");
     let (app, _) = startup::build_app(Arc::new(cfg)).await.unwrap();
     let mut sid = String::new();
     for _ in 0..60 {

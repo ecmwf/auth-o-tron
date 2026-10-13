@@ -321,50 +321,11 @@ async fn posting_to_the_preview_cannot_start_authentication() {
     assert!(!response.headers().contains_key("authorization"));
 }
 
-#[tokio::test]
-async fn configured_sign_in_action_is_escaped_and_ignores_request_destinations() {
-    let (app, _) = startup::build_app(Arc::new(config(json!({
-        "enabled": true,
-        "sso": [{
-            "label": "Continue <with> SSO",
-            "start_url": "https://app.example.org/oauth2/start?rd=%2Faccount&mode=demo"
-        }]
-    }))))
-    .await
-    .unwrap();
-    let response = get(
-        app,
-        "/login?start_url=https://untrusted.example&redirect_uri=https://untrusted.example",
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(!response.headers().contains_key("location"));
-    assert!(!response.headers().contains_key("set-cookie"));
-    let html = body(response).await;
-    assert!(html.contains("Continue &lt;with&gt; SSO"));
-    assert!(
-        html.contains("href=\"https://app.example.org/oauth2/start?rd=%2Faccount&amp;mode=demo\"")
-    );
-    assert!(html.contains("Browser sign-in"));
-    assert!(!html.contains("UI preview"));
-    assert!(!html.contains("Sign-in unavailable"));
-    assert!(!html.contains("untrusted.example"));
-    assert!(!html.contains("<form"));
-    assert!(!html.contains("<input"));
-    assert!(!html.contains("<script"));
-    assert!(!html.contains("<dialog"));
-    assert!(!html.contains("data-login-dialog"));
-}
-
 fn direct_config() -> ConfigV2 {
     let mut config = config(json!({
         "enabled": true,
         "branding": {"application_name": "Aviso", "logo_url": "/static/aviso-logo.png"},
-        "browser_session": {"public_origin": "https://login.example.test", "backend": {"type": "memory"}},
-        "sso": [
-            {"label": "Continue with SSO", "start_url": "https://app.example.test/sso/start"},
-            {"label": "Configured method link", "start_url": "/login/method/password"}
-        ]
+        "browser_session": {"public_origin": "https://login.example.test", "backend": {"type": "memory"}}
     }));
     config.providers = [
         json!({"type": "plain", "name": "local", "realm": "aviso",
@@ -396,10 +357,7 @@ async fn direct_chooser_marks_only_direct_links_and_does_not_create_form_transac
     assert!(html.contains("<script src=\"/static/login.js\" defer></script>"));
     let first = "<a class=\"login-action\" href=\"/login/method/password\" data-login-dialog=\"method\">Username &amp; &lt;password&gt;</a>";
     let second = "<a class=\"login-action\" href=\"/login/method/ecmwf-api-key\" data-login-dialog=\"method\">ECMWF API key</a>";
-    let sso = "<a class=\"login-action\" href=\"https://app.example.test/sso/start\">Continue with SSO</a>";
-    let configured =
-        "<a class=\"login-action\" href=\"/login/method/password\">Configured method link</a>";
-    let positions: Vec<usize> = [first, second, sso, configured]
+    let positions: Vec<usize> = [first, second]
         .iter()
         .map(|link| html.find(link).unwrap_or_else(|| panic!("missing {link}")))
         .collect();
