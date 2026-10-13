@@ -154,6 +154,16 @@ class RendererTests(unittest.TestCase):
                 if isinstance(node, ast.Constant) and isinstance(node.value, str):
                     self.assertNotIn("valkey@sha256:", node.value)
 
+    def test_keycloak_pin_matches_the_server_interoperability_fixture(self):
+        fixture = (
+            Path(renderer.__file__).parents[2]
+            / "src/routes/oidc_login/keycloak_tests.rs"
+        )
+        self.assertIn(
+            f'const KEYCLOAK_IMAGE: &str = "{renderer.IMAGES["keycloak"]}";',
+            fixture.read_text(),
+        )
+
     def test_profile_is_immutable_and_derives_all_callback_uses(self):
         with self.assertRaises(FrozenInstanceError):
             self.profile.app_host = "other.example.org"
