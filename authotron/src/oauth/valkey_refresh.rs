@@ -652,15 +652,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ttl as u64, now + 600_000);
-        // A rotation sent on a closed connection runs once; a second run would answer
-        // it again as a repetition.
+        // A rotation sent on a closed connection runs once; a second run, as after a
+        // lost reply, finds it applied and reports it rotated, not repeated.
         close_other_connections(&a).await;
-        assert_eq!(
-            b.rotate(&[1; 32], &rotation([2; 32], &grant(), ceiling), now + 1)
-                .await
-                .unwrap(),
-            Rotated::Rotated
-        );
+        for _ in 0..2 {
+            assert_eq!(
+                b.rotate(&[1; 32], &rotation([2; 32], &grant(), ceiling), now + 1)
+                    .await
+                    .unwrap(),
+                Rotated::Rotated
+            );
+        }
         let ttl: i64 = a
             .connection
             .query(redis::cmd("PEXPIRETIME").arg(&family_key))

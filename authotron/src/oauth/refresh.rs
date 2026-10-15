@@ -267,6 +267,7 @@ pub struct Repetition {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Rotated {
+    /// Applied now, or by an earlier run of this very rotation whose reply was lost.
     Rotated,
     /// The presented token is the previous one, rotated by a concurrent refresh or an
     /// earlier run of this rotation, within the retry window and cap.

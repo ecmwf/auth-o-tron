@@ -10,9 +10,10 @@
 -- Replies that end families append each one's id, grant and sealed upstream grant (empty
 -- unless coupled), for the audit log and upstream revocation; families removed after
 -- expiry are not reported.
--- A run resent after a lost reply never applies twice: rotate finds its own rotation and
--- answers it again ('repeated'), issue finds the token key present, set_upstream
--- recognises its own replacement, and revocation is idempotent.
+-- A run resent after a lost reply never applies twice: rotate finds its own rotation, the
+-- presented token previous and the next one current, and reports it 'rotated', issue
+-- finds the token key present, set_upstream recognises its own replacement, and
+-- revocation is idempotent.
 local token = KEYS[1]
 local op, prefix, now, window_max = ARGV[1], ARGV[2], tonumber(ARGV[3]), tonumber(ARGV[4])
 local function integer(n) return n and n > 0 and n <= 253402300799999 and n % 1 == 0 end
@@ -210,7 +211,10 @@ if op == 'rotate' then
     if not integer(idle) or not integer(ceiling) or idle > ceiling or not integer(keep) or not count(window) or not count(cap) then
         return {'unavailable'}
     end
-    if previous == hash then return repeated(window, cap) end
+    if previous == hash then
+        if current == next_hash then return {'rotated'} end
+        return repeated(window, cap)
+    end
     if current ~= hash or now >= ceiling then return {'stale'} end
     if redis.call('EXISTS', next_token) == 1 then return {'unavailable'} end
     local absolute = math.min(tonumber(redis.call('HGET', key, 'absolute')), ceiling)

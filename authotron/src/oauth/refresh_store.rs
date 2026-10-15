@@ -269,6 +269,10 @@ impl MemoryRefreshStore {
             .as_ref()
             .is_some_and(|previous| previous.hash == *presented)
         {
+            // This very rotation, run again after a lost reply, is already applied.
+            if family.current == next {
+                return Ok(Rotated::Rotated);
+            }
             return Ok(family
                 .repeat(presented, retry_window_ms, now_ms)
                 .map_or(Rotated::Stale, Rotated::Repeated));
@@ -519,9 +523,19 @@ mod tests {
             }
         };
         assert_eq!(rotate([1; 32], [2; 32], NOW + 1).await, Rotated::Rotated);
+        // The same rotation run again, as after a lost reply, is reported applied, also
+        // without a retry window, and is no repetition.
+        let fixture = grant();
+        let resent = Rotation {
+            retry_window_ms: 0,
+            ..rotation([2; 32], &fixture, NOW + 3_600_000)
+        };
+        assert_eq!(
+            store.rotate(&[1; 32], &resent, NOW + 2).await.unwrap(),
+            Rotated::Rotated
+        );
         // The previous token answers the latest rotation again, with its sealed token,
         // within the retry window and at most MAX_RETRIES_PER_ROTATION times.
-        let fixture = grant();
         let closed = Rotation {
             retry_window_ms: 1,
             ..rotation([3; 32], &fixture, NOW + 3_600_000)

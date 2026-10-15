@@ -650,10 +650,9 @@ restart, the first request reconnects transparently: the first command on each r
 finds its connection closed, reconnects and is sent once more, within
 `operation_timeout_ms`. Requests that arrive while Valkey is still down return 503 and
 leave the presented refresh token valid. The client cannot tell an unsent command from
-one whose reply was lost, so a rotation can run twice; the second run finds the token
-already rotated and answers it again with the token the first run stored, like a
-retry, unless the client's `retry_window_seconds` is 0. A rotation is never applied
-twice. Timeouts are never resent.
+one whose reply was lost, so a rotation can run twice; the second run finds its own
+rotation applied and reports it done, so the refresh succeeds with the token it
+generated. A rotation is never applied twice. Timeouts are never resent.
 
 A Valkey node can also fail without closing its connections: a crashed host, a
 network partition or dropped packets leave commands unanswered. A command without a
