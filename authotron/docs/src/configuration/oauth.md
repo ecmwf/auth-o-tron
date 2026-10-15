@@ -359,6 +359,50 @@ application replicas behind one login endpoint. Restricted backend ACLs must per
 `ZRANGE` as well as the existing sorted-set/hash operations, with access to all keys
 beneath the configured OAuth transaction prefix, including its client indexes.
 
+## Identity claims for resource servers
+
+By default an access token's `roles` lists only the roles that its granted scopes
+require: it says what the grant allows, not who the user is. A resource server that
+decides from the user's realm and roles itself, for example which data each realm or
+role may read, can ask for them per resource:
+
+```yaml
+oauth:
+  resources:
+    - resource: https://aviso-mcp.example.org/mcp
+      allowed_realms: [ecmwf, demo-sso]
+      scopes:
+        - name: aviso:read
+          required_roles: []
+      identity_claims:
+        roles: [aviso-reader] # or ["*"]: every role of the user
+```
+
+Access tokens for that resource then carry two more claims:
+
+- `realm`: the user's realm, a string.
+- `roles`: the user's roles after augmentation that `identity_claims.roles` names,
+  compared exactly, sorted and unique, instead of the required roles; `["*"]` alone
+  names every role. For a family coupled to an OIDC offline session these come from
+  the latest upstream refresh, through the method's `role_map`.
+
+Both are present whenever the resource opted in; `roles` may be empty. The list holds 1
+to 64 names of 1 to 128 bytes, without control characters or surrounding whitespace,
+and `*` only alone. A token carries at most 64 roles, since identities with more are
+refused. Scope checks are unchanged, and each refresh computes the claims again from
+the roles it re-checked: a role removed at the provider or by augmentation is gone at
+the next refresh, while tokens already issued keep theirs until `exp`. Without
+`identity_claims`, tokens are unchanged and carry no `realm`.
+
+aviso-server reads these claims with `mcp.identity.source: token_claims`: it takes the
+realm and roles from the validated access token instead of looking the user up.
+
+**Trust.** The resource server trusts this issuer for `realm` and `roles` as it does for
+the token itself: whoever controls the signing keys, or the methods, augmenters and
+role maps that grant roles, decides what the resource server sees. Review those as part
+of the resource server's access policy, and list only the roles it needs, so that
+tokens disclose no more about the user than that.
+
 ## Refresh tokens
 
 Refresh tokens are opt-in per client:
@@ -689,7 +733,8 @@ The HTTP token controller always uses atomic redemption then
 atomic code-redemption proof. The issuer binds
 the exact cached issuer and rechecks current grant eligibility before signing RS256
 with `typ: at+jwt` and active kid. Claims include iss/sub/aud/iat/exp/jti/client_id/scope
-and only the required-role union, with no username/email/credentials or unrelated roles.
+and only the required-role union, with no username/email/credentials or unrelated roles,
+unless the resource asks for [identity claims](#identity-claims-for-resource-servers).
 Resource servers must enforce RS256, at+jwt, exact issuer/audience and current validity.
 The MCP resource server owns its protected-resource metadata and access-token validation.
 
