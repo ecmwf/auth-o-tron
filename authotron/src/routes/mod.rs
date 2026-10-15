@@ -12,6 +12,7 @@
 //! Health is registered on both so K8s probes and external uptime monitors
 //! can reach it regardless of which port they target.
 
+mod account;
 mod augmenters;
 mod auth;
 mod browser_login;
