@@ -26,6 +26,9 @@ use tracing::Instrument;
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(1);
 /// Failed connection attempts are logged at most once per interval.
 const ATTEMPT_LOG_INTERVAL: Duration = Duration::from_secs(60);
+/// Least time from a failed connection attempt to the next, so that commands against
+/// an unreachable Valkey do not each open a connection.
+const MIN_ATTEMPT_GAP: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConnectionError {
@@ -33,9 +36,9 @@ pub(crate) enum ConnectionError {
     Unavailable,
 }
 
-/// One connection attempt, shared by every command that waits for it; `None` if it
-/// failed.
-type Attempt = Shared<BoxFuture<'static, Option<MultiplexedConnection>>>;
+/// One connection attempt, shared by every command that waits for it; when it failed,
+/// the time it did.
+type Attempt = Shared<BoxFuture<'static, Result<MultiplexedConnection, Instant>>>;
 
 /// The connection in use and its generation, which each replacement increments.
 struct Current {
@@ -53,21 +56,25 @@ struct Connector {
 }
 
 impl Connector {
-    /// Starts connecting at once, so the attempt completes even if no command waits,
-    /// within the span of the command that started it. A failure is logged by its
-    /// error kind only, never the address or credentials.
+    /// Starts connecting, not before `not_before`, so the attempt completes even if no
+    /// command waits, within the span of the command that started it. A failure is
+    /// logged by its error kind only, never the address or credentials.
     fn attempt(
         client: &redis::Client,
         settings: &redis::AsyncConnectionConfig,
         log_key: &str,
+        not_before: Option<Instant>,
     ) -> Attempt {
         let (client, settings, log_key) = (client.clone(), settings.clone(), log_key.to_owned());
         let attempt = async move {
+            if let Some(at) = not_before {
+                tokio::time::sleep_until(at).await;
+            }
             let error = match client
                 .get_multiplexed_async_connection_with_config(&settings)
                 .await
             {
-                Ok(connection) => return Some(connection),
+                Ok(connection) => return Ok(connection),
                 Err(error) => error,
             };
             if let Some(suppressed) = should_emit(&log_key, ATTEMPT_LOG_INTERVAL) {
@@ -79,7 +86,7 @@ impl Connector {
                     "Valkey connection attempt failed"
                 );
             }
-            None
+            Err(Instant::now())
         }
         .instrument(tracing::Span::current())
         .boxed()
@@ -91,14 +98,15 @@ impl Connector {
         let current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
         (current.generation, current.attempt.clone())
     }
-    /// Replaces the connection of `generation` with a new attempt, unless another
-    /// command has replaced it already. The old connection closes once no command
-    /// uses it any more.
-    fn replace(&self, generation: u64) {
+    /// Replaces the connection of `generation` with a new attempt, not before
+    /// `not_before`, unless another command has replaced it already. The old
+    /// connection closes once no command uses it any more.
+    fn replace(&self, generation: u64, not_before: Option<Instant>) {
         let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
         if current.generation == generation {
             current.generation += 1;
-            current.attempt = Self::attempt(&self.client, &self.settings, &self.log_key);
+            current.attempt =
+                Self::attempt(&self.client, &self.settings, &self.log_key, not_before);
         }
     }
     /// Keeps the connection of `generation` if it answers a PING within
@@ -120,7 +128,7 @@ impl Connector {
             )
             .await;
             if !matches!(answer, Ok(Ok(_))) {
-                connector.replace(generation);
+                connector.replace(generation, None);
             }
         });
     }
@@ -137,12 +145,15 @@ impl Connector {
             let connection = timeout_at(deadline, attempt)
                 .await
                 .map_err(|_| Unavailable)?;
-            let Some(mut connection) = connection else {
-                // After the last try, the next command starts the next attempt.
-                if !last {
-                    self.replace(generation);
+            let mut connection = match connection {
+                Ok(connection) => connection,
+                Err(failed_at) => {
+                    // After the last try, the next command starts the next attempt.
+                    if !last {
+                        self.replace(generation, Some(failed_at + MIN_ATTEMPT_GAP));
+                    }
+                    continue;
                 }
-                continue;
             };
             let Ok(result) = timeout_at(deadline, command.query_async(&mut connection)).await
             else {
@@ -151,10 +162,10 @@ impl Connector {
             };
             match result {
                 Ok(value) => return Ok(value),
-                Err(error) if closed(&error) && !last => self.replace(generation),
+                Err(error) if closed(&error) && !last => self.replace(generation, None),
                 Err(error) => {
                     if error.is_unrecoverable_error() && !closed(&error) {
-                        self.replace(generation);
+                        self.replace(generation, None);
                     }
                     return Err(Unavailable);
                 }
@@ -173,6 +184,15 @@ pub(crate) struct ValkeyConnection {
 
 impl ValkeyConnection {
     pub(crate) async fn connect(settings: &BrowserBackendConfig) -> Result<Self, ConnectionError> {
+        let backend = Self::start(settings)?;
+        let (_, attempt) = backend.connector.current();
+        attempt.await.map_err(|_| ConnectionError::Unavailable)?;
+        backend.query::<String>(&redis::cmd("PING")).await?;
+        Ok(backend)
+    }
+
+    /// Validates `settings` and starts the first connection attempt without waiting.
+    fn start(settings: &BrowserBackendConfig) -> Result<Self, ConnectionError> {
         use ConnectionError::*;
         settings.validate().map_err(|_| Configuration)?;
         let BrowserBackendConfig::Valkey {
@@ -192,29 +212,27 @@ impl ValkeyConnection {
         let settings = redis::AsyncConnectionConfig::new()
             .set_connection_timeout(Duration::from_millis(*connect_timeout_ms));
         let log_key = format!("valkey.connection.attempt_failed:{key_prefix}");
-        let attempt = Connector::attempt(&client, &settings, &log_key);
-        let backend = Self {
+        let attempt = Connector::attempt(&client, &settings, &log_key, None);
+        Ok(Self {
             connector: Arc::new(Connector {
                 client,
                 settings,
                 log_key,
                 current: Mutex::new(Current {
                     generation: 0,
-                    attempt: attempt.clone(),
+                    attempt,
                 }),
             }),
             timeout: Duration::from_millis(*operation_timeout_ms),
-        };
-        attempt.await.ok_or(Unavailable)?;
-        backend.query::<String>(&redis::cmd("PING")).await?;
-        Ok(backend)
+        })
     }
 
     /// Sends one command within the operation deadline.
     ///
     /// If the connection turns out to be closed (Valkey restart, `CLIENT KILL`, idle
-    /// timeout) or its connection attempt failed, a new attempt starts at once and the
-    /// command is sent once more on it, within the same deadline. The client reports a
+    /// timeout), a new attempt starts at once and the command is sent once more on it,
+    /// within the same deadline; so it is when the connection attempt failed, but the
+    /// next attempt starts no sooner than 200 ms after that failure. The client reports a
     /// command that was never written and one whose reply was lost with the same
     /// error, so the resend can run a command twice. Every store tolerates that: reads
     /// and revocations are idempotent, and one-use transitions (code issue and
@@ -314,6 +332,41 @@ mod tests {
         };
         *url = "rediss://valkey.example.org:6379/0".into();
         assert!(config.validate().is_ok());
+    }
+
+    #[tokio::test]
+    async fn failed_connection_attempts_are_at_least_200_ms_apart() {
+        // Accepts and drops every connection, so every attempt fails at once.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = accepted.clone();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(socket);
+            }
+        });
+        let mut config = settings();
+        let BrowserBackendConfig::Valkey {
+            url, key_prefix, ..
+        } = &mut config
+        else {
+            unreachable!()
+        };
+        *url = format!("redis://{address}/0");
+        *key_prefix = "authotron:attempt-gap-test".into();
+        let connection = ValkeyConnection::start(&config).unwrap();
+        // A second of commands, sequential and concurrent, all failing.
+        let (ping, started) = (redis::cmd("PING"), Instant::now());
+        while started.elapsed() < Duration::from_secs(1) {
+            let commands = (0..4).map(|_| connection.query::<String>(&ping));
+            for result in futures::future::join_all(commands).await {
+                assert_eq!(result.err(), Some(ConnectionError::Unavailable));
+            }
+        }
+        let attempts = accepted.load(std::sync::atomic::Ordering::SeqCst);
+        assert!((2..=7).contains(&attempts), "{attempts} attempts");
     }
 
     #[tokio::test]

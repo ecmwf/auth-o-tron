@@ -667,7 +667,8 @@ current or rotated it, so the client's retry within its `retry_window_seconds`
 succeeds either way while fewer than three retries answered that rotation; with a
 window of 0, a rotated token is reuse and the user signs in again. Failed connection
 attempts are logged as `valkey.connection.attempt_failed` (WARN, error kind only), at
-most once a minute.
+most once a minute, and the next attempt waits at least 200 ms after a failed one, so
+requests against an unreachable Valkey do not each open a connection.
 
 A single Valkey is still a single point of failure. For production, choose a managed
 or replicated Valkey, or a future database backend, as an operations decision.
