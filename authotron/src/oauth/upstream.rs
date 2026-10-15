@@ -29,7 +29,7 @@ use crate::{
         upstream::{UpstreamBinding, UpstreamCipher, UpstreamGrant},
     },
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 use tracing::Instrument;
 use zeroize::Zeroizing;
@@ -269,6 +269,27 @@ impl OAuthRuntime {
         if let Err(audit) = upstream.queue(revocation) {
             audit.skipped(metrics);
         }
+    }
+
+    /// Revokes the sealed grant of `grant` at the provider and waits for the answer, at
+    /// most `timeout`, after which the revocation counts as failed. Nothing is queued,
+    /// for a command that ends before a queue would drain.
+    pub(super) async fn revoke_sealed_now(
+        &self,
+        grant: &RefreshGrant,
+        sealed: &str,
+        family: &str,
+        browser: &BrowserLoginState,
+        metrics: &Metrics,
+        timeout: Duration,
+    ) -> UpstreamTokenEvent {
+        let Some((_, revocation)) = self.revocation(grant, sealed, family, browser, metrics) else {
+            return UpstreamTokenEvent::RevocationSkipped;
+        };
+        let answer =
+            tokio::time::timeout(timeout, revocation.method.revoke(&revocation.refresh_token))
+                .await;
+        revocation.report(answer.unwrap_or(Err(OidcError::Unavailable)))
     }
 
     /// The revocation of the sealed grant of `grant`, or `None`, logged and counted as

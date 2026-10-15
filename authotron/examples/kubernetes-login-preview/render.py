@@ -79,6 +79,8 @@ SOURCE_FILES = (
     "authotron/src/models/mod.rs",
     "authotron/src/models/token.rs",
     "authotron/src/models/user.rs",
+    "authotron/src/oauth/admin.rs",
+    "authotron/src/oauth/admin/tests.rs",
     "authotron/src/oauth/audit.rs",
     "authotron/src/oauth/authentication.rs",
     "authotron/src/oauth/authorization.rs",

@@ -25,6 +25,8 @@ pub(crate) enum FamilyEnd {
     ClientRevoke,
     /// The user revoked the login on the account page.
     UserRevoke,
+    /// An operator revoked it with `authotron admin logins revoke`.
+    AdminRevoke,
     /// A rotated token was presented again.
     ReuseDetected,
     /// A newer sign-in of the same user exceeded the per-user family cap.
@@ -50,6 +52,7 @@ impl FamilyEnd {
         match self {
             Self::ClientRevoke => "client_revoke",
             Self::UserRevoke => "user_revoke",
+            Self::AdminRevoke => "admin_revoke",
             Self::ReuseDetected => "reuse_detected",
             Self::PerUserCap => "per_user_cap",
             Self::ClientDisabled => "client_disabled",
@@ -163,6 +166,7 @@ mod tests {
         let all = [
             (ClientRevoke, "client_revoke", false),
             (UserRevoke, "user_revoke", false),
+            (AdminRevoke, "admin_revoke", false),
             (ReuseDetected, "reuse_detected", true),
             (PerUserCap, "per_user_cap", false),
             (ClientDisabled, "client_disabled", false),
