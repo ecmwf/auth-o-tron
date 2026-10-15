@@ -635,17 +635,32 @@ must say so with `--all-users`. `list` prints client, method, realm, username, w
 login started, was last used (its latest refresh) and expires if unused and at the
 latest, and the family reference of the audit log, newest first and at most `--limit`
 rows (default 100, at most 10000); it never prints a token or a family id.
-`revoke --dry-run` prints the logins `revoke` would end. `revoke` ends them, then
-revokes the upstream grants of coupled families at the provider itself, eight at a
-time and waiting at most ten seconds for each answer, and prints how many logins
-ended and how the upstream revocations went: revoked, not supported by the provider,
-failed or timed out, or skipped because no configured key and method open the grant
-any more. A login that ended meanwhile is not counted. The command logs to standard
-error in the configured `logging` format and level, including the store's durability
-check of a server start, and writes its report to standard output. Its exit status is
-0 when done, 1 when it failed and 2 for invalid arguments; after a failure during
-`revoke`, run it again. With the Memory backend it fails: families live inside each
-server process, and restarting the server ends them all.
+`revoke --dry-run` prints the logins `revoke` would end. `revoke` prints them too,
+ends them, then revokes the upstream grants of coupled families at the provider
+itself, eight at a time and waiting at most ten seconds for each answer, and prints
+how many logins ended and how the upstream revocations went: revoked, not supported
+by the provider, failed or timed out, or skipped because no configured key and method
+open the grant any more. A login that ended meanwhile is not counted. The command
+writes its report to standard output and logs to standard error in the configured
+`logging` format and level, including the store's durability check of a server start;
+the `family_revoked` and `oauth.upstream.revocation_*` events of a revocation are
+logged at INFO even when the configured level is `warn` or `error`.
+
+**Keeping the record.** These lines go to the standard error of the `kubectl exec`
+session, not to the pod's log, so log collection does not see them. Keep them with
+the report, for example:
+
+```sh
+kubectl exec deploy/authotron -- /app/authotron admin logins revoke --realm ecmwf --username alice 2>&1 \
+  | tee "revoke-alice-$(date -u +%Y%m%dT%H%M%SZ).log"
+```
+
+Who ran the command is recorded by the Kubernetes API server's audit log, if enabled,
+as an `exec` into the pod; Auth-O-Tron does not know the operator.
+
+The exit status is 0 when done, 1 when it failed and 2 for invalid arguments; after a
+failure during `revoke`, run it again. With the Memory backend it fails: families live
+inside each server process, and restarting the server ends them all.
 
 **Cost.** With `--username`, the command reads that user's family index only. Without,
 nothing indexes families by realm or client, so it scans: one

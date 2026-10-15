@@ -35,6 +35,8 @@ use tracing::Instrument;
 use zeroize::Zeroizing;
 
 const REVOCATION_QUEUE: usize = 256;
+/// The log target of this module's upstream revocation events.
+pub(super) const LOG_TARGET: &str = module_path!();
 
 /// Whose upstream grant a revocation ends, for its outcome log line.
 pub(crate) struct RevocationAudit {

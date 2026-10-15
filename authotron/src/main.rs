@@ -11,7 +11,7 @@
 use authotron::admin;
 use authotron::config::{load_config, print_schema};
 use authotron::startup;
-use authotron::utils::logger::{init_logging, init_logging_to_stderr};
+use authotron::utils::logger::init_logging;
 use std::env;
 use std::sync::Arc;
 use tracing::error;
@@ -54,7 +54,7 @@ async fn run_admin(args: &[String]) -> i32 {
         }
     };
     let config = load_config();
-    init_logging_to_stderr(&config.logging);
+    admin::init_logging(&config.logging);
     match admin::run(&config, &command, &mut std::io::stdout()).await {
         Ok(()) => 0,
         Err(error) => {

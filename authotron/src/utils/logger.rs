@@ -145,16 +145,32 @@ where
 
 /// Logs to standard output, as the server does.
 pub fn init_logging(logging_config: &LoggingConfig) {
-    init(logging_config, std::io::stdout);
+    init(logging_config, std::io::stdout, &[]);
 }
 
 /// Logs in the same format and at the same level to standard error, so that standard
-/// output carries only a command's own report.
-pub fn init_logging_to_stderr(logging_config: &LoggingConfig) {
-    init(logging_config, std::io::stderr);
+/// output carries only a command's own report; events of `at_least_info`, module paths
+/// such as `authotron::oauth::audit`, are logged at INFO even with a WARN or ERROR
+/// level.
+pub fn init_logging_to_stderr(logging_config: &LoggingConfig, at_least_info: &[&str]) {
+    init(logging_config, std::io::stderr, at_least_info);
 }
 
-fn init<W>(logging_config: &LoggingConfig, writer: W)
+/// The configured `level` for every target, but at least INFO for `at_least_info`.
+fn filter(level: LevelFilter, at_least_info: &[&str]) -> EnvFilter {
+    let floor = level.max(LevelFilter::INFO);
+    at_least_info.iter().fold(
+        EnvFilter::default().add_directive(level.into()),
+        |filter, target| {
+            let directive = format!("{target}={floor}")
+                .parse()
+                .expect("a module path and a level form a directive");
+            filter.add_directive(directive)
+        },
+    )
+}
+
+fn init<W>(logging_config: &LoggingConfig, writer: W, at_least_info: &[&str])
 where
     W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
 {
@@ -173,8 +189,7 @@ where
         }
     };
 
-    // This can be used to allow env-based overrides, plus the default:
-    let filter_layer = EnvFilter::default().add_directive(level_filter.into());
+    let filter_layer = filter(level_filter, at_least_info);
 
     match logging_config.format.to_lowercase().as_str() {
         "json" => {
@@ -204,6 +219,50 @@ where
                 .with(filter_layer)
                 .with(fmt::layer().with_writer(writer).pretty())
                 .init();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn listed_targets_log_info_whatever_the_level() {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let writer = {
+            let lines = Arc::clone(&lines);
+            move || SharedWriter(Arc::clone(&lines))
+        };
+        let subscriber = tracing_subscriber::registry()
+            .with(filter(LevelFilter::WARN, &["authotron::oauth::audit"]))
+            .with(fmt::layer().with_writer(writer).without_time());
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "authotron::oauth::audit", "audit-info");
+            tracing::debug!(target: "authotron::oauth::audit", "audit-debug");
+            tracing::info!(target: "authotron::oauth::runtime", "other-info");
+            tracing::warn!(target: "authotron::oauth::runtime", "other-warn");
+        });
+        let output = String::from_utf8(lines.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("audit-info"));
+        assert!(output.contains("other-warn"));
+        assert!(!output.contains("audit-debug"));
+        assert!(!output.contains("other-info"));
+        // A more verbose level stays in force for them.
+        let filter = filter(LevelFilter::DEBUG, &["authotron::oauth::audit"]);
+        assert_eq!(filter.to_string(), "authotron::oauth::audit=debug,debug");
+    }
+
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 }

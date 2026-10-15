@@ -211,15 +211,21 @@ async fn disposable_valkey_the_admin_command_lists_dry_runs_and_revokes_a_realm(
         "logins revoke --realm idp --username alice --client cli",
     )
     .await;
-    assert!(none.starts_with("revoked 0 logins;"), "{none}");
+    let none: Vec<_> = none.lines().collect();
+    assert_eq!(none.len(), 2, "{none:?}");
+    assert!(none[0].starts_with("CLIENT  METHOD"));
+    assert!(none[1].starts_with("revoked 0 logins;"));
     assert!(!logs_contain("admin_revoke"));
 
+    // A revocation shows the logins it selected first, as the dry run did.
     let (result, revoked) = command(config, "logins revoke --realm idp --all-users").await;
     result.unwrap();
+    let (selected, summary) = revoked.trim_end().rsplit_once('\n').unwrap();
+    assert_eq!(selected, dry.trim_end().rsplit_once('\n').unwrap().0);
     assert_eq!(
-        revoked,
+        summary,
         "revoked 2 logins; upstream grants: 2 revoked at the provider, 0 not supported \
-         there, 0 failed, 0 skipped\n"
+         there, 0 failed, 0 skipped"
     );
     let mut sent = coupled.idp.state.revoked.lock().unwrap().clone();
     sent.sort();

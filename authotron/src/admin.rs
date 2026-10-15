@@ -12,14 +12,15 @@
 
 use crate::{
     browser::BrowserLoginState,
-    config::{ConfigV2, ui::BrowserBackendConfig},
+    config::{ConfigV2, LoggingConfig, ui::BrowserBackendConfig},
     metrics::Metrics,
     oauth::{
         admin::{AdminError, LoginFilter},
-        audit::family_ref,
+        audit::{self, family_ref},
         refresh::FamilySummary,
         runtime::OAuthRuntime,
     },
+    utils::logger,
 };
 use chrono::{DateTime, SecondsFormat};
 use std::{collections::BTreeSet, io::Write, sync::Arc};
@@ -167,8 +168,15 @@ async fn runtime(config: &ConfigV2) -> Result<Arc<OAuthRuntime>, String> {
     }
 }
 
-/// Runs `command` against the store of `config`, writing its report to `out`. Audit
-/// events go to the configured log as the server writes them.
+/// Logs to standard error in the configured format and level, but the events of ended
+/// families and upstream revocations at least at INFO: a revocation is always logged.
+pub fn init_logging(logging: &LoggingConfig) {
+    logger::init_logging_to_stderr(logging, &audit::TARGETS);
+}
+
+/// Runs `command` against the store of `config`, writing its report to `out`: the
+/// selected logins, then for `revoke` what it did. Audit events go to the log
+/// ([`init_logging`]).
 pub async fn run(config: &ConfigV2, command: &Command, out: &mut impl Write) -> Result<(), String> {
     let write = |error: std::io::Error| format!("cannot write the report: {error}");
     let filter = match command {
@@ -191,6 +199,7 @@ pub async fn run(config: &ConfigV2, command: &Command, out: &mut impl Write) -> 
             writeln!(out, "dry run: would revoke {} logins", found.len()).map_err(write)?;
         }
         _ => {
+            table(out, &found).map_err(write)?;
             let browser = BrowserLoginState::new(config)
                 .map_err(|error| format!("invalid browser sign-in configuration: {error}"))?;
             let revoked = runtime
