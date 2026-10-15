@@ -11,6 +11,7 @@ pub mod context;
 #[cfg(all(test, unix))]
 mod key_rotation_tests;
 pub mod keys;
+pub mod logins;
 pub mod rate_limit;
 pub mod records;
 pub mod refresh;

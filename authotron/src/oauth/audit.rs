@@ -23,6 +23,8 @@ use std::fmt::Write;
 pub(crate) enum FamilyEnd {
     /// The client revoked one of its tokens (RFC 7009).
     ClientRevoke,
+    /// The user revoked the login on the account page.
+    UserRevoke,
     /// A rotated token was presented again.
     ReuseDetected,
     /// A newer sign-in of the same user exceeded the per-user family cap.
@@ -47,6 +49,7 @@ impl FamilyEnd {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::ClientRevoke => "client_revoke",
+            Self::UserRevoke => "user_revoke",
             Self::ReuseDetected => "reuse_detected",
             Self::PerUserCap => "per_user_cap",
             Self::ClientDisabled => "client_disabled",
@@ -153,6 +156,7 @@ mod tests {
         use FamilyEnd::*;
         let all = [
             (ClientRevoke, "client_revoke", false),
+            (UserRevoke, "user_revoke", false),
             (ReuseDetected, "reuse_detected", true),
             (PerUserCap, "per_user_cap", false),
             (ClientDisabled, "client_disabled", false),

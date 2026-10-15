@@ -88,6 +88,7 @@ SOURCE_FILES = (
     "authotron/src/oauth/context.rs",
     "authotron/src/oauth/key_rotation_tests.rs",
     "authotron/src/oauth/keys.rs",
+    "authotron/src/oauth/logins.rs",
     "authotron/src/oauth/mod.rs",
     "authotron/src/oauth/rate_limit.rs",
     "authotron/src/oauth/records.rs",
