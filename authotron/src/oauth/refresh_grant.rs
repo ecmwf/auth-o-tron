@@ -1017,6 +1017,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_previous_token_is_retry_within_the_clients_window_and_reuse_after_it() {
+        let (_file, config, runtime) = runtime_with(|policy| {
+            policy["retry_window_seconds"] = 5.into();
+        })
+        .await;
+        let (metrics, browser, granting) = (Metrics::new(), browser(&config), granting(&config));
+        let refresh = |token| refreshed(&runtime, token, &granting, &browser, &metrics);
+        let (old, next) = rotated_ago(&runtime, 3_000).await;
+        let retried = refresh(&old).await.unwrap();
+        assert_eq!(
+            refresh_token(&retried).as_secret_str(),
+            next.as_secret_str()
+        );
+        // Past 5 seconds, though well within 30, presenting it is reuse.
+        let (old, next) = rotated_ago(&runtime, 10_000).await;
+        let invalid = Some(RefreshGrantError::InvalidGrant);
+        assert_eq!(refresh(&old).await.err(), invalid);
+        assert_eq!(refresh(&next).await.err(), invalid);
+        counted(&metrics, "retried", 1);
+        counted(&metrics, "reuse_detected", 1);
+    }
+
+    #[tokio::test]
     async fn the_retry_window_is_measured_when_the_store_answers() {
         let (_file, config, runtime) = runtime_with(|policy| {
             policy["retry_window_seconds"] = 1.into();
@@ -1034,6 +1057,84 @@ mod tests {
             .await
             .unwrap();
         counted(&metrics, "retried", 0);
+    }
+
+    /// Holds the first augmentation after it is armed until the test releases it.
+    #[derive(Default)]
+    struct Pause {
+        armed: std::sync::atomic::AtomicBool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    struct Paused(Arc<Pause>);
+    #[async_trait::async_trait]
+    impl crate::augmenters::base::Augmenter for Paused {
+        fn get_name(&self) -> &str {
+            "paused"
+        }
+        fn get_type(&self) -> &str {
+            "paused"
+        }
+        fn get_realm(&self) -> &str {
+            "local"
+        }
+        async fn augment(&self, _: Arc<futures::lock::Mutex<User>>) -> Result<(), String> {
+            if self
+                .0
+                .armed
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                let released = self.0.release.notified();
+                self.0.entered.notify_one();
+                released.await;
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_retry_fails_when_its_successor_is_used_or_its_family_ends_meanwhile() {
+        let (_file, config, runtime) = runtime().await;
+        let pause = Arc::new(Pause::default());
+        let mut auth = granting(&config);
+        auth.augmenters.push(Box::new(Paused(pause.clone())));
+        let (auth, browser, metrics) = (Arc::new(auth), Arc::new(browser(&config)), Metrics::new());
+        let invalid = Some(RefreshGrantError::InvalidGrant);
+        for revoke in [false, true] {
+            let first = family(&runtime, &grant()).await;
+            let second = refreshed(&runtime, &first, &auth, &browser, &metrics).await;
+            let second = refresh_token(&second.unwrap());
+            // The retry of the first token waits in augmentation.
+            pause.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+            let entered = pause.entered.notified();
+            let retry = {
+                let (runtime, auth, browser) = (runtime.clone(), auth.clone(), browser.clone());
+                let metrics = metrics.clone();
+                tokio::spawn(
+                    async move { refreshed(&runtime, &first, &auth, &browser, &metrics).await },
+                )
+            };
+            entered.await;
+            let third = if revoke {
+                let token = second.as_secret_str();
+                runtime
+                    .revoke(token, "desktop", &browser, &metrics)
+                    .await
+                    .unwrap();
+                None
+            } else {
+                let third = refreshed(&runtime, &second, &auth, &browser, &metrics).await;
+                Some(refresh_token(&third.unwrap()))
+            };
+            pause.release.notify_one();
+            assert_eq!(retry.await.unwrap().err(), invalid, "revoked: {revoke}");
+            // A used successor keeps the family; a revoked family stays ended.
+            let next = third.as_ref().unwrap_or(&second);
+            let outcome = refreshed(&runtime, next, &auth, &browser, &metrics).await;
+            assert_eq!(outcome.is_ok(), !revoke);
+        }
+        counted(&metrics, "retried", 0);
+        counted(&metrics, "reuse_detected", 0);
     }
 
     #[tokio::test]

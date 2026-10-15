@@ -551,6 +551,20 @@ mod tests {
             retry_window_seconds: 30,
         }
     }
+    #[test]
+    fn stored_hashes_are_32_bytes_of_canonical_unpadded_base64url() {
+        assert_eq!(stored_hash("A".repeat(43).as_bytes()), Ok([0; 32]));
+        for invalid in [
+            format!("{}=", "A".repeat(43)),
+            "A".repeat(42),
+            format!("{}B", "A".repeat(42)),
+            "A".repeat(44),
+            format!("{}+", "A".repeat(42)),
+            String::new(),
+        ] {
+            assert!(stored_hash(invalid.as_bytes()).is_err(), "{invalid}");
+        }
+    }
     fn repetition(current: u8, retries: u32, streak: u32) -> Option<Box<Repetition>> {
         Some(Box::new(Repetition {
             current: [current; 32],
