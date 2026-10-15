@@ -260,17 +260,36 @@ pub async fn run(
     Ok(Finished::Done)
 }
 
-/// Text with control characters escaped, so a stored name cannot steer the terminal.
+/// Text with control characters and invisible or reordering format characters escaped,
+/// so a stored name can neither steer the terminal nor pass for another name.
+/// Escaped: `\u{1b}`, `\u{202e}` (right-to-left override), `\u{200b}` (zero-width
+/// space), `\u{2028}` (line separator). Kept: `é`, `ß`, `名`.
 fn printable(text: &str) -> String {
     text.chars()
         .map(|c| {
-            if c.is_control() {
+            if c.is_control() || hidden_format(c) {
                 c.escape_default().to_string()
             } else {
                 c.into()
             }
         })
         .collect()
+}
+
+/// The soft hyphen, the bidirectional controls and marks, the zero-width and invisible
+/// format characters, the line and paragraph separators and the byte-order mark.
+fn hidden_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}'
+            | '\u{61c}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+    )
 }
 
 /// `ms` as `2026-10-15T13:12:42Z`.
@@ -449,6 +468,11 @@ mod tests {
         assert!(lines[1].ends_with(&family_ref("family-id-never-shown")));
         assert!(!text.contains("family-id-never-shown"));
         assert!(!text.contains('\u{1b}'));
+        let shown = printable("\u{202e}eci\u{200b}la\u{2066}\u{2028}\u{feff}\u{ad}Zoë 名");
+        assert_eq!(
+            shown,
+            "\\u{202e}eci\\u{200b}la\\u{2066}\\u{2028}\\u{feff}\\u{ad}Zoë 名"
+        );
     }
 
     #[tokio::test]
