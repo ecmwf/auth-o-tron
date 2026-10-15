@@ -8,12 +8,13 @@
 
 //! Interoperability with a disposable Keycloak: discovery, the code flow with PKCE,
 //! nonce and RFC 9207 `iss`, client authentication, signing keys and role mapping, and
-//! offline access coupled to OAuth refresh families. The realm mirrors the playground
-//! client registration: a confidential client with the `basic`, `profile` and `email`
-//! scopes and without full scope (a realm role reaches its tokens only through a scope
-//! mapping, while `offline_access` comes with its client scope), a fixed user id, so
-//! `sub` is stable, strict refresh-token rotation, and a service-account client that
-//! administers users.
+//! offline access coupled to OAuth refresh families, and identity claims following the
+//! realm roles an administrator assigns. The realm mirrors the playground client
+//! registration: a confidential client with the `basic`, `profile` and `email` scopes
+//! and without full scope (a realm role reaches its tokens only through a scope mapping,
+//! while `offline_access` comes with its client scope), its realm roles in a top-level
+//! ID-token claim `roles`, a fixed user id, so `sub` is stable, strict refresh-token
+//! rotation, and a service-account client that administers users and their roles.
 
 use super::{
     authorization_tests::{CLIENT_CALLBACK, RESOURCE, authorize},
@@ -22,7 +23,10 @@ use super::{
 };
 use crate::{config::ConfigV2, oidc::mock::rsa_key, state::AppState};
 use axum::{Router, http::StatusCode};
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
 use rsa::pkcs8::{EncodePrivateKey, LineEnding};
 use serde_json::{Value, json};
 use std::{
@@ -63,8 +67,8 @@ fn realm() -> Value {
     json!({
         "realm": REALM, "enabled": true, "registrationAllowed": false,
         "accessTokenLifespan": 60, "revokeRefreshToken": true, "refreshTokenMaxReuse": 0,
-        "roles": {"realm": [{"name": "mcp-demo"}]},
-        "scopeMappings": [{"client": "authotron", "roles": ["mcp-demo"]}],
+        "roles": {"realm": [{"name": "mcp-demo"}, {"name": "aviso-reader"}]},
+        "scopeMappings": [{"client": "authotron", "roles": ["mcp-demo", "aviso-reader"]}],
         "clients": [{
             "clientId": "authotron", "enabled": true, "protocol": "openid-connect",
             "publicClient": false, "secret": CLIENT_SECRET, "fullScopeAllowed": false,
@@ -79,7 +83,7 @@ fn realm() -> Value {
             "protocolMappers": [{
                 "name": "realm-roles-in-id-token", "protocol": "openid-connect",
                 "protocolMapper": "oidc-usermodel-realm-role-mapper",
-                "config": {"claim.name": "realm_access.roles", "jsonType.label": "String",
+                "config": {"claim.name": "roles", "jsonType.label": "String",
                     "multivalued": "true", "id.token.claim": "true",
                     "access.token.claim": "false", "userinfo.token.claim": "false"}
             }]
@@ -219,7 +223,8 @@ async fn disposable_keycloak_signs_in_through_an_oidc_method() {
             "oidc": [{"id": "keycloak", "label": "Keycloak", "realm": "keycloak-test",
                 "issuer": issuer, "client_id": "authotron",
                 "client_secret_file": secret.path(), "scopes": ["profile", "email"],
-                "roles_claim": "realm_access.roles", "role_map": {"mcp-demo": "reader"},
+                "roles_claim": "roles",
+                "role_map": {"mcp-demo": "reader", "aviso-reader": "aviso-reader"},
                 "max_authentication_age_seconds": 300, "offline_access": true}]},
         "oauth": {"enabled": true, "issuer": format!("{ORIGIN}/"),
             "signing": {"active_kid": "oauth", "keys": [{"kid": "oauth", "private_key_file": signing.path()}]},
@@ -228,7 +233,8 @@ async fn disposable_keycloak_signs_in_through_an_oidc_method() {
                 "redirect_uris": [CLIENT_CALLBACK], "resources": [{"resource": RESOURCE, "scopes": ["read"]}],
                 "refresh_tokens": {"enabled": true, "upstream_offline_access": true}}],
             "resources": [{"resource": RESOURCE, "allowed_realms": ["keycloak-test"],
-                "scopes": [{"name": "read", "required_roles": ["reader"]}]}]}
+                "scopes": [{"name": "read", "required_roles": ["reader"]}],
+                "identity_claims": {"roles": ["aviso-reader"]}}]}
     }))
     .unwrap();
     let (app, state) = crate::startup::build_app(Arc::new(config)).await.unwrap();
@@ -253,17 +259,41 @@ async fn disposable_keycloak_signs_in_through_an_oidc_method() {
     offline_access(&app, &state, &address).await;
 }
 
+/// The `realm` and `roles` claims of an access token, read without verifying it.
+/// Valid: a JWT `header.payload.signature` with a base64url JSON payload. Invalid: a
+/// token without a second segment.
+fn identity(tokens: &Value) -> (Value, Value) {
+    let token = tokens["access_token"].as_str().unwrap();
+    let payload = token.split('.').nth(1).unwrap();
+    let claims: Value = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+    (claims["realm"].clone(), claims["roles"].clone())
+}
+
 /// An OAuth sign-in with `offline_access`, then refreshes coupled to Keycloak's offline
-/// session: strict rotation, a disabled account, and revocation by the client.
+/// session: identity claims following an assigned and removed realm role, strict
+/// rotation, a disabled account, and revocation by the client.
 async fn offline_access(app: &Router, state: &AppState, address: &str) {
     let admin = Admin::new(address).await;
     let first = oauth_sign_in(app).await;
     assert_eq!(admin.offline_sessions().await, 1);
     let (status, tokens) = refresh(app, &first).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(identity(&tokens), (json!("keycloak-test"), json!([])));
     let second = tokens["refresh_token"].as_str().unwrap().to_owned();
     assert_eq!(upstream_events(state, "refreshed"), 1);
     assert_eq!(upstream_events(state, "rotated"), 1);
+    // A role assigned at Keycloak reaches the next coupled refresh, and leaves with it.
+    admin.map_realm_role("aviso-reader", true).await;
+    let (status, tokens) = refresh(app, &second).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(identity(&tokens).1, json!(["aviso-reader"]));
+    let third = tokens["refresh_token"].as_str().unwrap().to_owned();
+    admin.map_realm_role("aviso-reader", false).await;
+    let (status, tokens) = refresh(app, &third).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(identity(&tokens).1, json!([]));
+    let second = tokens["refresh_token"].as_str().unwrap().to_owned();
+    assert_eq!(upstream_events(state, "refreshed"), 3);
     // Keycloak refuses a disabled account's offline token: the family ends with it.
     admin.set_enabled(false).await;
     let (status, error) = refresh(app, &second).await;
@@ -370,6 +400,49 @@ impl Admin {
             .await
             .unwrap();
         assert!(response.status().is_success(), "Keycloak updates the user");
+    }
+    /// Assigns the realm role `name` to the user, or removes it, by the role's
+    /// representation among those the admin may map.
+    async fn map_realm_role(&self, name: &str, assigned: bool) {
+        let mappings = format!("{}/users/{USER_ID}/role-mappings/realm", self.base);
+        let listing = if assigned {
+            format!("{mappings}/available")
+        } else {
+            mappings.clone()
+        };
+        let roles: Value = self
+            .client
+            .get(listing)
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let role = roles
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|role| role["name"] == name)
+            .expect("Keycloak lists the role")
+            .clone();
+        let request = if assigned {
+            self.client.post(mappings)
+        } else {
+            self.client.delete(mappings)
+        };
+        let response = request
+            .bearer_auth(&self.token)
+            .json(&json!([role]))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "Keycloak maps the role: {}",
+            response.status()
+        );
     }
     /// Offline sessions of the user for the `authotron` client.
     async fn offline_sessions(&self) -> usize {
