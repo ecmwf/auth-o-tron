@@ -216,7 +216,7 @@ impl OAuthRuntime {
                 self.families_ended([*ended], FamilyEnd::ReuseDetected, browser, metrics);
                 return Err(InvalidGrant);
             }
-            Presented::Grace | Presented::Missing => return Err(InvalidGrant),
+            Presented::Previous(..) | Presented::Missing => return Err(InvalidGrant),
         };
         // A token presented by another client is rejected without touching the family.
         if family.grant.client_id != request.client_id {
@@ -298,18 +298,21 @@ impl OAuthRuntime {
             provider_roles,
             ..family.grant.clone()
         };
+        let sealed = presented.seal_successor(&family.family_id, &next)?;
         let rotation = Rotation {
             next: next.hash(),
+            sealed: &sealed,
             grant: &grant,
             idle_ttl_seconds: policy.idle_ttl_seconds,
             ceiling,
+            retry_window_ms: policy.retry_window_seconds * 1000,
         };
         match refresh_dispatch!(backend, rotate(&hash, &rotation, now))? {
             Rotated::Rotated => {
                 metrics.record_refresh_token(RefreshTokenEvent::Rotated);
                 Ok(response.with_refresh_token(&next))
             }
-            Rotated::Stale => Err(InvalidGrant),
+            Rotated::Repeated(_) | Rotated::Stale => Err(InvalidGrant),
         }
     }
 

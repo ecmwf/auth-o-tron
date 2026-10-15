@@ -7,10 +7,11 @@
 // does it submit to any jurisdiction.
 
 //! Opaque rotating refresh tokens, their family records and lifetime arithmetic.
-//! Stores keep only SHA-256 token hashes; the plaintext token leaves only in a response.
+//! Stores keep SHA-256 token hashes and, of each family, the current token sealed by
+//! the previous one; the plaintext token leaves only in a response.
 
 use super::records::valid_time;
-use crate::config::RefreshTokenPolicy;
+use crate::config::{MAX_REFRESH_RETRY_WINDOW_SECONDS, RefreshTokenPolicy};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::{
     aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey},
@@ -21,9 +22,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-/// A rotated token presented again within this window after its successor was issued
-/// is rejected without revoking the family, tolerating concurrent or retried refreshes.
-pub const REUSE_GRACE_MS: u64 = 30_000;
+/// The longest retry window: a store reports a family's previous token as such within
+/// this time after its rotation, and revokes the family for it, or any older token, later.
+pub const MAX_RETRY_WINDOW_MS: u64 = MAX_REFRESH_RETRY_WINDOW_SECONDS * 1000;
+/// How often one rotation is answered again for its previous token.
+pub const MAX_RETRIES_PER_ROTATION: u32 = 3;
 /// Rotated hashes a family keeps for reuse detection, newest first; older ones are
 /// forgotten and, if replayed, are merely unknown (`invalid_grant`, family kept).
 pub const MAX_ROTATED_HASHES: usize = 32;
@@ -168,7 +171,7 @@ impl RefreshGrant {
     }
 }
 
-/// A family's live view, returned only for the current (latest) token.
+/// A family's live view, returned for its current token and for the previous one.
 #[derive(Debug)]
 pub struct RefreshFamily {
     pub family_id: String,
@@ -198,8 +201,9 @@ pub enum UpstreamStored {
 #[derive(Debug)]
 pub enum Presented {
     Current(Box<RefreshFamily>),
-    /// The immediate predecessor within [`REUSE_GRACE_MS`]: rejected, family kept.
-    Grace,
+    /// The token the latest rotation replaced, within [`MAX_RETRY_WINDOW_MS`] of that
+    /// rotation: the family and when it rotated. Its successor is unused yet.
+    Previous(Box<RefreshFamily>, u64),
     /// Any other rotated token: the store has already revoked the family.
     Reused(Box<EndedFamily>),
     Missing,
@@ -225,18 +229,38 @@ pub enum Revocation {
 /// A compare-and-swap of a family's current token from the presented one to `next`.
 pub struct Rotation<'a> {
     pub next: [u8; 32],
+    /// `next` sealed by the presented token for its retries
+    /// ([`RefreshToken::seal_successor`]).
+    pub sealed: &'a str,
     /// Becomes the family's grant: the same client, identity and method, with the
     /// provider roles this refresh started from.
     pub grant: &'a RefreshGrant,
     pub idle_ttl_seconds: u64,
     /// The current absolute expiry, which caps the new idle deadline.
     pub ceiling: u64,
+    /// How long after the latest rotation its previous token may repeat it.
+    pub retry_window_ms: u64,
+}
+
+/// The latest rotation of a family, answered again for its previous token: the current
+/// token's hash and the current token sealed by the previous one.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Repetition {
+    pub current: [u8; 32],
+    pub sealed: String,
+    /// Answers of this rotation for its previous token, this one included.
+    pub retries: u32,
+    /// Consecutive rotations, up to this one, that were answered again.
+    pub streak: u32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Rotated {
     Rotated,
-    /// The presented token stopped being current since lookup (a concurrent refresh).
+    /// The presented token is the previous one, rotated by a concurrent refresh or an
+    /// earlier run of this rotation, within the retry window and cap.
+    Repeated(Box<Repetition>),
+    /// The presented token is neither, or its family ended.
     Stale,
 }
 
@@ -273,17 +297,22 @@ pub(super) fn effective_absolute(
 pub(super) mod tests {
     use super::*;
 
-    /// A rotation to `next` carrying `grant`, with a 600-second idle lifetime.
+    /// A rotation to `next` carrying `grant`, with a 600-second idle lifetime and the
+    /// longest retry window; `next` is sealed as `sealed-<first byte>`.
     pub(in crate::oauth) fn rotation(
         next: [u8; 32],
         grant: &RefreshGrant,
         ceiling: u64,
     ) -> Rotation<'_> {
+        static SEALED: std::sync::LazyLock<Vec<String>> =
+            std::sync::LazyLock::new(|| (0..=255).map(|n| format!("sealed-{n}")).collect());
         Rotation {
             next,
+            sealed: &SEALED[usize::from(next[0])],
             grant,
             idle_ttl_seconds: 600,
             ceiling,
+            retry_window_ms: MAX_RETRY_WINDOW_MS,
         }
     }
 

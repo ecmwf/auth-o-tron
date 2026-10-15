@@ -9,9 +9,9 @@
 //! Shared refresh-token families in Valkey; every mutation is one atomic Lua script.
 
 use super::refresh::{
-    EndedFamily, MAX_ROTATED_HASHES, Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant,
-    RefreshStoreError, Revocation, Rotated, Rotation, UpstreamState, UpstreamStored, deadline,
-    initial_expiry, random_id,
+    EndedFamily, MAX_RETRIES_PER_ROTATION, MAX_RETRY_WINDOW_MS, MAX_ROTATED_HASHES, Presented,
+    RefreshFamily, RefreshGrant, RefreshStoreError, Repetition, Revocation, Rotated, Rotation,
+    UpstreamState, UpstreamStored, deadline, initial_expiry, random_id,
 };
 use super::refresh_durability::{self, Durability};
 use crate::{
@@ -55,6 +55,54 @@ fn ended(values: &[Vec<u8>]) -> Result<Vec<EndedFamily>, RefreshStoreError> {
         })
         .collect()
 }
+/// A family view: `id, grant, created, absolute, sealed, generation`, where `sealed` is
+/// empty for a family without an upstream grant. Any other number of values is invalid.
+fn view(values: &[Vec<u8>]) -> Result<Box<RefreshFamily>, RefreshStoreError> {
+    let [id, grant, created, absolute, upstream, generation] = values else {
+        return Err(RefreshStoreError::Unavailable);
+    };
+    Ok(Box::new(RefreshFamily {
+        family_id: text(id)?,
+        grant: RefreshGrant::decode(grant)?,
+        created_at_ms: number(created)?,
+        absolute_expires_at_ms: number(absolute)?,
+        upstream: (!upstream.is_empty())
+            .then(|| {
+                Ok::<_, RefreshStoreError>(UpstreamState {
+                    sealed: text(upstream)?,
+                    generation: number(generation)?,
+                })
+            })
+            .transpose()?,
+    }))
+}
+/// A token hash as the store keeps it, 32 bytes in canonical unpadded base64url.
+/// Valid: 43 `A`s (32 zero bytes). Invalid: the same with `=` padding, 42 characters,
+/// or a final `B`, whose trailing bits are not zero.
+fn stored_hash(value: &[u8]) -> Result<[u8; 32], RefreshStoreError> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| RefreshStoreError::Unavailable)?;
+    decoded
+        .try_into()
+        .map_err(|_| RefreshStoreError::Unavailable)
+}
+/// A `repeated` reply: `current, sealed, retries, streak`; anything else is `None`.
+fn repetition(values: &[Vec<u8>]) -> Result<Option<Box<Repetition>>, RefreshStoreError> {
+    let count = |bytes| u32::try_from(number(bytes)?).map_err(|_| RefreshStoreError::Unavailable);
+    match values {
+        [status, current, sealed, retries, streak] if status == b"repeated" => {
+            Ok(Some(Box::new(Repetition {
+                current: stored_hash(current)?,
+                sealed: text(sealed)?,
+                retries: count(retries)?,
+                streak: count(streak)?,
+            })))
+        }
+        [status] if status == b"stale" || status == b"missing" => Ok(None),
+        _ => Err(RefreshStoreError::Unavailable),
+    }
+}
 /// At most one ended family, for replies that end a single family.
 fn ended_one(values: &[Vec<u8>]) -> Result<Option<EndedFamily>, RefreshStoreError> {
     let mut all = ended(values)?;
@@ -77,7 +125,7 @@ impl ValkeyRefreshStore {
             .map_err(|_| RefreshStoreError::Unavailable)?;
         Ok(Self {
             connection,
-            prefix: format!("{key_prefix}:oauth:refresh-tokens:v2:"),
+            prefix: format!("{key_prefix}:oauth:refresh-tokens:v3:"),
             max_per_user,
         })
     }
@@ -115,7 +163,7 @@ impl ValkeyRefreshStore {
             .arg(op)
             .arg(&self.prefix)
             .arg(now_ms)
-            .arg(REUSE_GRACE_MS);
+            .arg(MAX_RETRY_WINDOW_MS);
         for arg in args {
             cmd.arg(*arg);
         }
@@ -167,7 +215,8 @@ impl ValkeyRefreshStore {
             _ => Err(RefreshStoreError::Unavailable),
         }
     }
-    /// Classifies a presented hash; reuse outside the grace window revokes the family.
+    /// Classifies a presented hash; any rotated token but the previous one within
+    /// [`MAX_RETRY_WINDOW_MS`] of its rotation is reuse and revokes the family.
     pub async fn lookup(
         &self,
         token_hash: &[u8; 32],
@@ -183,25 +232,10 @@ impl ValkeyRefreshStore {
             )
             .await?;
         Ok(match reply.as_slice() {
-            [status, id, grant, created, absolute, upstream, generation]
-                if status == b"current" =>
-            {
-                Presented::Current(Box::new(RefreshFamily {
-                    family_id: text(id)?,
-                    grant: RefreshGrant::decode(grant)?,
-                    created_at_ms: number(created)?,
-                    absolute_expires_at_ms: number(absolute)?,
-                    upstream: (!upstream.is_empty())
-                        .then(|| {
-                            Ok::<_, RefreshStoreError>(UpstreamState {
-                                sealed: text(upstream)?,
-                                generation: number(generation)?,
-                            })
-                        })
-                        .transpose()?,
-                }))
+            [status, family @ ..] if status == b"current" => Presented::Current(view(family)?),
+            [status, family @ .., rotated] if status == b"previous" => {
+                Presented::Previous(view(family)?, number(rotated)?)
             }
-            [status] if status == b"grace" => Presented::Grace,
             [status, rest @ ..] if status == b"reused" => Presented::Reused(Box::new(
                 ended_one(rest)?.ok_or(RefreshStoreError::Unavailable)?,
             )),
@@ -209,7 +243,9 @@ impl ValkeyRefreshStore {
             _ => return Err(RefreshStoreError::Unavailable),
         })
     }
-    /// Rotates the family of `presented` if that token is still its current one.
+    /// Rotates the family of `presented` if that token is still its current one. If it
+    /// is the previous one, a concurrent refresh or an earlier run of this one applied
+    /// the rotation, which is answered again within the window and cap.
     pub async fn rotate(
         &self,
         presented: &[u8; 32],
@@ -218,9 +254,11 @@ impl ValkeyRefreshStore {
     ) -> Result<Rotated, RefreshStoreError> {
         let Rotation {
             next,
+            sealed,
             grant,
             idle_ttl_seconds,
             ceiling,
+            retry_window_ms,
         } = *rotation;
         let idle = deadline(now_ms, idle_ttl_seconds, Some(ceiling))
             .ok_or(RefreshStoreError::Unavailable)?;
@@ -237,13 +275,15 @@ impl ValkeyRefreshStore {
                     ceiling.to_string().as_bytes(),
                     &payload,
                     MAX_ROTATED_HASHES.to_string().as_bytes(),
+                    sealed.as_bytes(),
+                    retry_window_ms.to_string().as_bytes(),
+                    MAX_RETRIES_PER_ROTATION.to_string().as_bytes(),
                 ],
             )
             .await?;
         match reply.as_slice() {
             [status] if status == b"rotated" => Ok(Rotated::Rotated),
-            [status] if status == b"stale" || status == b"missing" => Ok(Rotated::Stale),
-            _ => Err(RefreshStoreError::Unavailable),
+            reply => Ok(repetition(reply)?.map_or(Rotated::Stale, Rotated::Repeated)),
         }
     }
     /// Replaces the sealed upstream grant of a live family while `generation` is its
@@ -382,6 +422,14 @@ mod tests {
             retry_window_seconds: 30,
         }
     }
+    fn repetition(current: u8, retries: u32, streak: u32) -> Option<Box<Repetition>> {
+        Some(Box::new(Repetition {
+            current: [current; 32],
+            sealed: format!("sealed-{current}"),
+            retries,
+            streak,
+        }))
+    }
     fn family(presented: Presented) -> RefreshFamily {
         match presented {
             Presented::Current(family) => *family,
@@ -475,7 +523,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ttl as u64, now + 600_000);
-        // A rotation sent on a closed connection runs once: a second run would be stale.
+        // A rotation sent on a closed connection runs once; a second run would answer
+        // it again as a repetition.
         close_other_connections(&a).await;
         assert_eq!(
             b.rotate(&[1; 32], &rotation([2; 32], &grant(), ceiling), now + 1)
@@ -497,19 +546,46 @@ mod tests {
                 .unwrap();
             assert_eq!(ttl as u64, now + 600_001);
         }
+        // The previous token answers the latest rotation again, with its sealed token,
+        // within the retry window and at most MAX_RETRIES_PER_ROTATION times.
+        let fixture = grant();
+        let closed = Rotation {
+            retry_window_ms: 1,
+            ..rotation([3; 32], &fixture, ceiling)
+        };
         assert_eq!(
-            a.rotate(&[1; 32], &rotation([3; 32], &grant(), ceiling), now + 2)
+            a.rotate(&[1; 32], &closed, now + 2).await.unwrap(),
+            Rotated::Stale
+        );
+        for retries in 1..=MAX_RETRIES_PER_ROTATION {
+            assert_eq!(
+                a.rotate(&[1; 32], &rotation([3; 32], &fixture, ceiling), now + 2)
+                    .await
+                    .unwrap(),
+                Rotated::Repeated(repetition(2, retries, 1).unwrap())
+            );
+        }
+        assert_eq!(
+            b.rotate(&[1; 32], &rotation([3; 32], &fixture, ceiling), now + 2)
                 .await
                 .unwrap(),
             Rotated::Stale
         );
-        assert!(matches!(
-            a.lookup(&[1; 32], now + 2).await.unwrap(),
-            Presented::Grace
-        ));
+        for at in [now + 2, now + MAX_RETRY_WINDOW_MS] {
+            match b.lookup(&[1; 32], at).await.unwrap() {
+                Presented::Previous(previous, rotated_at) => {
+                    assert_eq!(
+                        (previous.family_id.as_str(), rotated_at),
+                        (id.as_str(), now + 1)
+                    );
+                    assert_eq!(previous.grant, grant());
+                }
+                other => panic!("expected the previous token, got {other:?}"),
+            }
+        }
         family(a.lookup(&[2; 32], now + 2).await.unwrap());
         assert!(matches!(
-            a.lookup(&[1; 32], now + 1 + REUSE_GRACE_MS).await.unwrap(),
+            a.lookup(&[1; 32], now + 1 + MAX_RETRY_WINDOW_MS).await.unwrap(),
             Presented::Reused(ended) if ended.grant.client_id == "desktop" && ended.sealed.is_none()
         ));
         assert!(matches!(
@@ -792,7 +868,11 @@ mod tests {
         )
         .await
         .unwrap();
-        match b.lookup(&[4; 32], now + 4 + REUSE_GRACE_MS).await.unwrap() {
+        match b
+            .lookup(&[4; 32], now + 4 + MAX_RETRY_WINDOW_MS)
+            .await
+            .unwrap()
+        {
             Presented::Reused(ended) => assert_eq!(named(*ended), expected(4)),
             other => panic!("{other:?}"),
         }

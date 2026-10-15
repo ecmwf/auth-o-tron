@@ -9,9 +9,9 @@
 //! Process-local refresh-token families for single-replica deployments.
 
 use super::refresh::{
-    EndedFamily, MAX_ROTATED_HASHES, Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant,
-    RefreshStoreError, Revocation, Rotated, Rotation, UpstreamState, UpstreamStored, deadline,
-    initial_expiry, random_id,
+    EndedFamily, MAX_RETRIES_PER_ROTATION, MAX_RETRY_WINDOW_MS, MAX_ROTATED_HASHES, Presented,
+    RefreshFamily, RefreshGrant, RefreshStoreError, Repetition, Revocation, Rotated, Rotation,
+    UpstreamState, UpstreamStored, deadline, initial_expiry, random_id,
 };
 use crate::config::RefreshTokenPolicy;
 use std::{
@@ -26,14 +26,59 @@ struct Family {
     absolute_ms: u64,
     idle_ms: u64,
     current: [u8; 32],
-    previous: Option<([u8; 32], u64)>,
+    previous: Option<Previous>,
+    /// Consecutive rotations, up to the latest, that were answered again.
+    streak: u32,
     /// Recently rotated hashes, oldest first, at most [`MAX_ROTATED_HASHES`].
     rotated: VecDeque<[u8; 32]>,
     upstream: Option<UpstreamState>,
 }
+
+/// The token the latest rotation replaced: when, the current token sealed by it, and
+/// how often the rotation was answered again for it.
+struct Previous {
+    hash: [u8; 32],
+    rotated_at_ms: u64,
+    sealed: String,
+    retries: u32,
+}
+
 impl Family {
     fn live(&self, now_ms: u64) -> bool {
         now_ms < self.idle_ms && now_ms < self.absolute_ms
+    }
+    fn view(&self, family_id: String) -> Box<RefreshFamily> {
+        Box::new(RefreshFamily {
+            family_id,
+            grant: self.grant.clone(),
+            created_at_ms: self.created_at_ms,
+            absolute_expires_at_ms: self.absolute_ms,
+            upstream: self.upstream.clone(),
+        })
+    }
+    /// Answers the latest rotation again for its previous token `presented`, within
+    /// `window_ms` of it and at most [`MAX_RETRIES_PER_ROTATION`] times.
+    fn repeat(
+        &mut self,
+        presented: &[u8; 32],
+        window_ms: u64,
+        now_ms: u64,
+    ) -> Option<Box<Repetition>> {
+        let previous = self.previous.as_mut().filter(|previous| {
+            previous.hash == *presented
+                && now_ms < previous.rotated_at_ms.saturating_add(window_ms)
+                && previous.retries < MAX_RETRIES_PER_ROTATION
+        })?;
+        if previous.retries == 0 {
+            self.streak += 1;
+        }
+        previous.retries += 1;
+        Some(Box::new(Repetition {
+            current: self.current,
+            sealed: previous.sealed.clone(),
+            retries: previous.retries,
+            streak: self.streak,
+        }))
     }
     fn ended(self, family_id: String) -> EndedFamily {
         EndedFamily {
@@ -55,6 +100,13 @@ struct Inner {
     upstream_locks: HashMap<String, (String, u64)>,
 }
 impl Inner {
+    /// The live family a token belongs to.
+    fn family_of(&mut self, token_hash: &[u8; 32], now_ms: u64) -> Option<&mut Family> {
+        let (id, _) = self.tokens.get(token_hash)?;
+        self.families
+            .get_mut(id)
+            .filter(|family| family.live(now_ms))
+    }
     fn prune(&mut self, now_ms: u64) {
         self.families.retain(|_, family| family.live(now_ms));
         let families = &self.families;
@@ -127,6 +179,7 @@ impl MemoryRefreshStore {
                 idle_ms,
                 current: token_hash,
                 previous: None,
+                streak: 0,
                 rotated: VecDeque::new(),
                 upstream: upstream.map(|sealed| UpstreamState {
                     sealed: sealed.to_owned(),
@@ -137,7 +190,8 @@ impl MemoryRefreshStore {
         inner.prune(now_ms);
         Ok(evicted)
     }
-    /// Classifies a presented hash; reuse outside the grace window revokes the family.
+    /// Classifies a presented hash; any rotated token but the previous one within
+    /// [`MAX_RETRY_WINDOW_MS`] of its rotation is reuse and revokes the family.
     pub async fn lookup(
         &self,
         token_hash: &[u8; 32],
@@ -159,25 +213,22 @@ impl MemoryRefreshStore {
             return Ok(Presented::Missing);
         }
         if family.current == *token_hash {
-            return Ok(Presented::Current(Box::new(RefreshFamily {
-                family_id: id,
-                grant: family.grant.clone(),
-                created_at_ms: family.created_at_ms,
-                absolute_expires_at_ms: family.absolute_ms,
-                upstream: family.upstream.clone(),
-            })));
+            return Ok(Presented::Current(family.view(id)));
         }
-        if family.previous.is_some_and(|(hash, rotated_at)| {
-            hash == *token_hash && now_ms < rotated_at.saturating_add(REUSE_GRACE_MS)
+        if let Some(previous) = family.previous.as_ref().filter(|previous| {
+            previous.hash == *token_hash
+                && now_ms < previous.rotated_at_ms.saturating_add(MAX_RETRY_WINDOW_MS)
         }) {
-            return Ok(Presented::Grace);
+            return Ok(Presented::Previous(family.view(id), previous.rotated_at_ms));
         }
         let Some(family) = inner.families.remove(&id) else {
             return Ok(Presented::Missing);
         };
         Ok(Presented::Reused(Box::new(family.ended(id))))
     }
-    /// Rotates the family of `presented` if that token is still its current one.
+    /// Rotates the family of `presented` if that token is still its current one. If it
+    /// is the previous one, a concurrent refresh or an earlier run of this one applied
+    /// the rotation, which is answered again within the window and cap.
     pub async fn rotate(
         &self,
         presented: &[u8; 32],
@@ -186,28 +237,50 @@ impl MemoryRefreshStore {
     ) -> Result<Rotated, RefreshStoreError> {
         let Rotation {
             next,
+            sealed,
             grant,
             idle_ttl_seconds,
             ceiling,
+            retry_window_ms,
         } = *rotation;
         let idle_ms = deadline(now_ms, idle_ttl_seconds, Some(ceiling))
             .ok_or(RefreshStoreError::Unavailable)?;
         grant.encode()?;
         let mut inner = self.lock()?;
-        if inner.tokens.contains_key(&next) {
+        let collision = inner.tokens.contains_key(&next);
+        let Some(family) = inner.family_of(presented, now_ms) else {
+            return Ok(Rotated::Stale);
+        };
+        if family
+            .previous
+            .as_ref()
+            .is_some_and(|previous| previous.hash == *presented)
+        {
+            return Ok(family
+                .repeat(presented, retry_window_ms, now_ms)
+                .map_or(Rotated::Stale, Rotated::Repeated));
+        }
+        if family.current != *presented || now_ms >= ceiling {
+            return Ok(Rotated::Stale);
+        }
+        if collision {
             return Err(RefreshStoreError::Unavailable);
         }
-        let Some((family_id, _)) = inner.tokens.get(presented).cloned() else {
-            return Ok(Rotated::Stale);
-        };
-        let Some(family) = inner.families.get_mut(&family_id) else {
-            return Ok(Rotated::Stale);
-        };
-        if !family.live(now_ms) || family.current != *presented || now_ms >= ceiling {
-            return Ok(Rotated::Stale);
+        // The streak goes on only if the rotation that ends now was answered again.
+        if !family
+            .previous
+            .as_ref()
+            .is_some_and(|previous| previous.retries > 0)
+        {
+            family.streak = 0;
         }
         family.grant = grant.clone();
-        family.previous = Some((*presented, now_ms));
+        family.previous = Some(Previous {
+            hash: *presented,
+            rotated_at_ms: now_ms,
+            sealed: sealed.to_owned(),
+            retries: 0,
+        });
         family.current = next;
         family.idle_ms = idle_ms;
         family.absolute_ms = family.absolute_ms.min(ceiling);
@@ -215,6 +288,7 @@ impl MemoryRefreshStore {
         let forgotten = (family.rotated.len() > MAX_ROTATED_HASHES)
             .then(|| family.rotated.pop_front())
             .flatten();
+        let family_id = inner.tokens[presented].0.clone();
         if let Some(forgotten) = forgotten {
             inner.tokens.remove(&forgotten);
         }
@@ -350,8 +424,17 @@ mod tests {
         }
     }
 
+    fn repetition(current: u8, retries: u32, streak: u32) -> Option<Box<Repetition>> {
+        Some(Box::new(Repetition {
+            current: [current; 32],
+            sealed: format!("sealed-{current}"),
+            retries,
+            streak,
+        }))
+    }
+
     #[tokio::test]
-    async fn rotation_grace_and_reuse_revokes_family() {
+    async fn rotation_previous_token_and_reuse_revokes_family() {
         let store = MemoryRefreshStore::new(50);
         store
             .issue(&grant(), [1; 32], NOW, &policy(), None)
@@ -370,14 +453,41 @@ mod tests {
             }
         };
         assert_eq!(rotate([1; 32], [2; 32], NOW + 1).await, Rotated::Rotated);
+        // The previous token answers the latest rotation again, with its sealed token,
+        // within the retry window and at most MAX_RETRIES_PER_ROTATION times.
+        let fixture = grant();
+        let closed = Rotation {
+            retry_window_ms: 1,
+            ..rotation([3; 32], &fixture, NOW + 3_600_000)
+        };
+        assert_eq!(
+            store.rotate(&[1; 32], &closed, NOW + 2).await.unwrap(),
+            Rotated::Stale
+        );
+        for retries in 1..=MAX_RETRIES_PER_ROTATION {
+            assert_eq!(
+                rotate([1; 32], [3; 32], NOW + 2).await,
+                Rotated::Repeated(repetition(2, retries, 1).unwrap())
+            );
+        }
         assert_eq!(rotate([1; 32], [3; 32], NOW + 2).await, Rotated::Stale);
-        assert!(matches!(
-            store.lookup(&[1; 32], NOW + REUSE_GRACE_MS).await.unwrap(),
-            Presented::Grace
-        ));
+        match store
+            .lookup(&[1; 32], NOW + MAX_RETRY_WINDOW_MS)
+            .await
+            .unwrap()
+        {
+            Presented::Previous(previous, rotated_at) => {
+                assert_eq!(
+                    (previous.family_id, rotated_at),
+                    (family.family_id, NOW + 1)
+                );
+                assert_eq!(previous.grant, grant());
+            }
+            other => panic!("expected the previous token, got {other:?}"),
+        }
         current(store.lookup(&[2; 32], NOW + 2).await.unwrap());
         assert!(matches!(
-            store.lookup(&[1; 32], NOW + 1 + REUSE_GRACE_MS).await.unwrap(),
+            store.lookup(&[1; 32], NOW + 1 + MAX_RETRY_WINDOW_MS).await.unwrap(),
             Presented::Reused(ended) if ended.grant.client_id == "desktop" && ended.sealed.is_none()
         ));
         assert!(matches!(
@@ -553,8 +663,11 @@ mod tests {
             current(store.lookup(&[2; 32], NOW).await.unwrap()).grant,
             refreshed
         );
-        // A stale rotation leaves the stored grant alone.
-        assert_eq!(rotate([3; 32], &coupled).await, Ok(Rotated::Stale));
+        // Answering the rotation again leaves the stored grant alone.
+        assert!(matches!(
+            rotate([3; 32], &coupled).await,
+            Ok(Rotated::Repeated(_))
+        ));
         assert_eq!(
             current(store.lookup(&[2; 32], NOW).await.unwrap()).grant,
             refreshed
@@ -811,7 +924,7 @@ mod tests {
             .await
             .unwrap();
         match store
-            .lookup(&[4; 32], NOW + 4 + REUSE_GRACE_MS)
+            .lookup(&[4; 32], NOW + 4 + MAX_RETRY_WINDOW_MS)
             .await
             .unwrap()
         {

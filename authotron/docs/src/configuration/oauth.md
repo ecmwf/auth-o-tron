@@ -396,9 +396,10 @@ characters. The server stores only its SHA-256 hash. Each login starts a *family
 holding the client, resource, granted scopes, realm, username and the roles the
 provider returned before augmentation. Families live in the browser-session backend:
 Memory (development, per process, lost on restart) or Valkey under
-`<key_prefix>:oauth:refresh-tokens:v2:`. Each Valkey operation is one Lua script, and
-keys expire at the family's idle deadline. Moving from the `v1` namespace drops existing families, and
-users must log in again. Restricted ACLs must allow `EVAL`, `GET`,
+`<key_prefix>:oauth:refresh-tokens:v3:`. Each Valkey operation is one Lua script, and
+keys expire at the family's idle deadline. The `v3` record adds the sealed successor and
+retry counters of the latest rotation; moving from an earlier namespace drops existing
+families, and users must log in again. Restricted ACLs must allow `EVAL`, `GET`,
 `SET`, `DEL`, `EXISTS`, `TYPE`, the hash commands `HSET`/`HGET`, the sorted-set commands
 `ZADD`/`ZRANGE`/`ZREM`/`ZCARD`, and `PEXPIREAT`/`PEXPIRETIME` under that prefix. A family
 coupled to an OIDC offline session also keeps its sealed upstream grant in the family

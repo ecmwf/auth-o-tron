@@ -3,18 +3,22 @@
 -- index and other token keys derive from the fixed prefix. A token key expires at the family idle deadline when it was issued or
 -- rotated, and a family keeps at most ARGV[10] rotated hashes ("history", oldest first).
 -- A coupled family also holds a sealed upstream grant ("upstream") and its generation
--- ("upstream_gen").
+-- ("upstream_gen"). The latest rotation keeps the token it replaced ("previous"), its
+-- time ("rotated"), the current token sealed by that one ("successor") and how often it
+-- was answered again for it ("retries"); "streak" counts consecutive rotations, up to the
+-- latest, that were answered again.
 -- Replies that end families append each one's id, grant and sealed upstream grant (empty
 -- unless coupled), for the audit log and upstream revocation; families removed after
 -- expiry are not reported.
--- A run resent after a lost reply never applies twice: rotate finds the hash no longer
--- current ('stale'), issue finds the token key present, set_upstream recognises its own
--- replacement, and revocation is idempotent.
+-- A run resent after a lost reply never applies twice: rotate finds its own rotation and
+-- answers it again ('repeated'), issue finds the token key present, set_upstream
+-- recognises its own replacement, and revocation is idempotent.
 local token = KEYS[1]
-local op, prefix, now, grace = ARGV[1], ARGV[2], tonumber(ARGV[3]), tonumber(ARGV[4])
+local op, prefix, now, window_max = ARGV[1], ARGV[2], tonumber(ARGV[3]), tonumber(ARGV[4])
 local function integer(n) return n and n > 0 and n <= 253402300799999 and n % 1 == 0 end
+local function count(n) return n == 0 or integer(n) end
 local function decimal(n) return string.format('%.0f', n) end
-if not integer(now) or not integer(grace) then return {'unavailable'} end
+if not integer(now) or not integer(window_max) then return {'unavailable'} end
 local function family_key(id) return prefix .. 'family:' .. id end
 local function index_key(user) return prefix .. 'user:' .. user end
 local function token_key(hash) return prefix .. 'token:' .. hash end
@@ -66,7 +70,8 @@ if op == 'issue' then
     end
     local key = family_key(id)
     redis.call('HSET', key, 'grant', grant, 'client', client, 'user', user, 'created', decimal(now), 'absolute', decimal(absolute),
-        'idle', decimal(idle), 'current', hash, 'previous', '', 'rotated', '0', 'history', '')
+        'idle', decimal(idle), 'current', hash, 'previous', '', 'rotated', '0', 'successor', '', 'retries', '0',
+        'streak', '0', 'history', '')
     if upstream ~= '' then redis.call('HSET', key, 'upstream', upstream, 'upstream_gen', '0') end
     redis.call('PEXPIREAT', key, decimal(idle))
     redis.call('SET', token, id, 'PXAT', decimal(idle))
@@ -120,27 +125,52 @@ if not state then revoke(id) return {'missing'} end
 local hash = ARGV[5]
 local current = redis.call('HGET', key, 'current')
 
-if op == 'lookup' then
-    if current == hash then
-        return {'current', id, redis.call('HGET', key, 'grant'), redis.call('HGET', key, 'created'), redis.call('HGET', key, 'absolute'),
-            redis.call('HGET', key, 'upstream') or '', redis.call('HGET', key, 'upstream_gen') or '0'}
+local previous, rotated = redis.call('HGET', key, 'previous'), tonumber(redis.call('HGET', key, 'rotated'))
+-- Answers the latest rotation again for its previous token, within `window` ms of it and
+-- at most `cap` times: {'repeated', current hash, sealed successor, retries, streak}.
+local function repeated(window, cap)
+    local retries, streak = tonumber(redis.call('HGET', key, 'retries')), tonumber(redis.call('HGET', key, 'streak'))
+    if previous ~= hash or not rotated or not retries or not streak or now >= rotated + window or retries >= cap then
+        return {'stale'}
     end
-    local rotated = tonumber(redis.call('HGET', key, 'rotated'))
-    if redis.call('HGET', key, 'previous') == hash and rotated and now < rotated + grace then return {'grace'} end
+    if retries == 0 then streak = streak + 1 end
+    redis.call('HSET', key, 'retries', decimal(retries + 1), 'streak', decimal(streak))
+    return {'repeated', current, redis.call('HGET', key, 'successor'), decimal(retries + 1), decimal(streak)}
+end
+
+-- A family view is {id, grant, created, absolute, sealed upstream grant or '', its generation};
+-- the previous token within the longest retry window adds the time of its rotation.
+if op == 'lookup' then
+    local view = {id, redis.call('HGET', key, 'grant'), redis.call('HGET', key, 'created'), redis.call('HGET', key, 'absolute'),
+        redis.call('HGET', key, 'upstream') or '', redis.call('HGET', key, 'upstream_gen') or '0'}
+    if current == hash then return append({'current'}, view) end
+    if previous == hash and rotated and now < rotated + window_max then
+        return append(append({'previous'}, view), {decimal(rotated)})
+    end
     return append({'reused'}, revoke(id))
 end
--- Rotation: ARGV[9] is the grant the next token carries, replacing the family's.
+-- Rotation: ARGV[9] is the grant the next token carries, replacing the family's, ARGV[11]
+-- the next token sealed by the presented one, ARGV[12] the retry window and ARGV[13] the
+-- cap that apply if the presented token turns out to be the previous one.
 if op == 'rotate' then
     local next_hash, next_token, idle, ceiling = ARGV[6], KEYS[2], tonumber(ARGV[7]), tonumber(ARGV[8])
-    local grant, keep = ARGV[9], tonumber(ARGV[10])
-    if not integer(idle) or not integer(ceiling) or idle > ceiling or not integer(keep) then return {'unavailable'} end
+    local grant, keep, sealed = ARGV[9], tonumber(ARGV[10]), ARGV[11]
+    local window, cap = tonumber(ARGV[12]), tonumber(ARGV[13])
+    if not integer(idle) or not integer(ceiling) or idle > ceiling or not integer(keep) or not count(window) or not count(cap) then
+        return {'unavailable'}
+    end
+    if previous == hash then return repeated(window, cap) end
     if current ~= hash or now >= ceiling then return {'stale'} end
     if redis.call('EXISTS', next_token) == 1 then return {'unavailable'} end
     local absolute = math.min(tonumber(redis.call('HGET', key, 'absolute')), ceiling)
     local hashes = history(key)
     hashes[#hashes + 1] = hash
     while #hashes > keep do redis.call('DEL', token_key(table.remove(hashes, 1))) end
+    -- The streak goes on only if the rotation that ends now was answered again.
+    local streak = tonumber(redis.call('HGET', key, 'streak')) or 0
+    if (tonumber(redis.call('HGET', key, 'retries')) or 0) == 0 then streak = 0 end
     redis.call('HSET', key, 'grant', grant, 'current', next_hash, 'previous', hash, 'rotated', decimal(now),
+        'successor', sealed, 'retries', '0', 'streak', decimal(streak),
         'idle', decimal(idle), 'absolute', decimal(absolute), 'history', table.concat(hashes, ' '))
     redis.call('PEXPIREAT', key, decimal(idle))
     redis.call('PEXPIREAT', token, decimal(idle))
