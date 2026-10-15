@@ -14,7 +14,7 @@ use super::{
     refresh::{Presented, RefreshGrant, RefreshToken},
     refresh_grant::{RefreshBackend, RefreshGrantError, refresh_dispatch},
     runtime::OAuthRuntime,
-    upstream::tests::{Coupled, RESOURCE, coupled},
+    upstream::tests::{Coupled, RESOURCE, Valkey, coupled},
 };
 use crate::{
     browser::BrowserLoginState,
@@ -225,50 +225,16 @@ async fn upstream_keys_rotate_by_resealing_and_removing_one_ends_its_families() 
     assert!(logs_contain("reason=\"upstream_unusable\""));
 }
 
-struct Container(String);
-impl Drop for Container {
-    fn drop(&mut self) {
-        let _ = std::process::Command::new("docker")
-            .args(["rm", "-f", &self.0])
-            .output();
-    }
-}
-fn docker(args: &[&str]) -> String {
-    let output = std::process::Command::new("docker")
-        .args(args)
-        .output()
-        .expect("Docker CLI required for disposable Valkey tests");
-    assert!(output.status.success(), "Docker fixture command failed");
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
-}
-
 /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
 #[tokio::test]
 #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
 async fn disposable_valkey_replicas_on_different_active_upstream_keys_reseal_in_turn() {
-    let container = Container(docker(&[
-        "run",
-        "--rm",
-        "-d",
-        "-p",
-        "127.0.0.1::6379",
-        "valkey/valkey:8",
-        "valkey-server",
-        "--requirepass",
-        "public-disposable-fixture",
-        "--save",
-        "",
-        "--appendonly",
-        "no",
-    ]));
-    let address = docker(&["port", &container.0, "6379/tcp"]);
+    let valkey = Valkey::start("authotron:rotation-test").await;
     let added = file(&STANDARD.encode([6u8; 32]));
     // Replica `a` already seals with `u2`; replica `b` still with `u1`, as during step 2
     // of the rotation or after rolling it back. Both have both keys.
     let mut coupled = coupled(|config| {
-        config["ui"]["browser_session"]["backend"] = json!({"type": "valkey",
-            "url": format!("redis://{address}/0"), "key_prefix": "authotron:rotation-test",
-            "password": "public-disposable-fixture"});
+        config["ui"]["browser_session"]["backend"] = valkey.backend.clone();
         let encryption = &mut config["oauth"]["upstream_token_encryption"];
         let keys = encryption["keys"].as_array_mut().unwrap();
         keys.push(json!({"kid": "u2", "key_file": added.path()}));

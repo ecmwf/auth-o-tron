@@ -44,6 +44,67 @@ pub(in crate::oauth) struct Coupled {
     _files: [NamedTempFile; 3],
 }
 
+/// A disposable Valkey container for the browser-session backend, removed when dropped.
+pub(in crate::oauth) struct Valkey {
+    container: String,
+    /// The `backend` setting of `ui.browser_session` that reaches it.
+    pub backend: Value,
+}
+
+impl Valkey {
+    /// Starts the container and waits until it answers, with keys under `key_prefix`.
+    pub(in crate::oauth) async fn start(key_prefix: &str) -> Self {
+        let docker = |args: &[&str]| {
+            let output = std::process::Command::new("docker")
+                .args(args)
+                .output()
+                .expect("Docker CLI required for disposable Valkey tests");
+            assert!(output.status.success(), "Docker fixture command failed");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let container = docker(&[
+            "run",
+            "--rm",
+            "-d",
+            "-p",
+            "127.0.0.1::6379",
+            "valkey/valkey:8",
+            "valkey-server",
+            "--requirepass",
+            "public-disposable-fixture",
+            "--save",
+            "",
+            "--appendonly",
+            "no",
+        ]);
+        let address = docker(&["port", &container, "6379/tcp"]);
+        let valkey = Self {
+            container,
+            backend: json!({"type": "valkey", "url": format!("redis://{address}/0"),
+                "key_prefix": key_prefix, "password": "public-disposable-fixture"}),
+        };
+        let settings = serde_json::from_value(valkey.backend.clone()).unwrap();
+        for _ in 0..100 {
+            if crate::utils::valkey::ValkeyConnection::connect(&settings)
+                .await
+                .is_ok()
+            {
+                return valkey;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("disposable Valkey did not become ready");
+    }
+}
+
+impl Drop for Valkey {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("docker")
+            .args(["rm", "-f", &self.container])
+            .output();
+    }
+}
+
 fn file(content: &str) -> NamedTempFile {
     let mut file = NamedTempFile::new().unwrap();
     file.write_all(content.as_bytes()).unwrap();
