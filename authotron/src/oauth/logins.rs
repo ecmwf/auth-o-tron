@@ -68,24 +68,29 @@ impl OAuthRuntime {
             .await
             .map_err(|_| RefreshStoreError::Unavailable)?;
         let key = user_key(realm, username);
-        let ended = match which {
-            Logins::All => refresh_dispatch!(backend, revoke_user(&key, now))?,
+        let (ended, failed) = match which {
+            Logins::All => (refresh_dispatch!(backend, revoke_user(&key, now))?, None),
             Logins::Named(reference) => {
                 let limit = self.config.max_refresh_token_families_per_user;
-                let mut ended = Vec::new();
+                let (mut ended, mut failed) = (Vec::new(), None);
                 for family in refresh_dispatch!(backend, families_of(&key, limit, now))? {
-                    if family_ref(&family.family_id) == reference {
-                        ended.extend(refresh_dispatch!(
-                            backend,
-                            revoke_family(&family.family_id)
-                        )?);
+                    if family_ref(&family.family_id) != reference {
+                        continue;
+                    }
+                    match refresh_dispatch!(backend, revoke_family(&family.family_id)) {
+                        Ok(family) => ended.extend(family),
+                        Err(error) => {
+                            failed = Some(error);
+                            break;
+                        }
                     }
                 }
-                ended
+                (ended, failed)
             }
         };
+        // Families revoked before a store failure are logged all the same.
         self.families_ended(ended, FamilyEnd::UserRevoke, browser, metrics);
-        Ok(())
+        failed.map_or(Ok(()), Err)
     }
 }
 
