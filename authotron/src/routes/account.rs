@@ -110,8 +110,10 @@ async fn page(State(state): State<AppState>, uri: Uri, headers: HeaderMap) -> Re
                     @if session.user.roles.is_empty() { "None" }
                     @else { ul { @for role in &session.user.roles { li { (role) } } } }
                 }
+                // A full name that "Signed in as" already shows is not repeated.
                 @for (key, label, _) in DISPLAY_ATTRIBUTES {
-                    @if let Some(value) = session.user.attributes.get(key) {
+                    @if let Some(value) = session.user.attributes.get(key)
+                        .filter(|value| key != "display_name" || *value != session.shown_name()) {
                         dt { (label) } dd { (value) }
                     }
                 }

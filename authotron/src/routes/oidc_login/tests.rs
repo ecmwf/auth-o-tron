@@ -179,6 +179,7 @@ async fn browser_sign_in_starts_a_session_for_the_provider_subject() {
     assert!(account.contains("<dt>Signed in as</dt><dd>alice</dd>"));
     assert!(account.contains("<dd>idp</dd>"));
     assert!(account.contains("alice@example.org"));
+    assert!(account.contains("<dt>Full name</dt><dd>Alice Demo</dd>"));
     assert!(attempts(&fixture.state, "success", 1));
     // The state is single-use.
     let replay = get(&fixture.app, &callback, &jar).await;
@@ -209,6 +210,23 @@ async fn the_account_page_escapes_the_display_name_and_falls_back_to_the_usernam
         assert!(account.contains(&format!("<dt>Username</dt><dd>{SUBJECT}</dd>")));
         assert!(!account.contains("<b>Ada</b>"));
     }
+}
+
+#[tokio::test]
+async fn a_full_name_shown_as_the_signed_in_name_is_not_repeated() {
+    let fixture = fixture(|config| {
+        config["ui"]["oidc"][0]["display_name_claim"] = json!("name");
+    })
+    .await;
+    let mut jar = Jar::default();
+    let authorization = start(&fixture, &mut jar).await;
+    let callback = local(&fixture.idp.authorize(&authorization));
+    let response = get(&fixture.app, &callback, &jar).await;
+    jar.update(&response);
+    let account = text(get(&fixture.app, "/login/account", &jar).await).await;
+    assert!(account.contains("<dt>Signed in as</dt><dd>Alice Demo</dd>"));
+    assert!(!account.contains("<dt>Full name</dt>"));
+    assert_eq!(account.matches("Alice Demo").count(), 1);
 }
 
 #[tokio::test]

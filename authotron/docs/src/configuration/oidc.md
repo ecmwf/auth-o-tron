@@ -177,8 +177,9 @@ method as a disabled "(temporarily unavailable)" button, and
   A missing claim grants no roles; a claim that is not an array of at most 256
   strings rejects the sign-in.
 - **Attributes.** `email` (only when verified, at most 320 bytes) and `name` (as
-  `display_name`, at most 256 bytes) are shown on the account page. Other claims
-  are not kept.
+  `display_name`, at most 256 bytes) are shown on the account page, the latter as
+  "Full name" unless it is the name "Signed in as" already shows. Other claims are
+  not kept.
 - **Display name.** The account page and the consent page say "Signed in as" the
   string at `display_name_claim`, trimmed, when it has 1–64 characters and no
   control characters; otherwise, or when the claim is missing, they show the

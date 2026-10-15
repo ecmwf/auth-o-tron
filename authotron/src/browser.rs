@@ -52,7 +52,7 @@ const SESSION_ENVELOPE_BYTES_RESERVE: usize = 36;
 pub(crate) const DISPLAY_ATTRIBUTES: [(&str, &str, usize); 3] = [
     ("ecmwf-email", "ECMWF email", 320),
     ("email", "Email", 320),
-    ("display_name", "Display name", 256),
+    ("display_name", "Full name", 256),
 ];
 
 /// The wire payload accepts only the browser projection, never arbitrary User fields,
