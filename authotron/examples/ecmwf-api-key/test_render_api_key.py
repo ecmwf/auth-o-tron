@@ -39,9 +39,9 @@ OTHER_OAUTH_KEY = renderer.oauth_pem(
 # profile enabled the in-cluster metrics port, and again when the configuration stopped
 # carrying an empty `ui.sso`.
 PRE_OAUTH_DIGESTS = {
-    "plain": "393037da3ef5b1bacd19b017b4141bc6fe89f25d272ade04513dc11f464110fd",
-    "basic": "d2f0609f1bb133941827985523833918345b1bdf5dd43a2eb949f6c3fd4b7a0d",
-    "shared": "ec489ba74ac1200c4dd2ed25f88fb34164f16af91b88b548634dd7153a3a6b44",
+    "plain": "3f9d02a14802e8b00ce479610eb3c36ed83405f68b66b6f45dfd404941cfc8bf",
+    "basic": "c8d1b7a911eb5d0a3640c55016ab2b42426820618730ceb5eccdd94e4f893110",
+    "shared": "7c0f99d2ab183468dd034dcb077a4e4481799d3700e5f1843fae391504954c22",
 }
 # One `/login/` Prefix replaces per-method Exact paths, independent of method count.
 API_KEY_PATH_RULES = [

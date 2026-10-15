@@ -14,6 +14,7 @@
 //! enriches users with roles and attributes via augmenters, and issues signed
 //! JWTs. It is designed to work as an NGINX `auth_request` backend.
 
+pub mod admin;
 pub mod augmenters;
 pub mod auth;
 pub mod browser;

@@ -50,6 +50,7 @@ SOURCE_FILES = (
     "authotron-client/Cargo.toml",
     "authotron-client/src/lib.rs",
     "authotron-types/src/lib.rs",
+    "authotron/src/admin.rs",
     "authotron/src/augmenters/base.rs",
     "authotron/src/augmenters/ldap_augmenter.rs",
     "authotron/src/augmenters/mod.rs",
