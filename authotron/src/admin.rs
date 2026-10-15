@@ -237,7 +237,7 @@ pub async fn run(
                 let reason = match left.reason {
                     LeftReason::Failed => "failed".into(),
                     LeftReason::NotAttempted => format!(
-                        "not attempted after {MAX_CONSECUTIVE_UPSTREAM_FAILURES} failures in a row"
+                        "not attempted after {MAX_CONSECUTIVE_UPSTREAM_FAILURES} failures in a row at its provider"
                     ),
                     LeftReason::Skipped => "skipped".into(),
                 };

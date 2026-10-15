@@ -170,7 +170,7 @@ impl Coupled {
         }
     }
     pub(in crate::oauth) fn seal(&self, grant: &RefreshGrant, upstream_token: &str) -> String {
-        let method = self.browser.method("sso").unwrap().oidc().unwrap();
+        let method = self.browser.method(&grant.method).unwrap().oidc().unwrap();
         let upstream = self.runtime.upstream.as_ref().unwrap();
         let sealed = UpstreamGrant::new(SUBJECT, Zeroizing::new(upstream_token.into()));
         upstream

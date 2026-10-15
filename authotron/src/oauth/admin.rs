@@ -23,14 +23,19 @@ use crate::{
     metrics::{Metrics, UpstreamTokenEvent},
 };
 use futures::StreamExt;
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Mutex,
+    time::Duration,
+};
 
 /// Upstream revocations one admin revocation sends at once.
 const UPSTREAM_CONCURRENCY: usize = 8;
 /// How long one upstream revocation may take, the provider's metadata included.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
-/// Consecutive failed upstream revocations after which the provider is taken to be
-/// down and the rest are not attempted, so a large revocation ends in bounded time.
+/// Consecutive failed upstream revocations through one sign-in method after which its
+/// provider is taken to be down and its remaining grants are not attempted, so a large
+/// revocation ends in bounded time.
 pub const MAX_CONSECUTIVE_UPSTREAM_FAILURES: usize = 16;
 
 /// The logins an admin command selects: one realm, and optionally one username and one
@@ -94,7 +99,8 @@ pub struct UpstreamLeft {
 pub enum LeftReason {
     /// The provider refused it, failed or did not answer in time.
     Failed,
-    /// Not attempted, or abandoned, after [`MAX_CONSECUTIVE_UPSTREAM_FAILURES`].
+    /// Not attempted: its sign-in method's provider had failed
+    /// [`MAX_CONSECUTIVE_UPSTREAM_FAILURES`] times in a row.
     NotAttempted,
     /// No configured key and method open the grant any more.
     Skipped,
@@ -147,8 +153,10 @@ impl OAuthRuntime {
     }
 
     /// Revokes `logins` as `admin_revoke`, then the upstream grants of the coupled ones at
-    /// the provider, waiting for each answer for at most ten seconds and attempting no
-    /// more after [`MAX_CONSECUTIVE_UPSTREAM_FAILURES`] failed in a row.
+    /// the provider, waiting for each answer for at most ten seconds. Once
+    /// [`MAX_CONSECUTIVE_UPSTREAM_FAILURES`] revocations through one sign-in method failed
+    /// in a row, that method's grants not yet started are not attempted; revocations
+    /// already waiting for an answer complete, and other methods' grants go on.
     pub async fn revoke_found(
         &self,
         logins: &[FamilySummary],
@@ -172,59 +180,66 @@ impl OAuthRuntime {
                 sealed.push((ended.grant, grant, reference));
             }
         }
-        let mut answered = vec![false; sealed.len()];
-        let mut pending = futures::stream::iter(sealed.iter().enumerate().map(
-            |(index, (grant, sealed, family))| async move {
+        // The sign-in methods given up on. A revocation checks when it starts, so a
+        // method's grants queued behind its last allowed failure are not attempted.
+        let given_up: Mutex<HashSet<&str>> = Mutex::default();
+        let mut pending = futures::stream::iter(sealed.iter().map(|login| {
+            let given_up = &given_up;
+            async move {
+                let (grant, sealed, family) = login;
+                let method = grant.method.as_str();
+                if given_up
+                    .lock()
+                    .is_ok_and(|methods| methods.contains(method))
+                {
+                    return (login, None);
+                }
                 let timeout = UPSTREAM_TIMEOUT;
                 let outcome = self
                     .revoke_sealed_now(grant, sealed, family, browser, metrics, timeout)
                     .await;
-                (index, outcome)
-            },
-        ))
+                (login, Some(outcome))
+            }
+        }))
         .buffer_unordered(UPSTREAM_CONCURRENCY);
-        let mut failed_in_a_row = 0;
-        while let Some((index, outcome)) = pending.next().await {
-            answered[index] = true;
+        let mut failed_in_a_row: HashMap<&str, usize> = HashMap::new();
+        while let Some((login, outcome)) = pending.next().await {
+            let method = login.0.method.as_str();
             let left = match outcome {
-                UpstreamTokenEvent::RevocationSent => {
+                None => {
+                    revoked.upstream_failed += 1;
+                    Some(LeftReason::NotAttempted)
+                }
+                Some(UpstreamTokenEvent::RevocationSent) => {
                     revoked.upstream_sent += 1;
+                    failed_in_a_row.remove(method);
                     None
                 }
-                UpstreamTokenEvent::RevocationUnsupported => {
+                Some(UpstreamTokenEvent::RevocationUnsupported) => {
                     revoked.upstream_unsupported += 1;
+                    failed_in_a_row.remove(method);
                     None
                 }
-                UpstreamTokenEvent::RevocationSkipped => {
+                // A grant that no key or method opens says nothing about its provider.
+                Some(UpstreamTokenEvent::RevocationSkipped) => {
                     revoked.upstream_skipped += 1;
                     Some(LeftReason::Skipped)
                 }
-                _ => {
+                Some(_) => {
                     revoked.upstream_failed += 1;
+                    let failures = failed_in_a_row.entry(method).or_default();
+                    *failures += 1;
+                    if *failures == MAX_CONSECUTIVE_UPSTREAM_FAILURES
+                        && let Ok(mut methods) = given_up.lock()
+                    {
+                        methods.insert(method);
+                    }
                     Some(LeftReason::Failed)
                 }
             };
-            failed_in_a_row = match left {
-                Some(LeftReason::Failed) => failed_in_a_row + 1,
-                _ => 0,
-            };
             if let Some(reason) = left {
-                revoked.upstream_left.push(left_at(&sealed[index], reason));
+                revoked.upstream_left.push(left_at(login, reason));
             }
-            if failed_in_a_row == MAX_CONSECUTIVE_UPSTREAM_FAILURES {
-                break;
-            }
-        }
-        // Dropping the stream abandons the revocations still waiting for an answer.
-        drop(pending);
-        for (login, _) in sealed
-            .iter()
-            .zip(&answered)
-            .filter(|(_, answered)| !**answered)
-        {
-            revoked.upstream_failed += 1;
-            let left = left_at(login, LeftReason::NotAttempted);
-            revoked.upstream_left.push(left);
         }
         Ok(revoked)
     }

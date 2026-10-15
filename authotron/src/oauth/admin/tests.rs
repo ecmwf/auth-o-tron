@@ -16,7 +16,7 @@ use crate::oauth::{
     refresh_grant::refresh_dispatch,
     upstream::tests::{Coupled, Valkey, coupled},
 };
-use crate::oidc::mock::SUBJECT;
+use crate::oidc::mock::{MockIdp, SUBJECT};
 use serde_json::{Value, json};
 use std::sync::atomic::Ordering;
 
@@ -53,15 +53,35 @@ async fn login_at(
     };
     let upstream = (realm == "idp").then(|| coupled.idp.state.offline_token(SUBJECT));
     let sealed = upstream.as_ref().map(|token| coupled.seal(&grant, token));
+    issue(coupled, &grant, sealed.as_deref(), now_ms).await;
+    upstream
+}
+
+/// Starts a family of `username` in `realm` through the OIDC method `method`, coupled to
+/// a live offline token at `idp`, the method's provider.
+async fn login_through(
+    coupled: &Coupled,
+    idp: &MockIdp,
+    method: &str,
+    realm: &str,
+    username: &str,
+) {
+    let grant = RefreshGrant {
+        realm: realm.into(),
+        username: username.into(),
+        method: method.into(),
+        ..coupled.grant()
+    };
+    let sealed = coupled.seal(&grant, &idp.state.offline_token(SUBJECT));
+    let now = coupled.runtime.now().await.unwrap();
+    issue(coupled, &grant, Some(&sealed), now).await;
+}
+
+async fn issue(coupled: &Coupled, grant: &RefreshGrant, sealed: Option<&str>, now_ms: u64) {
     let backend = coupled.runtime.refresh.as_ref().unwrap();
     let policy = &coupled.config.oauth.clients[0].refresh_tokens;
     let token = RefreshToken::generate().unwrap();
-    refresh_dispatch!(
-        backend,
-        issue(&grant, token.hash(), now_ms, policy, sealed.as_deref())
-    )
-    .unwrap();
-    upstream
+    refresh_dispatch!(backend, issue(grant, token.hash(), now_ms, policy, sealed)).unwrap();
 }
 
 fn filter(realm: &str, username: Option<&str>, client: Option<&str>) -> LoginFilter {
@@ -267,7 +287,8 @@ async fn disposable_valkey_a_failing_provider_ends_the_upstream_phase_and_each_g
         config["ui"]["browser_session"]["backend"] = valkey.backend.clone();
     })
     .await;
-    let users = MAX_CONSECUTIVE_UPSTREAM_FAILURES + 4;
+    // More than the failures that can complete: those allowed and those in flight.
+    let users = MAX_CONSECUTIVE_UPSTREAM_FAILURES + 14;
     for user in 0..users {
         login(&coupled, "idp", &format!("user{user:02}"), "desktop").await;
     }
@@ -298,19 +319,88 @@ async fn disposable_valkey_a_failing_provider_ends_the_upstream_phase_and_each_g
             1
         );
     }
+    // Revocations already waiting for an answer when the provider is given up on still
+    // fail, at most one fewer than run at once; the rest are not attempted.
     let failed = left
         .iter()
         .filter(|line| line.ends_with("(failed)"))
         .count();
-    assert_eq!(failed, MAX_CONSECUTIVE_UPSTREAM_FAILURES);
-    let stopped =
-        format!("(not attempted after {MAX_CONSECUTIVE_UPSTREAM_FAILURES} failures in a row)");
-    assert_eq!(
-        left.iter().filter(|line| line.ends_with(&stopped)).count(),
-        4
+    let most = MAX_CONSECUTIVE_UPSTREAM_FAILURES + 7;
+    assert!(
+        (MAX_CONSECUTIVE_UPSTREAM_FAILURES..=most).contains(&failed),
+        "{failed}"
     );
+    let stopped = format!(
+        "(not attempted after {MAX_CONSECUTIVE_UPSTREAM_FAILURES} failures in a row at its provider)"
+    );
+    let not_attempted = left.iter().filter(|line| line.ends_with(&stopped)).count();
+    assert_eq!(failed + not_attempted, users);
     assert!(state.revoked.lock().unwrap().is_empty());
     assert!(coupled.runtime.find_logins(&all).await.unwrap().is_empty());
+}
+
+/// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
+#[tokio::test]
+#[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+async fn disposable_valkey_one_failing_provider_is_given_up_alone() {
+    let valkey = Valkey::start("authotron:admin-providers-test").await;
+    let working = MockIdp::start().await;
+    let coupled = coupled(|config| {
+        config["ui"]["browser_session"]["backend"] = valkey.backend.clone();
+        // A second OIDC method in realm `idp2`, at a provider of its own.
+        let methods = config["ui"]["oidc"].as_array_mut().unwrap();
+        let mut second = methods[0].clone();
+        second["id"] = json!("sso2");
+        second["label"] = json!("SSO 2");
+        second["realm"] = json!("idp2");
+        second["issuer"] = json!(working.issuer);
+        methods.push(second);
+    })
+    .await;
+    // Older logins come later, so the working provider's are revoked after the
+    // failing one is given up on.
+    for user in 0..4 {
+        login_through(&coupled, &working, "sso2", "idp2", &format!("second{user}")).await;
+    }
+    let failing = MAX_CONSECUTIVE_UPSTREAM_FAILURES + 14;
+    for user in 0..failing {
+        login(&coupled, "idp", &format!("user{user:02}"), "desktop").await;
+    }
+    coupled
+        .idp
+        .state
+        .revocation_fails
+        .store(true, Ordering::SeqCst);
+    let runtime = &coupled.runtime;
+    let mut logins = runtime
+        .find_logins(&filter("idp", None, None))
+        .await
+        .unwrap();
+    logins.extend(
+        runtime
+            .find_logins(&filter("idp2", None, None))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(logins.len(), failing + 4);
+    let revoked = runtime
+        .revoke_found(&logins, &coupled.browser, &coupled.metrics)
+        .await
+        .unwrap();
+    assert_eq!(revoked.families, failing + 4);
+    assert_eq!(revoked.upstream_sent, 4);
+    assert_eq!(working.state.revoked.lock().unwrap().len(), 4);
+    assert_eq!(revoked.upstream_failed, failing);
+    let not_attempted: Vec<_> = revoked
+        .upstream_left
+        .iter()
+        .filter(|left| left.reason == LeftReason::NotAttempted)
+        .collect();
+    assert!(not_attempted.len() >= failing - MAX_CONSECUTIVE_UPSTREAM_FAILURES - 7);
+    assert_eq!(revoked.upstream_left.len(), failing);
+    // Only the failing provider's grants are left.
+    let left = &revoked.upstream_left;
+    assert!(left.iter().all(|left| left.username.starts_with("user")));
 }
 
 #[tokio::test]
