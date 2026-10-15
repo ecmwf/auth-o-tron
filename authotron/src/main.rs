@@ -8,9 +8,10 @@
 
 //! Auth-o-tron: A flexible authentication and authorization service.
 
+use authotron::admin;
 use authotron::config::{load_config, print_schema};
 use authotron::startup;
-use authotron::utils::logger::init_logging;
+use authotron::utils::logger::{init_logging, init_logging_to_stderr};
 use std::env;
 use std::sync::Arc;
 use tracing::error;
@@ -18,6 +19,10 @@ use tracing::error;
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
+
+    if args.get(1).is_some_and(|command| command == "admin") {
+        std::process::exit(run_admin(&args[2..]).await);
+    }
 
     if args.contains(&"--schema".to_string()) {
         print_schema();
@@ -35,5 +40,26 @@ async fn main() {
             "server error"
         );
         std::process::exit(1);
+    }
+}
+
+/// `authotron admin ...`, whose exit status is 0 when done, 1 when it failed and 2 for
+/// invalid arguments. The report goes to standard output and the log to standard error.
+async fn run_admin(args: &[String]) -> i32 {
+    let command = match admin::parse(args) {
+        Ok(command) => command,
+        Err(error) => {
+            eprintln!("authotron admin: {error}\n{}", admin::USAGE);
+            return 2;
+        }
+    };
+    let config = load_config();
+    init_logging_to_stderr(&config.logging);
+    match admin::run(&config, &command, &mut std::io::stdout()).await {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("authotron admin: {error}");
+            1
+        }
     }
 }

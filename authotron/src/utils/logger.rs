@@ -9,7 +9,7 @@
 use tracing::level_filters::LevelFilter;
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::fmt::format::Writer;
-use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, MakeWriter};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
@@ -143,7 +143,21 @@ where
     }
 }
 
+/// Logs to standard output, as the server does.
 pub fn init_logging(logging_config: &LoggingConfig) {
+    init(logging_config, std::io::stdout);
+}
+
+/// Logs in the same format and at the same level to standard error, so that standard
+/// output carries only a command's own report.
+pub fn init_logging_to_stderr(logging_config: &LoggingConfig) {
+    init(logging_config, std::io::stderr);
+}
+
+fn init<W>(logging_config: &LoggingConfig, writer: W)
+where
+    W: for<'writer> MakeWriter<'writer> + Send + Sync + 'static,
+{
     // Parse level string -> LevelFilter
     let level_filter = match logging_config.level.trim().to_lowercase().as_str() {
         "trace" => LevelFilter::TRACE,
@@ -167,24 +181,28 @@ pub fn init_logging(logging_config: &LoggingConfig) {
             // OTel-aligned structured JSON output
             tracing_subscriber::registry()
                 .with(filter_layer)
-                .with(fmt::layer().event_format(OtelJsonEventFormatter {
-                    service_name: logging_config.service_name.clone(),
-                    service_version: logging_config.service_version.clone(),
-                }))
+                .with(
+                    fmt::layer()
+                        .with_writer(writer)
+                        .event_format(OtelJsonEventFormatter {
+                            service_name: logging_config.service_name.clone(),
+                            service_version: logging_config.service_version.clone(),
+                        }),
+                )
                 .init();
         }
         "console" => {
             // Human-readable console output with ANSI colors
             tracing_subscriber::registry()
                 .with(filter_layer)
-                .with(fmt::layer().pretty())
+                .with(fmt::layer().with_writer(writer).pretty())
                 .init();
         }
         _ => {
             // Fallback to console if unknown
             tracing_subscriber::registry()
                 .with(filter_layer)
-                .with(fmt::layer().pretty())
+                .with(fmt::layer().with_writer(writer).pretty())
                 .init();
         }
     }

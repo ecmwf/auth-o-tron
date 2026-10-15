@@ -10,8 +10,19 @@
 //! configuration file and open no listener, for example inside a server pod with
 //! `kubectl exec deploy/authotron -- authotron admin logins list --realm idp`.
 
-use crate::oauth::admin::LoginFilter;
-use std::collections::BTreeSet;
+use crate::{
+    browser::BrowserLoginState,
+    config::{ConfigV2, ui::BrowserBackendConfig},
+    metrics::Metrics,
+    oauth::{
+        admin::{AdminError, LoginFilter},
+        audit::family_ref,
+        refresh::FamilySummary,
+        runtime::OAuthRuntime,
+    },
+};
+use chrono::{DateTime, SecondsFormat};
+use std::{collections::BTreeSet, io::Write, sync::Arc};
 
 pub const USAGE: &str = "\
 usage: authotron admin logins list   --realm <realm> [--username <name>] [--client <id>] [--limit <n>]
@@ -127,6 +138,156 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     }
 }
 
+fn message(error: AdminError) -> String {
+    match error {
+        AdminError::NoLogins => {
+            "no client has refresh tokens enabled, so there are no logins".into()
+        }
+        AdminError::PerProcess => PER_PROCESS.into(),
+        AdminError::Unavailable => "the Valkey store did not answer".into(),
+    }
+}
+
+const PER_PROCESS: &str = "the memory browser-session backend keeps refresh-token families \
+inside each server process, out of reach of this command; restarting the server ends them all";
+
+/// Starts the authorization-server runtime the configuration describes, without its
+/// listeners. The memory backend is refused first: its families are not in this process.
+async fn runtime(config: &ConfigV2) -> Result<Arc<OAuthRuntime>, String> {
+    let session = config.ui.browser_session.as_ref();
+    if config.oauth.enabled
+        && session.is_some_and(|session| matches!(session.backend, BrowserBackendConfig::Memory {}))
+    {
+        return Err(PER_PROCESS.into());
+    }
+    match OAuthRuntime::initialize(config).await {
+        Ok(Some(runtime)) => Ok(runtime),
+        Ok(None) => Err("OAuth is not enabled, so there are no logins".into()),
+        Err(error) => Err(format!("cannot reach the store: {error}")),
+    }
+}
+
+/// Runs `command` against the store of `config`, writing its report to `out`. Audit
+/// events go to the configured log as the server writes them.
+pub async fn run(config: &ConfigV2, command: &Command, out: &mut impl Write) -> Result<(), String> {
+    let write = |error: std::io::Error| format!("cannot write the report: {error}");
+    let filter = match command {
+        Command::Help => return writeln!(out, "{USAGE}").map_err(write),
+        Command::List { filter, .. } | Command::Revoke { filter, .. } => filter,
+    };
+    let runtime = runtime(config).await?;
+    let found = runtime.find_logins(filter).await.map_err(message)?;
+    match command {
+        Command::List { limit, .. } => {
+            table(out, &found[..found.len().min(*limit)]).map_err(write)?;
+            if found.len() > *limit {
+                writeln!(out, "showing {limit} of {} logins", found.len()).map_err(write)?;
+            } else {
+                writeln!(out, "{} logins", found.len()).map_err(write)?;
+            }
+        }
+        Command::Revoke { dry_run: true, .. } => {
+            table(out, &found).map_err(write)?;
+            writeln!(out, "dry run: would revoke {} logins", found.len()).map_err(write)?;
+        }
+        _ => {
+            let browser = BrowserLoginState::new(config)
+                .map_err(|error| format!("invalid browser sign-in configuration: {error}"))?;
+            let revoked = runtime
+                .revoke_found(&found, &browser, &Metrics::new())
+                .await
+                .map_err(message)?;
+            writeln!(
+                out,
+                "revoked {} logins; upstream grants: {} revoked at the provider, {} not \
+                 supported there, {} failed, {} skipped",
+                revoked.families,
+                revoked.upstream_sent,
+                revoked.upstream_unsupported,
+                revoked.upstream_failed,
+                revoked.upstream_skipped
+            )
+            .map_err(write)?;
+            if revoked.interrupted {
+                return Err("the store failed during the revocation; run the command again".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Text with control characters escaped, so a stored name cannot steer the terminal.
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.into()
+            }
+        })
+        .collect()
+}
+
+/// `ms` as `2026-10-15T13:12:42Z`.
+fn time(ms: u64) -> String {
+    i64::try_from(ms)
+        .ok()
+        .and_then(DateTime::from_timestamp_millis)
+        .map_or("unknown".into(), |at| {
+            at.to_rfc3339_opts(SecondsFormat::Secs, true)
+        })
+}
+
+/// One row per login, in columns as wide as their widest value; never a token, family
+/// id or sealed grant.
+fn table(out: &mut impl Write, logins: &[FamilySummary]) -> std::io::Result<()> {
+    let header = [
+        "CLIENT",
+        "METHOD",
+        "REALM",
+        "USERNAME",
+        "CREATED",
+        "LAST_USED",
+        "IDLE_EXPIRY",
+        "ABSOLUTE_EXPIRY",
+        "REFERENCE",
+    ]
+    .map(String::from);
+    let rows: Vec<[String; 9]> = std::iter::once(header)
+        .chain(logins.iter().map(|login| {
+            [
+                printable(&login.grant.client_id),
+                printable(&login.grant.method),
+                printable(&login.grant.realm),
+                printable(&login.grant.username),
+                time(login.created_at_ms),
+                time(login.last_used_at_ms),
+                time(login.idle_expires_at_ms),
+                time(login.absolute_expires_at_ms),
+                family_ref(&login.family_id),
+            ]
+        }))
+        .collect();
+    let widths: Vec<usize> = (0..9)
+        .map(|column| {
+            rows.iter()
+                .map(|row| row[column].chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    for row in &rows {
+        let cells: Vec<String> = row
+            .iter()
+            .zip(&widths)
+            .map(|(cell, width)| format!("{cell:<width$}"))
+            .collect();
+        writeln!(out, "{}", cells.join("  ").trim_end())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +374,64 @@ mod tests {
         ] {
             assert!(parse(&args(line)).is_err(), "{line}");
         }
+    }
+
+    #[test]
+    fn rows_escape_control_characters_and_show_only_references() {
+        let login = FamilySummary {
+            family_id: "family-id-never-shown".into(),
+            grant: crate::oauth::refresh::RefreshGrant {
+                client_id: "cli".into(),
+                resource: "https://mcp.example.org/mcp".into(),
+                scopes: vec!["read".into()],
+                username: "ali\u{1b}[31mce".into(),
+                realm: "idp".into(),
+                provider_roles: vec![],
+                method: "sso".into(),
+                upstream_coupled: false,
+            },
+            created_at_ms: 1_760_000_000_000,
+            last_used_at_ms: 1_760_000_060_000,
+            idle_expires_at_ms: 1_760_000_660_000,
+            absolute_expires_at_ms: 1_760_003_600_000,
+        };
+        let mut out = Vec::new();
+        table(&mut out, &[login]).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        assert!(lines[0].starts_with("CLIENT  METHOD  REALM  USERNAME"));
+        assert!(lines[1].starts_with("cli     sso     idp    ali\\u{1b}[31mce"));
+        assert!(lines[1].contains("2025-10-09T08:53:20Z  2025-10-09T08:54:20Z"));
+        assert!(lines[1].ends_with(&family_ref("family-id-never-shown")));
+        assert!(!text.contains("family-id-never-shown"));
+        assert!(!text.contains('\u{1b}'));
+    }
+
+    #[tokio::test]
+    async fn the_memory_backend_and_a_server_without_oauth_have_no_logins_to_reach() {
+        let config = |oauth: bool| -> ConfigV2 {
+            serde_json::from_value(serde_json::json!({
+                "store": {"enabled": false}, "services": [], "augmenters": [],
+                "providers": [{"type": "plain", "name": "basic", "realm": "local", "users": [], "browser": {"id": "password", "label": "Password"}}],
+                "server": {"port": 0}, "jwt": {"iss": "fixture", "exp": 300, "secret": "fixture-only"},
+                "logging": {"level": "warn", "format": "console"},
+                "ui": {"enabled": true, "browser_session": {"public_origin": "https://login.example.org", "backend": {"type": "memory"}}},
+                "oauth": {"enabled": oauth}
+            }))
+            .unwrap()
+        };
+        let list = parse(&args("logins list --realm local")).unwrap();
+        let mut out = Vec::new();
+        let error = run(&config(false), &list, &mut out).await.unwrap_err();
+        assert!(error.contains("OAuth is not enabled"), "{error}");
+        let error = run(&config(true), &list, &mut out).await.unwrap_err();
+        assert!(error.contains("inside each server process"), "{error}");
+        assert!(out.is_empty());
+        run(&config(false), &Command::Help, &mut out).await.unwrap();
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .starts_with("usage: authotron admin logins list")
+        );
     }
 }
