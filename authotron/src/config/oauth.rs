@@ -36,7 +36,7 @@ pub struct OAuthConfig {
     pub authentication_clock_skew_seconds: u64,
     /// Live refresh-token families per user across all clients; issuing beyond the
     /// cap revokes that user's oldest family.
-    #[schemars(range(min = 1, max = 1000))]
+    #[schemars(range(min = 1, max = MAX_REFRESH_TOKEN_FAMILIES_PER_USER))]
     pub max_refresh_token_families_per_user: usize,
     pub endpoint_rate_limit: OAuthEndpointRateLimit,
     #[schemars(length(max = 64))]
@@ -121,7 +121,9 @@ impl OAuthConfig {
         if self.authentication_clock_skew_seconds > 60 {
             return Err("oauth.authentication_clock_skew_seconds must be between 0 and 60");
         }
-        if !(1..=1000).contains(&self.max_refresh_token_families_per_user) {
+        if !(1..=MAX_REFRESH_TOKEN_FAMILIES_PER_USER)
+            .contains(&self.max_refresh_token_families_per_user)
+        {
             return Err("oauth.max_refresh_token_families_per_user must be between 1 and 1000");
         }
         self.endpoint_rate_limit.validate()?;
@@ -225,6 +227,9 @@ pub struct OAuthClient {
     pub refresh_tokens: RefreshTokenPolicy,
 }
 
+/// The largest permitted `max_refresh_token_families_per_user`, so no user's family
+/// index holds more live families.
+pub const MAX_REFRESH_TOKEN_FAMILIES_PER_USER: usize = 1000;
 /// Longest permitted refresh-token family lifetime (400 days).
 pub const MAX_REFRESH_TOKEN_ABSOLUTE_TTL_SECONDS: u64 = 400 * 86_400;
 /// Longest permitted retry window of a rotated refresh token.

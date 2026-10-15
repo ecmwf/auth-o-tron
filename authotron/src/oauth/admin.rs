@@ -19,6 +19,7 @@ use super::{
 };
 use crate::{
     browser::BrowserLoginState,
+    config::MAX_REFRESH_TOKEN_FAMILIES_PER_USER,
     metrics::{Metrics, UpstreamTokenEvent},
 };
 use futures::StreamExt;
@@ -31,8 +32,6 @@ const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
 /// Consecutive failed upstream revocations after which the provider is taken to be
 /// down and the rest are not attempted, so a large revocation ends in bounded time.
 pub const MAX_CONSECUTIVE_UPSTREAM_FAILURES: usize = 16;
-/// The largest per-user family cap, so a user's index never holds more live families.
-const MAX_FAMILIES_PER_USER: usize = 1000;
 
 /// The logins an admin command selects: one realm, and optionally one username and one
 /// client id, each compared exactly as the families store them.
@@ -123,7 +122,7 @@ impl OAuthRuntime {
         if let Some(username) = &filter.username {
             let key = user_key(&filter.realm, username);
             found = store
-                .families_of(&key, MAX_FAMILIES_PER_USER, now)
+                .families_of(&key, MAX_REFRESH_TOKEN_FAMILIES_PER_USER, now)
                 .await
                 .map_err(|_| AdminError::Unavailable)?;
         } else {
