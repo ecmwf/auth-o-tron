@@ -8,7 +8,7 @@
 
 //! Opaque rotating refresh tokens, their family records and lifetime arithmetic.
 //! Stores keep SHA-256 token hashes and, of each family, the current token sealed by
-//! the previous one; the plaintext token leaves only in a response.
+//! the previous one and the retry key; the plaintext token leaves only in a response.
 
 use super::records::valid_time;
 use super::retry_key::RetryKey;

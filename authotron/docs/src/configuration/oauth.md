@@ -375,6 +375,7 @@ oauth:
         absolute_ttl_seconds: 7776000  # 90 days after login; default 90 days
         upstream_offline_access: false # couple OIDC sign-ins to the provider; default false
         retry_window_seconds: 30       # 0..30; answer retried refreshes; default 30
+  refresh_token_retry_key_file: /run/secrets/oauth/retry.key # required with Valkey
 ```
 
 With `upstream_offline_access`, families started by an OIDC sign-in follow the
@@ -394,14 +395,17 @@ because common MCP clients never send it.
 
 **Format and storage.** A refresh token is 256 random bits encoded as 43 base64url
 characters. The server stores its SHA-256 hash, and the latest rotation keeps the
-current token sealed by the previous one (see *Retries* below). Each login starts a
-*family* holding the client, resource, granted scopes, realm, username and the roles
-the provider returned before augmentation. Families live in the browser-session backend:
+current token sealed by the previous one and the retry key (see *Retries* below).
+Each login starts a *family* holding the client, resource, granted scopes, realm,
+username and the roles the provider returned before augmentation. Families live in the browser-session backend:
 Memory (development, per process, lost on restart) or Valkey under
 `<key_prefix>:oauth:refresh-tokens:v3:`. Each Valkey operation is one Lua script, and
 keys expire at the family's idle deadline. The `v3` record adds the sealed successor and
 retry counters of the latest rotation; moving from an earlier namespace drops existing
-families, and users must log in again. Restricted ACLs must allow `EVAL`, `GET`,
+families, and users must log in again. Only preview deployments ran earlier namespaces;
+their keys expire at their own idle and absolute deadlines, or can be deleted at once,
+for example `valkey-cli --scan --pattern '<key_prefix>:oauth:refresh-tokens:v2:*'`
+piped to `valkey-cli unlink`. Restricted ACLs must allow `EVAL`, `GET`,
 `SET`, `DEL`, `EXISTS`, `TYPE`, the hash commands `HSET`/`HGET`, the sorted-set commands
 `ZADD`/`ZRANGE`/`ZREM`/`ZCARD`, and `PEXPIREAT`/`PEXPIRETIME` under that prefix, and
 `SCAN` for [admin commands](#revoking-logins) without `--username`. A family
@@ -484,11 +488,30 @@ presenting the previous token is reuse at once. Answers count as `retried` and a
 logged as `oauth.refresh_token.retried`.
 
 To answer a retry, each rotation stores the new token encrypted (AES-256-GCM) under a
-key derived (HKDF-SHA256) from the token it replaces, which the store never holds, and
-the latest rotation overwrites the previous one's. A copy of the store therefore
-reveals no token on its own; together with the family's previous token it reveals
-the current one, and older tokens reveal nothing. Any replica can answer a retry; no
-key is shared between them.
+key derived (HKDF-SHA256) from the token it replaces and from the **retry key**,
+`oauth.refresh_token_retry_key_file`: 32 bytes of standard Base64, the same on every
+replica. The store holds neither. The family record keeps only the latest rotation's
+encrypted token, but Valkey's append-only file (AOF), its replicas and its command logs
+(`MONITOR`, and `SLOWLOG` for slow scripts) keep earlier ones too, until the next AOF
+rewrite. What a copy of the store reveals:
+
+- **Without the retry key**, no token, whether it is a point-in-time copy (an RDB
+  snapshot, a backup of the data) or the AOF, a replica or a command log, and
+  whatever old refresh tokens come with it.
+- **With the retry key**, a point-in-time copy and a family's previous token reveal its
+  current token. The AOF, a replica's stream or a command log also hold the earlier
+  encrypted tokens, so any refresh token of a family since the last AOF rewrite reveals
+  each later one in turn, up to the current token.
+
+So keep the retry key out of Valkey, its hosts and its backups: mount it from a
+Secret, like the signing key. Protect the AOF, backups and replicas like the refresh
+tokens, and deny `MONITOR` and `SLOWLOG` in Valkey's ACLs to every user that does not
+need them; Auth-O-Tron needs neither. The key is required when a client has refresh
+tokens and the browser-session backend is Valkey; startup refuses to start without it,
+before reading any file or connecting, and refuses a file that is another configured
+key or secret, or a key equal to an upstream token key. A Memory store, which answers
+every retry in the process that rotated, uses a random key per process when the
+setting is absent. Any replica holding the key can answer a retry.
 
 The window has a price: within it, whoever holds the previous token obtains the current
 one. Two holders of one token, a legitimate client and a thief or two processes
@@ -735,6 +758,11 @@ any listed key opens the grants sealed under it.
    (`oauth.upstream.unopenable`, then `oauth.refresh_token.family_revoked` with
    `reason="upstream_unusable"`), its upstream grant cannot be revoked at the
    provider (`revocation_skipped`), and the user signs in again.
+
+**Refresh-token retry key** (`oauth.refresh_token_retry_key_file`, one key). Replace
+the file on every replica in one rollout. Tokens and families are not affected; only
+a retry spanning the change, its rotation sealed under one key and its answer on a
+replica with the other, gets `invalid_grant`, and the family is kept.
 
 The login playground renderer derives key ids from key material and replaces each
 key in one step when its file is deleted; it does not stage these rotations.
