@@ -21,6 +21,45 @@ pub struct OAuthResource {
     pub allowed_realms: Vec<String>,
     #[schemars(length(min = 1, max = 32))]
     pub scopes: Vec<ResourceScope>,
+    /// Identity claims that access tokens for this resource carry, for a resource
+    /// server that decides from the user's realm and roles itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_claims: Option<IdentityClaims>,
+}
+
+/// With identity claims, an access token carries `realm`, the user's realm, and `roles`,
+/// the user's roles after augmentation that `roles` names, sorted and unique, instead
+/// of the granted scopes' required roles.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityClaims {
+    /// Role names, compared exactly, 1-128 bytes without control characters or
+    /// surrounding whitespace; `["*"]` alone names every role.
+    #[schemars(length(min = 1, max = 64), inner(length(min = 1, max = 128)))]
+    pub roles: Vec<String>,
+}
+
+impl IdentityClaims {
+    /// Valid: `["aviso-reader"]`, `["aviso-reader", "aviso-admin"]`, `["*"]`. Invalid:
+    /// `[]`, `["*", "aviso-reader"]`, `[" aviso-reader"]`, a repeated name, 65 names.
+    fn valid(&self) -> bool {
+        let named = |role: &String| text(role) && role.trim() == role && role != "*";
+        (1..=64).contains(&self.roles.len())
+            && unique(&self.roles)
+            && (self.roles == ["*"] || self.roles.iter().all(named))
+    }
+    /// The roles of `held` that the claims name, sorted and unique.
+    pub fn select(&self, held: &[String]) -> Vec<String> {
+        let all = self.roles == ["*"];
+        let mut roles: Vec<String> = held
+            .iter()
+            .filter(|role| all || self.roles.contains(role))
+            .cloned()
+            .collect();
+        roles.sort();
+        roles.dedup();
+        roles
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -125,6 +164,10 @@ impl OAuthConfig {
                         || !s.required_roles.iter().all(|r| text(r))
                         || !unique(&s.required_roles)
                 })
+                || resource
+                    .identity_claims
+                    .as_ref()
+                    .is_some_and(|claims| !claims.valid())
             {
                 return Err(error);
             }
@@ -314,6 +357,59 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn identity_claims_name_roles_exactly_or_all_of_them() {
+        for (roles, valid) in [
+            (json!(["aviso-reader"]), true),
+            (json!(["aviso-reader", "aviso-admin"]), true),
+            (json!(["*"]), true),
+            (json!(["a".repeat(128)]), true),
+            (json!([]), false),
+            (json!(["*", "aviso-reader"]), false),
+            (json!([" aviso-reader"]), false),
+            (json!(["aviso-reader "]), false),
+            (json!(["aviso\nreader"]), false),
+            (json!(["a".repeat(129)]), false),
+            (json!(["aviso-reader", "aviso-reader"]), false),
+        ] {
+            let mut input = fixture();
+            input["resources"][0]["identity_claims"] = json!({"roles": roles});
+            let config: OAuthConfig = serde_json::from_value(input).unwrap();
+            assert_eq!(config.validate().is_ok(), valid, "{roles}");
+        }
+        let many: Vec<String> = (0..64).map(|n| format!("role-{n}")).collect();
+        let mut input = fixture();
+        input["resources"][0]["identity_claims"] = json!({"roles": many});
+        assert!(
+            serde_json::from_value::<OAuthConfig>(input.clone())
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
+        input["resources"][0]["identity_claims"]["roles"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("role-64"));
+        assert!(
+            serde_json::from_value::<OAuthConfig>(input.clone())
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+        input["resources"][0]["identity_claims"] = json!({"roles": ["*"], "realm": true});
+        assert!(serde_json::from_value::<OAuthConfig>(input).is_err());
+
+        let held: Vec<String> = ["writer", "reader", "admin", "reader"]
+            .map(String::from)
+            .into();
+        let claims = |roles: &[&str]| IdentityClaims {
+            roles: roles.iter().map(|r| r.to_string()).collect(),
+        };
+        assert_eq!(claims(&["reader", "absent"]).select(&held), ["reader"]);
+        assert_eq!(claims(&["*"]).select(&held), ["admin", "reader", "writer"]);
+        assert!(claims(&["Reader"]).select(&held).is_empty());
     }
 
     #[test]

@@ -1541,6 +1541,17 @@
           },
           "minItems": 1,
           "maxItems": 32
+        },
+        "identity_claims": {
+          "description": "Identity claims that access tokens for this resource carry, for a resource\nserver that decides from the user's realm and roles itself.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IdentityClaims"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -1568,6 +1579,27 @@
       "required": [
         "name",
         "required_roles"
+      ]
+    },
+    "IdentityClaims": {
+      "description": "With identity claims, an access token carries `realm`, the user's realm, and `roles`,\nthe user's roles after augmentation that `roles` names, sorted and unique, instead\nof the granted scopes' required roles.",
+      "type": "object",
+      "properties": {
+        "roles": {
+          "description": "Role names, compared exactly, 1-128 bytes without control characters or\nsurrounding whitespace; `[\"*\"]` alone names every role.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "minItems": 1,
+          "maxItems": 64
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "roles"
       ]
     },
     "OAuthSigningConfig": {

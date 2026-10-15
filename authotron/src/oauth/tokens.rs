@@ -66,6 +66,9 @@ struct Claims<'a> {
     jti: String,
     client_id: &'a str,
     scope: String,
+    /// The user's realm, only for resources with identity claims.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    realm: Option<&'a str>,
     roles: Vec<String>,
 }
 
@@ -180,19 +183,27 @@ impl<'a> TokenIssuer<'a> {
             .iter()
             .find(|r| r.resource == resource)
             .ok_or(TokenError::Configuration)?;
-        let mut roles = Vec::new();
-        for scope in &granted.0 {
-            let permission = policy
-                .scopes
-                .iter()
-                .find(|s| &s.name == scope)
-                .ok_or(TokenError::Configuration)?;
-            for role in &permission.required_roles {
-                if !roles.contains(role) {
-                    roles.push(role.clone());
+        // Identity claims name the user's roles, at most 64 since the identity check
+        // above bounds them; otherwise `roles` lists the granted scopes' required roles.
+        let (realm, roles) = match &policy.identity_claims {
+            Some(claims) => (Some(user.realm.as_str()), claims.select(&user.roles)),
+            None => {
+                let mut roles = Vec::new();
+                for scope in &granted.0 {
+                    let permission = policy
+                        .scopes
+                        .iter()
+                        .find(|s| &s.name == scope)
+                        .ok_or(TokenError::Configuration)?;
+                    for role in &permission.required_roles {
+                        if !roles.contains(role) {
+                            roles.push(role.clone());
+                        }
+                    }
                 }
+                (None, roles)
             }
-        }
+        };
         if roles.len() > 64 {
             return Err(TokenError::Identity);
         }
@@ -216,6 +227,7 @@ impl<'a> TokenIssuer<'a> {
             jti: uuid::Uuid::new_v4().to_string(),
             client_id,
             scope: scope.clone(),
+            realm,
             roles,
         };
         let (kid, key) = self.keys.active_signer();
@@ -496,6 +508,50 @@ mod tests {
         assert_eq!(response["token_type"], "Bearer");
         assert_eq!(response["expires_in"], 300);
         assert!(response.get("refresh_token").is_none());
+    }
+    #[test]
+    fn identity_claims_carry_the_realm_and_the_named_roles_of_the_user() {
+        let (_file, mut config, keys, mut user) = fixture();
+        let claims_of = |config: &OAuthConfig, user: &User| {
+            let issuer = TokenIssuer::new(config, &keys).unwrap();
+            let response = issuer.issue_access_token("desktop", RESOURCE, &["read".into()], user);
+            let token = response.unwrap();
+            decode::<Value>(token.access_token(), &decoding(&keys), &validation())
+                .unwrap()
+                .claims
+        };
+        user.roles.push("reader".into());
+        for (named, expected) in [
+            (
+                json!(["unrelated", "reader", "absent"]),
+                json!(["reader", "unrelated"]),
+            ),
+            (json!(["*"]), json!(["member", "reader", "unrelated"])),
+            (json!(["absent"]), json!([])),
+        ] {
+            config.resources[0].identity_claims =
+                Some(serde_json::from_value(json!({"roles": named})).unwrap());
+            let claims = claims_of(&config, &user);
+            assert_eq!(claims["realm"], "local");
+            assert_eq!(claims["roles"], expected, "{named}");
+            // Scope checks are unchanged: `read` still needs `reader` and `member`.
+            assert_eq!(claims["scope"], "read");
+        }
+        // Every role a token can carry: the identity check allows at most 64.
+        config.resources[0].identity_claims =
+            Some(serde_json::from_value(json!({"roles": ["*"]})).unwrap());
+        user.roles = (0..62).map(|n| format!("role-{n:02}")).collect();
+        user.roles.extend(["member".into(), "reader".into()]);
+        let claims = claims_of(&config, &user);
+        assert_eq!(claims["roles"].as_array().unwrap().len(), 64);
+        user.roles.push("role-64".into());
+        let issuer = TokenIssuer::new(&config, &keys).unwrap();
+        let refused = issuer.issue_access_token("desktop", RESOURCE, &["read".into()], &user);
+        assert_eq!(refused.err(), Some(TokenError::Identity));
+        // Without identity claims there is no realm claim.
+        config.resources[0].identity_claims = None;
+        user.roles = vec!["reader".into(), "member".into()];
+        assert!(claims_of(&config, &user).get("realm").is_none());
     }
     #[test]
     fn policy_identity_time_and_signing_binding_fail_closed() {

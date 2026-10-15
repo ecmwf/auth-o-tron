@@ -415,6 +415,7 @@ mod tests {
         augmenters::AugmenterConfig, config::ConfigV2, oauth::refresh::tests::grant,
         store::no_store::NoStore,
     };
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use rsa::pkcs8::{EncodePrivateKey, LineEnding};
     use std::{io::Write, sync::Arc, time::Duration};
 
@@ -423,6 +424,12 @@ mod tests {
     }
     /// The runtime, with `edit` applied to the `desktop` client's refresh-token policy.
     async fn runtime_with(
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> (tempfile::NamedTempFile, ConfigV2, Arc<OAuthRuntime>) {
+        runtime_from(|value| edit(&mut value["oauth"]["clients"][0]["refresh_tokens"])).await
+    }
+    /// The runtime, with `edit` applied to the whole configuration.
+    async fn runtime_from(
         edit: impl FnOnce(&mut serde_json::Value),
     ) -> (tempfile::NamedTempFile, ConfigV2, Arc<OAuthRuntime>) {
         let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -441,7 +448,7 @@ mod tests {
                     "refresh_tokens": {"enabled": true, "idle_ttl_seconds": 600, "absolute_ttl_seconds": 3600}}],
                 "resources": [{"resource": "https://mcp.example.org/mcp", "allowed_realms": ["local"], "scopes": [{"name": "read", "required_roles": ["reader"]}]}]}
         });
-        edit(&mut value["oauth"]["clients"][0]["refresh_tokens"]);
+        edit(&mut value);
         let config: ConfigV2 = serde_json::from_value(value).unwrap();
         let runtime = OAuthRuntime::initialize(&config).await.unwrap().unwrap();
         (file, config, runtime)
@@ -1135,6 +1142,44 @@ mod tests {
         }
         counted(&metrics, "retried", 0);
         counted(&metrics, "reuse_detected", 0);
+    }
+
+    #[tokio::test]
+    async fn refreshed_identity_claims_follow_the_rechecked_roles() {
+        let (_file, config, runtime) = runtime_from(|value| {
+            value["oauth"]["resources"][0]["identity_claims"] =
+                serde_json::json!({"roles": ["reader", "writer"]});
+        })
+        .await;
+        let (metrics, browser) = (Metrics::new(), browser(&config));
+        let claims = |response: &serde_json::Value| -> serde_json::Value {
+            let token = response["access_token"].as_str().unwrap();
+            let payload = token.split('.').nth(1).unwrap();
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap()
+        };
+        let first = family(&runtime, &grant()).await;
+        let reader = refreshed(&runtime, &first, &granting(&config), &browser, &metrics)
+            .await
+            .unwrap();
+        let claimed = claims(&reader);
+        assert_eq!(
+            (&claimed["realm"], &claimed["roles"]),
+            (&"local".into(), &serde_json::json!(["reader"]))
+        );
+        // The next refresh carries the roles augmentation grants then.
+        let writer = auth(
+            &config,
+            serde_json::json!([{"type": "plain", "name": "r", "realm": "local",
+                "roles": {"reader": ["alice"], "writer": ["alice"], "other": ["alice"]}}]),
+        );
+        let next = refresh_token(&reader);
+        let both = refreshed(&runtime, &next, &writer, &browser, &metrics)
+            .await
+            .unwrap();
+        assert_eq!(
+            claims(&both)["roles"],
+            serde_json::json!(["reader", "writer"])
+        );
     }
 
     #[tokio::test]
