@@ -343,6 +343,9 @@ impl OAuthRuntime {
                 TokenError::Policy(_) | TokenError::Identity => InvalidGrant,
                 _ => Unavailable,
             })?;
+        // Augmentation can take seconds: the store's checks measure windows and
+        // deadlines from now, not from the start of the refresh.
+        let now = self.now().await.map_err(|_| Unavailable)?;
         // The previous token is answered with the current one if the store still
         // confirms it, within the window and cap, as the last step.
         if rotated_at.is_some() {
@@ -413,7 +416,7 @@ mod tests {
         store::no_store::NoStore,
     };
     use rsa::pkcs8::{EncodePrivateKey, LineEnding};
-    use std::{io::Write, sync::Arc};
+    use std::{io::Write, sync::Arc, time::Duration};
 
     async fn runtime() -> (tempfile::NamedTempFile, ConfigV2, Arc<OAuthRuntime>) {
         runtime_with(|_| {}).await
@@ -955,6 +958,82 @@ mod tests {
         assert_ne!(a["access_token"], b["access_token"]);
         counted(&metrics, "rotated", 1);
         counted(&metrics, "retried", 1);
+    }
+
+    /// Sleeps in every augmentation.
+    struct Slow(Duration);
+    #[async_trait::async_trait]
+    impl crate::augmenters::base::Augmenter for Slow {
+        fn get_name(&self) -> &str {
+            "slow"
+        }
+        fn get_type(&self) -> &str {
+            "slow"
+        }
+        fn get_realm(&self) -> &str {
+            "local"
+        }
+        async fn augment(&self, _: Arc<futures::lock::Mutex<User>>) -> Result<(), String> {
+            tokio::time::sleep(self.0).await;
+            Ok(())
+        }
+    }
+
+    /// A family whose first token was rotated to a second `ago` ms before now, the
+    /// successor sealed as a refresh seals it.
+    async fn rotated_ago(runtime: &OAuthRuntime, ago: u64) -> (RefreshToken, RefreshToken) {
+        let RefreshBackend::Memory(store) = runtime.refresh.as_ref().unwrap() else {
+            unreachable!()
+        };
+        let now = runtime.now().await.unwrap();
+        let (previous, next) = (
+            RefreshToken::generate().unwrap(),
+            RefreshToken::generate().unwrap(),
+        );
+        let policy = runtime.refresh_policy("desktop").unwrap();
+        let at = now - ago;
+        store
+            .issue(&grant(), previous.hash(), at - 1_000, policy, None)
+            .await
+            .unwrap();
+        let Presented::Current(family) = store.lookup(&previous.hash(), at).await.unwrap() else {
+            panic!("expected a live family");
+        };
+        let sealed = previous
+            .seal_successor(&runtime.retry_key, &family.family_id, &next)
+            .unwrap();
+        let fixture = grant();
+        let rotation = Rotation {
+            next: next.hash(),
+            sealed: &sealed,
+            grant: &fixture,
+            idle_ttl_seconds: 600,
+            ceiling: now + 3_600_000,
+            retry_window_ms: 30_000,
+        };
+        let outcome = store.rotate(&previous.hash(), &rotation, at).await.unwrap();
+        assert_eq!(outcome, Rotated::Rotated);
+        (previous, next)
+    }
+
+    #[tokio::test]
+    async fn the_retry_window_is_measured_when_the_store_answers() {
+        let (_file, config, runtime) = runtime_with(|policy| {
+            policy["retry_window_seconds"] = 1.into();
+        })
+        .await;
+        let mut auth = granting(&config);
+        auth.augmenters
+            .push(Box::new(Slow(Duration::from_millis(800))));
+        let (metrics, browser) = (Metrics::new(), browser(&config));
+        // Within the window when the refresh starts, past it once augmentation ends.
+        let (old, next) = rotated_ago(&runtime, 500).await;
+        let late = refreshed(&runtime, &old, &auth, &browser, &metrics).await;
+        assert_eq!(late.err(), Some(RefreshGrantError::InvalidGrant));
+        refreshed(&runtime, &next, &auth, &browser, &metrics)
+            .await
+            .unwrap();
+        counted(&metrics, "retried", 0);
     }
 
     #[tokio::test]
