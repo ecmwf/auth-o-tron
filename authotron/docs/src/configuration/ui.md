@@ -517,6 +517,22 @@ without a session it still clears the cookie. A refused form changes nothing and
 shows a generic page. Signing out ends only the browser session: applications that
 hold [refresh tokens](oauth.md#refresh-tokens) stay signed in, and the provider
 session of an OIDC method is not ended.
+
+**Your logins.** When a client has refresh tokens, the account view also lists the
+identity's logins: the live refresh-token families whose realm and username equal
+the session's exactly, newest first and at most `max_refresh_token_families_per_user`.
+Each shows the client's display name, the sign-in method's label, when it started,
+when it was last used (its latest refresh), when it expires if unused and at the
+latest, and the short family reference of the audit log; tokens and family ids are
+never shown; if the refresh-token store cannot be read, the page says so and still
+offers Sign out. A "Revoke" button per login and a "Revoke all logins" button post to
+`POST /login/account/logins/revoke` with the page's form token, checked like Sign out.
+A posted reference is looked up among the user's own logins only, so a forged value
+cannot reach another user's; the notice afterwards is the same whether it matched.
+A revoked login cannot refresh any more: its application signs in again once its
+current access token expires. Revocations are logged with `reason="user_revoke"`,
+and the upstream grant of a family coupled to an OIDC offline session is revoked at
+the provider in the background, as for any other revocation.
 Only `ecmwf-email`, `email` and `display_name` are displayed; arbitrary attributes
 and scopes are not rendered. These are operator-controlled display data, not
 verified-email claims. Do not put sensitive data in these display fields.

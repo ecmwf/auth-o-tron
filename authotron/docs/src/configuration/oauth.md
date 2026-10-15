@@ -515,7 +515,8 @@ family. It never rejects the new login.
 authentication; public clients) revokes the whole family of any refresh token it
 belongs to. Unknown, malformed, foreign-client or access tokens return 200 with no
 effect (RFC 7009 §2.2). Signed access tokens cannot be revoked and remain valid until
-their `exp`.
+their `exp`. Users can revoke their own logins on the account page
+([Your logins](ui.md)).
 
 **Caveats.**
 

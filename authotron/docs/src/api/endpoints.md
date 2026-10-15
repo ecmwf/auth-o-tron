@@ -234,8 +234,9 @@ They return 404 when disabled. See [Login UI](../configuration/ui.md).
 | `GET /login/method/{id}/callback` | OIDC methods only: provider redirect target; 303 `/login/account` (browser session) or `/oauth/continue` (authorization request), otherwise a generic 400/403/503 page |
 | `POST /login/method/{id}` (`plain`) | URL-encoded `username`, `password`, `csrf` (plus `oauth_transaction` during OAuth) only; username ≤256 UTF-8 bytes, password ≤1,024 UTF-8 bytes; Unicode/whitespace password preserved |
 | `POST /login/method/{id}` (`ecmwf-api`) | URL-encoded `api_key`, `csrf` (plus `oauth_transaction` during OAuth) only; key ≤512 bytes |
-| `GET /login/account` | Session-only augmented identity, escaped roles, and allowlisted `ecmwf-email`, `email`, `display_name`, with a "Sign out" form; sets the form-nonce cookie, and all forms of one page view share one CSRF transaction; no session →303 `/login` |
+| `GET /login/account` | Session-only augmented identity, escaped roles, and allowlisted `ecmwf-email`, `email`, `display_name`, with a "Sign out" form and, when a client has refresh tokens, the identity's logins with revoke forms; sets the form-nonce cookie, and all forms of one page view share one CSRF transaction; `?revoked` adds a fixed notice; no session →303 `/login` |
 | `POST /login/logout` | URL-encoded `csrf` of the account page only; exact Origin and form-nonce cookie as for sign-in forms. Deletes the browser session from the backend, clears the session cookie (same attributes, `Max-Age=0`) and answers 303 `/login?signed-out`, also when there is no session. A refused form gets a generic 400/403 page and changes nothing; backend failure is 503. Refresh-token families are not affected |
+| `POST /login/account/logins/revoke` | Only when a client has refresh tokens. URL-encoded `csrf` of the account page and `login`: a 12-hex family reference or `all`; checked like `/login/logout`. Revokes that login, or all, of the session's realm and username only, then 303 `/login/account?revoked`; no session →303 `/login`; refused forms 400/403 as above |
 
 POSTs are limited to 8 KiB. Successful POST →303 `/login/account` with a rotated
 Secure/HttpOnly/SameSite=Lax host-only opaque session cookie. Failures are generic:
@@ -276,3 +277,4 @@ Session cookies are not accepted by `/authenticate`, `/whoami`, or token APIs.
 | GET | /login/method/{id}/callback | 8080 | Bound sign-in state | OIDC provider callback |
 | GET | /login/account | 8080 | Browser session | Augmented browser identity view |
 | POST | /login/logout | 8080 | Form + CSRF | Ends the browser session |
+| POST | /login/account/logins/revoke | 8080 | Browser session, form + CSRF | Revokes the user's own refresh-token logins |
