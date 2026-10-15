@@ -602,9 +602,9 @@ Keys are trusted absolute file references, loaded explicitly on enabled startup.
 The Unix loader accepts bounded PKCS8/PKCS1 private PEM and SPKI/PKCS1 public PEM,
 checks 2048–4096-bit RSA and private/public consistency, and publishes only public JWKS.
 One active key and up to eight unique IDs are supported; inactive public keys permit
-verification overlap. Rotation/reload is not automatic: coordinate replicas and retain
-old public keys through the longest access-token lifetime plus clock skew. Never expose
-or reuse legacy `jwt.secret` as an OAuth RSA key.
+verification overlap. Rotation/reload is not automatic: follow
+[Key rotation](#key-rotation). Never expose or reuse legacy `jwt.secret` as an OAuth
+RSA key.
 
 The HTTP token controller always uses atomic redemption then
 `TokenIssuer::issue_from_redeemed`. The direct raw-User entry point
@@ -620,6 +620,70 @@ Dynamic/CIMD registration, confidential-client authentication, browser token COR
 automatic operational key rotation are deferred. The supported flow is preregistered
 public clients with a fresh sign-in through a browser method (password, API key or an
 [OpenID Connect method](oidc.md)), explicit consent and code/S256 exchange.
+
+## Key rotation
+
+Keys are read at startup only. Each step below is one configuration change, rolled
+out to every replica before the next step starts; refresh-token families on a
+shared Valkey live through all of them. Replicas briefly run different steps during
+a rollout, which is why a new key is always added before it is used and removed only
+after nothing needs it.
+
+**Access-token signing keys** (`oauth.signing`, up to eight keys). Every listed key
+is published at `/oauth/jwks`; `active_kid` signs.
+
+1. **Add** the new key next to the active one, leaving `active_kid` unchanged. The
+   JWKS lists both. Resource servers must have fetched it before the next step, so
+   wait at least their JWKS cache lifetime.
+2. **Switch** `active_kid` to the new key. Access tokens issued from now on,
+   including those of refreshes, carry its `kid`. Refresh-token families are not
+   bound to a signing key and continue unchanged. Tokens of the old key still
+   verify, because it is still published.
+3. **Remove** the old key once the longest access-token lifetime
+   (`access_token_ttl_seconds`) plus clock skew has passed since the last replica
+   switched. It leaves the JWKS; no token it signed is still valid.
+
+After step 2, the old entry may keep only its public key:
+
+```yaml
+oauth:
+  signing:
+    active_kid: signing-2027
+    keys:
+      - kid: signing-2027
+        private_key_file: /run/secrets/oauth/signing-2027.pem
+      - kid: signing-2026
+        public_key_file: /run/secrets/oauth/signing-2026.pub.pem
+```
+
+**Upstream token encryption keys** (`oauth.upstream_token_encryption`, up to four
+keys). New sign-ins and every stored upstream grant are sealed with `active_kid`;
+any listed key opens the grants sealed under it.
+
+1. **Add** the new key file, leaving `active_kid` unchanged, so that every replica
+   can open what the others will seal with it.
+2. **Switch** `active_kid` to the new key. From then on, each refresh of a coupled
+   family stores its upstream grant sealed under the new key, whether or not the
+   provider rotated its token (counted as `rotated` or `resealed` in
+   `authotron_oauth_upstream_tokens_total`). Grants sealed under the old key keep
+   opening. While the switch rolls out, or after rolling it back, a replica still on
+   the old active key reseals the grants it refreshes back under that key; both keys
+   open everything, so this is harmless, and the last switch decides.
+3. **Remove** the old key once no live family needs it. A family that is refreshed
+   after the switch no longer does; one that is not refreshed before its idle
+   deadline expires. Each family's idle deadline was set at its last rotation with
+   the `idle_ttl_seconds` in force then, so wait for the longest value any coupled
+   client had since before the switch, not only the current one, after the last
+   replica switched. Check that `reseal_failed` stayed at zero meanwhile: a family
+   whose reseal failed may still be sealed under the old key (its next refresh tries
+   again). A family still sealed under a removed key fails closed at its next
+   refresh: 400 `invalid_grant` without a provider request, the family is revoked
+   (`oauth.upstream.unopenable`, then `oauth.refresh_token.family_revoked` with
+   `reason="upstream_unusable"`), its upstream grant cannot be revoked at the
+   provider (`revocation_skipped`), and the user signs in again.
+
+The login playground renderer derives key ids from key material and replaces each
+key in one step when its file is deleted; it does not stage these rotations.
 
 ## Self-contained verification
 

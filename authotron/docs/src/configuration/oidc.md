@@ -284,7 +284,7 @@ families already coupled keep renewing at the provider until they end.
 
 | Refresh situation | Response | Family | Upstream token |
 |-------------------|----------|--------|----------------|
-| Provider refreshed the grant | as for other families | rotated | stored (rotated if the provider rotated it) |
+| Provider refreshed the grant | as for other families | rotated | stored if the provider rotated it, or if an older key sealed it |
 | Provider answers `invalid_grant` (expired, revoked, account disabled) | 400 `invalid_grant` | revoked | revoked |
 | Sealed grant cannot be opened (key removed, other binding) | 400 `invalid_grant` | revoked | cannot be revoked (skipped) |
 | `sub` or username changed, refreshed claims unusable | 400 `invalid_grant` | revoked | revoked |
@@ -293,8 +293,9 @@ families already coupled keep renewing at the provider until they end.
 **Keys.** Each key file holds 32 random bytes in standard Base64 (44 characters);
 up to four keys may be listed. New grants are sealed with `active_kid`; older keys
 keep opening grants sealed before a rotation, which are re-sealed with the active
-key at their next upstream rotation. Keep a key until the families it sealed have
-ended, or they end at their next refresh. A sealed grant is bound to its key id,
+key at their next upstream refresh, also when the provider keeps its token. Keep a
+key until the families it sealed have ended or moved, or they end at their next
+refresh; see [Key rotation](oauth.md#key-rotation). A sealed grant is bound to its key id,
 method, issuer, OAuth client, realm and username, so it cannot be moved to another
 family's user or client; Valkey holds only ciphertext.
 

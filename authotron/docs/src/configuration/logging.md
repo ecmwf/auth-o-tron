@@ -125,6 +125,7 @@ family):
 | `oauth.upstream.id_token_unverified`, `oauth.upstream.identity_missing` | WARN | The refreshed ID token cannot be verified or is missing; the family is kept |
 | `oauth.upstream.lock_busy` | WARN | Another refresh of the family held its lock |
 | `oauth.upstream.rotation_lost` | ERROR | The provider rotated the grant but the new token could not be stored |
+| `oauth.upstream.reseal_failed` | WARN | The provider kept its token, sealed under an older key, and storing it under the active key failed; the family is kept |
 | `oauth.upstream.revocation_sent` | INFO | The provider's revocation endpoint accepted the grant |
 | `oauth.upstream.revocation_unsupported` | INFO | The provider advertises no revocation endpoint |
 | `oauth.upstream.revocation_failed` | WARN | The revocation request failed (`reason`) |
