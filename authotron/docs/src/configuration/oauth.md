@@ -390,10 +390,24 @@ Access tokens for that resource then carry two more claims:
 Both are present whenever the resource opted in; `roles` may be empty. The list holds 1
 to 64 names of 1 to 128 bytes, without control characters or surrounding whitespace,
 and `*` only alone. A token carries at most 64 roles, since identities with more are
-refused. Scope checks are unchanged, and each refresh computes the claims again from
-the roles it re-checked: a role removed at the provider or by augmentation is gone at
-the next refresh, while tokens already issued keep theirs until `exp`. Without
-`identity_claims`, tokens are unchanged and carry no `realm`.
+refused. Scope checks are unchanged. Without `identity_claims`, tokens are unchanged
+and carry no `realm`.
+
+**When removed roles disappear.** Each refresh computes the claims again from the roles
+it re-checks, and tokens already issued keep theirs until `exp`. Augmentation runs again
+at every refresh, so a role an augmenter no longer grants is gone at the next one. The
+sign-in method's roles are asked for again only by a family coupled to an OIDC offline
+session, whose refresh renews the upstream grant: a role removed at that provider is
+gone at the next refresh. Every other family keeps the method's roles of its sign-in
+until it ends, idle or at its absolute lifetime. To take a removed role away sooner,
+[revoke the user's logins](#revoking-logins), for example with
+`authotron admin logins revoke --realm <realm> --username <name>`; the application
+then signs in again and gets the current roles.
+
+**Rolling it out.** Turning `identity_claims` on changes what `roles` means for that
+resource: from the roles the granted scopes require to the user's own roles. A
+resource server that reads `roles` as the former must be switched in the same rollout,
+and tokens issued before the change, without `realm`, stay valid until their `exp`.
 
 aviso-server reads these claims with `mcp.identity.source: token_claims`: it takes the
 realm and roles from the validated access token instead of looking the user up.
