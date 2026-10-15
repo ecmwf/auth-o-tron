@@ -27,6 +27,7 @@ BASIC = {"username": renderer.BASIC_USERNAME, "password": TOKEN}
 OAUTH_KEY = renderer.oauth_pem(
     rsa.generate_private_key(public_exponent=65537, key_size=2048)
 )
+RETRY_KEY = base64.b64encode(bytes(range(32))).decode()
 OTHER_OAUTH_KEY = renderer.oauth_pem(
     rsa.generate_private_key(public_exponent=65537, key_size=2048)
 )
@@ -288,7 +289,14 @@ class RendererTests(unittest.TestCase):
 
     def test_metrics_are_served_in_cluster_but_never_routed_by_the_ingress(self):
         baseline, _ = self.baseline()
-        for options in ({}, dict(valkey_password=VALKEY_PASSWORD, oauth_key=OAUTH_KEY)):
+        for options in (
+            {},
+            dict(
+                valkey_password=VALKEY_PASSWORD,
+                oauth_key=OAUTH_KEY,
+                retry_key=RETRY_KEY,
+            ),
+        ):
             resources = renderer.transform(baseline, HOST, TOKEN, BASIC, **options)
             config = yaml.safe_load(find(resources, "ConfigMap")["data"]["config.yaml"])
             self.assertEqual(config["metrics"], {"enabled": True, "port": 9090})
@@ -1132,6 +1140,7 @@ class RendererTests(unittest.TestCase):
             basic,
             valkey_password=VALKEY_PASSWORD,
             oauth_key=key,
+            retry_key=RETRY_KEY,
         )
 
     def test_oauth_off_output_is_unchanged_from_previous_profiles(self):
@@ -1324,6 +1333,7 @@ class RendererTests(unittest.TestCase):
         options = dict(
             valkey_password=VALKEY_PASSWORD,
             oauth_key=OAUTH_KEY,
+            retry_key=RETRY_KEY,
             oauth_aviso_resource=AVISO,
         )
         for basic, realms in ((None, ["ecmwf"]), (BASIC, ["browser-demo", "ecmwf"])):
@@ -1427,6 +1437,7 @@ class RendererTests(unittest.TestCase):
         options = dict(
             valkey_password=VALKEY_PASSWORD,
             oauth_key=OAUTH_KEY,
+            retry_key=RETRY_KEY,
             oauth_trusted_proxies=proxies,
         )
         resources = renderer.transform(baseline, HOST, TOKEN, BASIC, **options)
@@ -1484,6 +1495,7 @@ class RendererTests(unittest.TestCase):
         options = dict(
             valkey_password=VALKEY_PASSWORD,
             oauth_key=OAUTH_KEY,
+            retry_key=RETRY_KEY,
             oauth_allow_ecmwf_uids=("user_a", "user_b"),
         )
         for basic in (None, BASIC):
@@ -1543,6 +1555,7 @@ class RendererTests(unittest.TestCase):
                         BASIC,
                         valkey_password=VALKEY_PASSWORD,
                         oauth_key=oauth_key,
+                        retry_key=oauth_key and RETRY_KEY,
                         oauth_allow_ecmwf_uids=uids,
                     )
 
@@ -1556,6 +1569,7 @@ class RendererTests(unittest.TestCase):
             BASIC,
             valkey_password=VALKEY_PASSWORD,
             oauth_key=OAUTH_KEY,
+            retry_key=RETRY_KEY,
             oauth_allow_ecmwf_uids=("listed",),
         )
         config = yaml.safe_load(find(resources, "ConfigMap")["data"]["config.yaml"])
@@ -1592,7 +1606,11 @@ class RendererTests(unittest.TestCase):
             return {p["type"]: p["browser"] for p in config["providers"]}
 
         self.assertEqual(
-            browser_blocks(valkey_password=VALKEY_PASSWORD, oauth_key=OAUTH_KEY),
+            browser_blocks(
+                valkey_password=VALKEY_PASSWORD,
+                oauth_key=OAUTH_KEY,
+                retry_key=RETRY_KEY,
+            ),
             {
                 "plain": {"id": "password", "label": renderer.BASIC_LABEL},
                 "ecmwf-api": {
@@ -1678,6 +1696,7 @@ class RendererTests(unittest.TestCase):
                     basic,
                     valkey_password=VALKEY_PASSWORD,
                     oauth_key=OAUTH_KEY,
+                    retry_key=RETRY_KEY,
                 )
                 self.assertEqual(len(resources), 10)
                 public_text = find(resources, "ConfigMap")["data"]["config.yaml"]
@@ -1741,9 +1760,16 @@ class RendererTests(unittest.TestCase):
                 self.assertEqual(
                     sorted(p["realm"] for p in config["providers"]), sorted(realms)
                 )
+                self.assertEqual(
+                    oauth["refresh_token_retry_key_file"],
+                    "/run/secrets/oauth/retry.key",
+                )
                 secret = find(resources, "Secret")["data"]
                 self.assertEqual(
                     base64.b64decode(secret["oauth-signing.pem"]).decode(), OAUTH_KEY
+                )
+                self.assertEqual(
+                    base64.b64decode(secret["oauth-retry.key"]).decode(), RETRY_KEY
                 )
                 if basic:
                     private = yaml.safe_load(base64.b64decode(secret["config.yaml"]))
@@ -1753,12 +1779,13 @@ class RendererTests(unittest.TestCase):
                 self.assertEqual(
                     pod["volumes"][-1],
                     {
-                        "name": "oauth-signing",
+                        "name": "oauth-keys",
                         "secret": {
                             "secretName": renderer.SECRET_NAME,
                             "defaultMode": 0o440,
                             "items": [
-                                {"key": "oauth-signing.pem", "path": "signing.pem"}
+                                {"key": "oauth-signing.pem", "path": "signing.pem"},
+                                {"key": "oauth-retry.key", "path": "retry.key"},
                             ],
                         },
                     },
@@ -1766,7 +1793,7 @@ class RendererTests(unittest.TestCase):
                 self.assertEqual(
                     pod["containers"][0]["volumeMounts"][-1],
                     {
-                        "name": "oauth-signing",
+                        "name": "oauth-keys",
                         "mountPath": "/run/secrets/oauth",
                         "readOnly": True,
                     },
@@ -1774,6 +1801,10 @@ class RendererTests(unittest.TestCase):
                 self.assertEqual(
                     app["metadata"]["annotations"]["checksum/oauth-signing-key"],
                     hashlib.sha256(OAUTH_KEY.encode()).hexdigest(),
+                )
+                self.assertEqual(
+                    app["metadata"]["annotations"]["checksum/oauth-retry-key"],
+                    hashlib.sha256(RETRY_KEY.encode()).hexdigest(),
                 )
                 paths = find(resources, "Ingress")["spec"]["rules"][0]["http"]["paths"]
                 self.assertEqual(
@@ -1790,11 +1821,71 @@ class RendererTests(unittest.TestCase):
             text = yaml.safe_dump(doc)
             if doc["kind"] == "Secret":
                 text = yaml.safe_dump(
-                    {k: v for k, v in doc["data"].items() if k != "oauth-signing.pem"}
+                    {
+                        k: v
+                        for k, v in doc["data"].items()
+                        if k not in ("oauth-signing.pem", "oauth-retry.key")
+                    }
                 )
-            for needle in ("PRIVATE KEY", body[:64], encoded[:64]):
+            for needle in ("PRIVATE KEY", body[:64], encoded[:64], RETRY_KEY):
                 self.assertNotIn(needle, text)
         self.assertNotIn(b"PRIVATE KEY", archive)
+
+    def test_retry_key_is_generated_once_required_with_oauth_and_rolls_out(self):
+        path = self.root / "retry.json"
+        key = renderer.retry_key(path)
+        self.assertEqual(len(base64.b64decode(key, validate=True)), 32)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(renderer.retry_key(path), key)
+        for payload in ({"retry-key": key, "other": key}, {"retry-key": key[:-4]}):
+            path.write_text(json.dumps(payload))
+            with self.assertRaises(ValueError):
+                renderer.retry_key(path)
+        baseline, _ = self.baseline()
+        options = dict(valkey_password=VALKEY_PASSWORD, oauth_key=OAUTH_KEY)
+        with self.assertRaisesRegex(ValueError, "requires a refresh-token retry key"):
+            renderer.transform(baseline, HOST, TOKEN, BASIC, **options)
+        with self.assertRaisesRegex(ValueError, "requires the OAuth profile"):
+            renderer.transform(
+                baseline,
+                HOST,
+                TOKEN,
+                BASIC,
+                valkey_password=VALKEY_PASSWORD,
+                retry_key=RETRY_KEY,
+            )
+        other = base64.b64encode(bytes(32)).decode()
+        first, second = (
+            renderer.transform(baseline, HOST, TOKEN, BASIC, **options, retry_key=k)
+            for k in (RETRY_KEY, other)
+        )
+        annotations = [
+            find(d, "Deployment")["spec"]["template"]["metadata"]["annotations"]
+            for d in (first, second)
+        ]
+        self.assertNotEqual(
+            annotations[0]["checksum/oauth-retry-key"],
+            annotations[1]["checksum/oauth-retry-key"],
+        )
+        self.assertEqual(
+            annotations[0]["checksum/oauth-signing-key"],
+            annotations[1]["checksum/oauth-signing-key"],
+        )
+        mutated = copy.deepcopy(first)
+        find(mutated, "Secret")["data"]["oauth-retry.key"] = base64.b64encode(
+            other.encode()
+        ).decode()
+        with self.assertRaises(ValueError):
+            renderer.validate_resources(
+                mutated,
+                baseline,
+                HOST,
+                IMAGE,
+                TOKEN,
+                BASIC,
+                **options,
+                retry_key=RETRY_KEY,
+            )
 
     def test_oauth_key_rotation_rolls_out_with_digest_only(self):
         baseline, _ = self.baseline()
@@ -1812,18 +1903,32 @@ class RendererTests(unittest.TestCase):
         baseline, _ = self.baseline()
         for basic in (None, BASIC):
             with self.assertRaisesRegex(ValueError, "Valkey"):
-                renderer.transform(baseline, HOST, TOKEN, basic, oauth_key=OAUTH_KEY)
+                renderer.transform(
+                    baseline,
+                    HOST,
+                    TOKEN,
+                    basic,
+                    oauth_key=OAUTH_KEY,
+                    retry_key=RETRY_KEY,
+                )
         with patch.object(renderer.preview.subprocess, "run") as command:
             with self.assertRaisesRegex(ValueError, "Valkey"):
                 renderer.render_api_key(
-                    self.project, self.project, HOST, IMAGE, TOKEN, oauth_key=OAUTH_KEY
+                    self.project,
+                    self.project,
+                    HOST,
+                    IMAGE,
+                    TOKEN,
+                    oauth_key=OAUTH_KEY,
+                    retry_key=RETRY_KEY,
                 )
             command.assert_not_called()
         with (
             patch(
                 "sys.argv",
                 self.cli_arguments()
-                + ["--oauth-secret-file", str(self.root / "oauth.json")],
+                + ["--oauth-secret-file", str(self.root / "oauth.json")]
+                + ["--retry-key-file", str(self.root / "retry.json")],
             ),
             patch.object(renderer, "signing_secret") as signing,
             patch.object(renderer, "oauth_signing_key") as oauth,
@@ -1834,11 +1939,14 @@ class RendererTests(unittest.TestCase):
             for mocked in (signing, oauth, render):
                 mocked.assert_not_called()
         self.assertFalse((self.root / "oauth.json").exists())
+        self.assertFalse((self.root / "retry.json").exists())
 
     def test_oauth_guard_rejects_exposure_and_reference_mutations(self):
         baseline, _ = self.baseline()
         resources = self.oauth_resources(baseline)
-        options = dict(valkey_password=VALKEY_PASSWORD, oauth_key=OAUTH_KEY)
+        options = dict(
+            valkey_password=VALKEY_PASSWORD, oauth_key=OAUTH_KEY, retry_key=RETRY_KEY
+        )
 
         def pod(docs):
             return find(docs, "Deployment")["spec"]["template"]["spec"]
@@ -1922,6 +2030,8 @@ class RendererTests(unittest.TestCase):
             str(self.root / "basic.json"),
             "--oauth-secret-file",
             str(oauth_file),
+            "--retry-key-file",
+            str(self.root / "retry.json"),
         ]
         with (
             patch("sys.argv", arguments),
@@ -1936,6 +2046,8 @@ class RendererTests(unittest.TestCase):
             renderer.main()
         pem = json.loads(oauth_file.read_text())["private-key-pem"]
         self.assertEqual(render.call_args.kwargs["oauth_key"], pem)
+        retry = json.loads((self.root / "retry.json").read_text())["retry-key"]
+        self.assertEqual(render.call_args.kwargs["retry_key"], retry)
         self.assertNotIn("oauth_allow_ecmwf_uids", render.call_args.kwargs)
         with (
             patch(
@@ -1985,8 +2097,15 @@ class RendererTests(unittest.TestCase):
         self.assertEqual(oauth_file.stat().st_mode & 0o777, 0o600)
         printed_text = str(printed.call_args_list)
         self.assertIn(f"OAuth issuer: https://{HOST}/", printed_text)
-        for needle in ("PRIVATE KEY", pem.splitlines()[1], TOKEN, VALKEY_PASSWORD):
+        for needle in (
+            "PRIVATE KEY",
+            pem.splitlines()[1],
+            TOKEN,
+            VALKEY_PASSWORD,
+            retry,
+        ):
             self.assertNotIn(needle, printed_text)
+        self.assertEqual((self.root / "retry.json").stat().st_mode & 0o777, 0o600)
         self.assertEqual((output_dir / "resources.yaml").stat().st_mode & 0o777, 0o600)
         without_oauth = arguments[: arguments.index("--oauth-secret-file")]
         with (
@@ -1998,10 +2117,26 @@ class RendererTests(unittest.TestCase):
                 renderer.main()
             signing.assert_not_called()
             render.assert_not_called()
+        # Without the retry key, or with only the retry key, nothing is rendered.
+        for bad in (
+            arguments[: arguments.index("--retry-key-file")],
+            without_oauth + ["--retry-key-file", str(self.root / "retry.json")],
+        ):
+            with (
+                patch("sys.argv", bad),
+                patch.object(renderer, "oauth_signing_key") as oauth,
+                patch.object(renderer, "retry_key") as retry_file,
+                patch.object(renderer, "render_api_key") as render,
+            ):
+                with self.assertRaisesRegex(ValueError, "go together"):
+                    renderer.main()
+                for mocked in (oauth, retry_file, render):
+                    mocked.assert_not_called()
         for extra in (
             ["--oauth-secret-file", str(self.root / "jwt.json")],
             ["--oauth-secret-file", str(self.root / "valkey.json")],
             ["--oauth-secret-file", str(output_dir / "resources.yaml")],
+            ["--retry-key-file", str(oauth_file)],
         ):
             with (
                 self.subTest(extra=extra),

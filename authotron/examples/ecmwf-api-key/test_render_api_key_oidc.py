@@ -41,6 +41,7 @@ class OidcRendererTests(unittest.TestCase):
         return {
             "valkey_password": base.VALKEY_PASSWORD,
             "oauth_key": base.OAUTH_KEY,
+            "retry_key": base.RETRY_KEY,
             "oauth_aviso_resource": base.AVISO,
             "oidc": copy.deepcopy(OIDC),
             **changes,
@@ -313,6 +314,8 @@ class OidcRendererTests(unittest.TestCase):
             str(self.root / "valkey.json"),
             "--oauth-secret-file",
             str(self.root / "oauth.json"),
+            "--retry-key-file",
+            str(self.root / "retry.json"),
             "--sso-issuer",
             ISSUER,
             "--sso-secret-file",
@@ -331,6 +334,7 @@ class OidcRendererTests(unittest.TestCase):
             patch.object(renderer, "signing_secret", return_value=base.TOKEN),
             patch.object(renderer, "valkey_secret", return_value=base.VALKEY_PASSWORD),
             patch.object(renderer, "oauth_signing_key", return_value=base.OAUTH_KEY),
+            patch.object(renderer, "retry_key", return_value=base.RETRY_KEY),
             patch.object(renderer, "sso_client_secret", return_value=CLIENT_SECRET),
             patch.object(renderer, "upstream_key", return_value=UPSTREAM_KEY),
             patch.object(
@@ -344,11 +348,16 @@ class OidcRendererTests(unittest.TestCase):
         for value in (CLIENT_SECRET, UPSTREAM_KEY):
             self.assertNotIn(value, str(printed.call_args_list))
 
+    def test_retry_key_must_differ_from_the_upstream_key(self):
+        baseline, _ = self.baseline()
+        with self.assertRaisesRegex(ValueError, "differ from the upstream token key"):
+            self.render(baseline, retry_key=UPSTREAM_KEY)
+
     def test_cli_rejects_partial_or_unsupported_sso_before_credentials(self):
         full = self.sso_arguments()
         oauth_less = list(full)
         index = oauth_less.index("--oauth-secret-file")
-        del oauth_less[index : index + 2]
+        del oauth_less[index : index + 4]
         invalid = [
             full[: full.index("--sso-secret-file")],
             full[: full.index("--upstream-key-file")],

@@ -59,7 +59,10 @@ METRICS_PORT_NAME = "http-metrics"
 OAUTH_KEY_DIR = "/run/secrets/oauth"
 OAUTH_KEY_NAME = "signing.pem"
 OAUTH_SECRET_KEY = "oauth-signing.pem"
-OAUTH_VOLUME = "oauth-signing"
+# The refresh-token retry key, beside the signing key in the same Secret and volume.
+OAUTH_RETRY_KEY_NAME = "retry.key"
+OAUTH_RETRY_SECRET_KEY = "oauth-retry.key"
+OAUTH_VOLUME = "oauth-keys"
 OAUTH_RESOURCE = "https://127.0.0.1:8444/mcp"
 OAUTH_SCOPE = "mcp:read"
 # `mcp:read` requires this role: the Basic demo user gets it from its augmenter
@@ -704,6 +707,21 @@ def upstream_key(path):
     )
 
 
+def retry_key(path):
+    """The refresh-token retry key every replica shares, generated on first use."""
+
+    def validate(payload):
+        if not isinstance(payload, dict) or set(payload) != {"retry-key"}:
+            raise ValueError("retry key file must contain only retry-key")
+        return checked_key(payload["retry-key"], "refresh-token retry")
+
+    return private_json(
+        path,
+        lambda: {"retry-key": base64.b64encode(secrets.token_bytes(32)).decode()},
+        validate,
+    )
+
+
 def sso_client_secret(path):
     """Only `authotron-client-secret` from render_sso.py's existing private bundle; this
     renderer never creates or changes that file."""
@@ -828,7 +846,7 @@ def checked_oidc_issuer(value):
     return value
 
 
-def checked_upstream_key(value):
+def checked_key(value, purpose):
     """32 random bytes in canonical standard Base64, as the server's key files hold.
     Valid: the 44 characters `openssl rand -base64 32` writes. Invalid: unpadded or
     URL-safe text, or a 16-byte key."""
@@ -837,7 +855,26 @@ def checked_upstream_key(value):
     except ValueError:
         raw = b""
     if len(raw) != 32 or base64.b64encode(raw).decode() != value:
-        raise ValueError("expected a generated 32-byte upstream token key")
+        raise ValueError(f"expected a generated 32-byte {purpose} key")
+    return value
+
+
+def checked_upstream_key(value):
+    return checked_key(value, "upstream token")
+
+
+def checked_retry_key(value, oauth_enabled, oidc=None):
+    """The OAuth profile stores refresh tokens in Valkey, so the server requires a retry
+    key; it must differ from the upstream token key. Refused without the profile."""
+    if not oauth_enabled:
+        if value is not None:
+            raise ValueError("--retry-key-file requires the OAuth profile")
+        return None
+    if value is None:
+        raise ValueError("the OAuth profile requires a refresh-token retry key")
+    checked_key(value, "refresh-token retry")
+    if oidc is not None and oidc["upstream_key"] == value:
+        raise ValueError("the retry key must differ from the upstream token key")
     return value
 
 
@@ -959,6 +996,7 @@ def oauth_config(
         },
         "clients": oauth_clients(aviso_resource, upstream_kid is not None),
         "resources": resources,
+        "refresh_token_retry_key_file": f"{OAUTH_KEY_DIR}/{OAUTH_RETRY_KEY_NAME}",
     }
     if trusted_proxies:
         config["endpoint_rate_limit"] = {"trusted_proxies": list(trusted_proxies)}
@@ -1021,6 +1059,7 @@ def transform(
     valkey_storage_size="1Gi",
     valkey_storage_class=None,
     oidc=None,
+    retry_key=None,
 ):
     checked_session_options(
         valkey_password, replicas, session_ttl_seconds, transaction_ttl_seconds
@@ -1031,6 +1070,7 @@ def transform(
     aviso = checked_aviso_resource(oauth_aviso_resource, oauth_key is not None)
     proxies = checked_trusted_proxies(oauth_trusted_proxies, oauth_key is not None)
     oidc = checked_oidc(oidc, oauth_key is not None)
+    checked_retry_key(retry_key, oauth_key is not None, oidc)
     checked_token(token)
     resources = copy.deepcopy(baseline)
     config_map = next(d for d in resources if d["kind"] == "ConfigMap" and "data" in d)
@@ -1177,18 +1217,25 @@ def transform(
         }
         mounted_yaml = private_yaml
     if oauth_key is not None:
-        resources[-1]["data"][OAUTH_SECRET_KEY] = base64.b64encode(
-            oauth_key.encode("ascii")
-        ).decode("ascii")
+        for key, value in (
+            (OAUTH_SECRET_KEY, oauth_key),
+            (OAUTH_RETRY_SECRET_KEY, retry_key),
+        ):
+            resources[-1]["data"][key] = base64.b64encode(value.encode("ascii")).decode(
+                "ascii"
+            )
         template["spec"]["volumes"].append(
             {
                 "name": OAUTH_VOLUME,
-                # 0440 plus the pod's fsGroup 1000 lets the non-root app read the key
-                # without making it world-readable.
+                # 0440 plus the pod's fsGroup 1000 lets the non-root app read the keys
+                # without making them world-readable.
                 "secret": {
                     "secretName": SECRET_NAME,
                     "defaultMode": 0o440,
-                    "items": [{"key": OAUTH_SECRET_KEY, "path": OAUTH_KEY_NAME}],
+                    "items": [
+                        {"key": OAUTH_SECRET_KEY, "path": OAUTH_KEY_NAME},
+                        {"key": OAUTH_RETRY_SECRET_KEY, "path": OAUTH_RETRY_KEY_NAME},
+                    ],
                 },
             }
         )
@@ -1197,6 +1244,9 @@ def transform(
         )
         template["metadata"]["annotations"]["checksum/oauth-signing-key"] = (
             hashlib.sha256(oauth_key.encode("ascii")).hexdigest()
+        )
+        template["metadata"]["annotations"]["checksum/oauth-retry-key"] = (
+            hashlib.sha256(retry_key.encode("ascii")).hexdigest()
         )
     if oidc is not None:
         values = {
@@ -1278,6 +1328,7 @@ def validate_resources(
     valkey_storage_size="1Gi",
     valkey_storage_class=None,
     oidc=None,
+    retry_key=None,
 ):
     """Compare the full output to the narrowly transformed, validated prototype."""
     preview.validate_inputs(host, image)
@@ -1331,6 +1382,7 @@ def validate_resources(
             valkey_storage_size=valkey_storage_size,
             valkey_storage_class=valkey_storage_class,
             oidc=oidc,
+            retry_key=retry_key,
         )
     )
     if resource_map(resources) != expected:
@@ -1358,6 +1410,7 @@ def render_api_key(
     valkey_storage_size="1Gi",
     valkey_storage_class=None,
     oidc=None,
+    retry_key=None,
 ):
     preview.validate_inputs(host, image)
     checked_token(token)
@@ -1369,7 +1422,9 @@ def render_api_key(
     ecmwf_uids = checked_ecmwf_uids(oauth_allow_ecmwf_uids, oauth_key is not None)
     aviso = checked_aviso_resource(oauth_aviso_resource, oauth_key is not None)
     proxies = checked_trusted_proxies(oauth_trusted_proxies, oauth_key is not None)
-    checked_oidc(oidc, oauth_key is not None)
+    checked_retry_key(
+        retry_key, oauth_key is not None, checked_oidc(oidc, oauth_key is not None)
+    )
     if oauth_key is not None:
         checked_oauth_key({"private-key-pem": oauth_key})
     if basic is not None:
@@ -1385,6 +1440,7 @@ def render_api_key(
     )
     if oauth_key is not None:
         options["oauth_key"] = oauth_key
+        options["retry_key"] = retry_key
     if ecmwf_uids:
         options["oauth_allow_ecmwf_uids"] = ecmwf_uids
     if aviso is not None:
@@ -1423,6 +1479,12 @@ def main():
     parser.add_argument("--basic-secret-file", type=Path)
     parser.add_argument("--valkey-secret-file", type=Path)
     parser.add_argument("--oauth-secret-file", type=Path)
+    parser.add_argument(
+        "--retry-key-file",
+        type=Path,
+        help="private key file of the refresh-token retry key (generated if absent); "
+        "required with --oauth-secret-file",
+    )
     parser.add_argument(
         "--oauth-allow-ecmwf-uid",
         action="append",
@@ -1469,6 +1531,8 @@ def main():
         args.transaction_ttl_seconds,
     )
     checked_oauth_profile(bool(args.oauth_secret_file), args.valkey_secret_file)
+    if bool(args.retry_key_file) != bool(args.oauth_secret_file):
+        raise ValueError("--oauth-secret-file and --retry-key-file go together")
     checked_valkey_storage(args.valkey_storage_size, args.valkey_storage_class)
     checked_ecmwf_uids(args.oauth_allow_ecmwf_uids, bool(args.oauth_secret_file))
     checked_aviso_resource(args.oauth_aviso_resource, bool(args.oauth_secret_file))
@@ -1493,6 +1557,7 @@ def main():
             args.oauth_secret_file,
             args.sso_secret_file,
             args.upstream_key_file,
+            args.retry_key_file,
         )
         if path
     ]
@@ -1518,7 +1583,10 @@ def main():
         valkey_secret(args.valkey_secret_file) if args.valkey_secret_file else None
     )
     oauth = (
-        {"oauth_key": oauth_signing_key(args.oauth_secret_file)}
+        {
+            "oauth_key": oauth_signing_key(args.oauth_secret_file),
+            "retry_key": retry_key(args.retry_key_file),
+        }
         if args.oauth_secret_file
         else {}
     )

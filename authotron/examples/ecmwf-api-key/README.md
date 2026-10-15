@@ -226,6 +226,7 @@ python3 authotron/examples/ecmwf-api-key/render_api_key.py \
   --basic-secret-file /tmp/opencode/authotron-basic-demo.json \
   --valkey-secret-file /tmp/opencode/authotron-browser-valkey.json \
   --oauth-secret-file /tmp/opencode/authotron-oauth-signing.json \
+  --retry-key-file /tmp/opencode/authotron-retry-key.json \
   --oauth-allow-ecmwf-uid <ecmwf-uid> \
   --oauth-aviso-resource https://aviso-mcp-dev.lumi.apps.dte.destination-earth.eu/mcp \
   --output-dir /tmp/opencode/authotron-api-key
@@ -259,7 +260,16 @@ with this flag. Deleting the file rotates the key on the next render.
 The key is stored as `data.oauth-signing.pem` in the existing Opaque Secret and
 mounted read-only (mode 0440, group 1000) at `/run/secrets/oauth/signing.pem`,
 only into the application container. Configuration references the path, never the
-PEM. `active_kid` is `playground-<first 16 hex of SHA-256(public SPKI DER)>`, so a
+PEM.
+
+`--retry-key-file` goes with `--oauth-secret-file`: refresh tokens live in Valkey,
+so every replica needs the same `oauth.refresh_token_retry_key_file` (see the OAuth
+documentation's *Retries*). The file holds only `retry-key`, 32 random bytes in
+standard Base64, generated on first use with mode `0600` under the same private-file
+rules, and must differ from the upstream key. It is stored as `data.oauth-retry.key`
+beside the signing key and mounted with it at `/run/secrets/oauth/retry.key`; the pod
+template carries `checksum/oauth-retry-key`. Deleting the file rotates the key on the
+next render; only retries spanning that rollout fail. `active_kid` is `playground-<first 16 hex of SHA-256(public SPKI DER)>`, so a
 new key changes the configuration checksum; the pod template additionally carries
 `checksum/oauth-signing-key` (a SHA-256 digest only). The rendered fragment is:
 
@@ -299,6 +309,7 @@ oauth:
     keys:
       - kid: upstream-<sha256-prefix>
         key_file: /run/secrets/oidc/upstream.key
+  refresh_token_retry_key_file: /run/secrets/oauth/retry.key
   resources:
     - resource: https://127.0.0.1:8444/mcp
       allowed_realms: [browser-demo, ecmwf, demo-sso] # browser-demo with Basic, demo-sso with SSO
@@ -510,7 +521,7 @@ Output is only `resources.yaml`, mode `0600`, containing **six resources** by de
 6. Opaque Secret `authotron-ecmwf-browser`, using Base64 `data.jwt-secret` and,
    when Basic is enabled, `data.config.yaml`. With Valkey it additionally holds
    `data.valkey-password` and `data.valkey.conf`. With OAuth it additionally
-   holds `data.oauth-signing.pem`.
+   holds `data.oauth-signing.pem` and `data.oauth-retry.key`.
 
 The shared profile contains **ten resources**: these six plus
 PersistentVolumeClaim, Deployment, ClusterIP Service and NetworkPolicy, each named
