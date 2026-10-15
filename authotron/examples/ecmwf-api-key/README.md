@@ -68,8 +68,10 @@ the SSO stack first and then add, together with the OAuth profile below:
 
 The three options go together and need `--oauth-secret-file`. The method is
 `demo-sso` ("Demo SSO (Keycloak)", realm `demo-sso`, client
-`authotron-playground`, scopes `profile` and `email`, `offline_access: true`);
-`render_sso.py` registers that client with the matching callback. The renderer
+`authotron-playground`, scopes `profile` and `email`, `offline_access: true`,
+`roles_claim: roles` and `role_map: {aviso-reader: aviso-reader}`);
+`render_sso.py` registers that client with the matching callback and puts its
+realm roles into the ID-token claim `roles`. The renderer
 reads only `authotron-client-secret` from the SSO bundle, which must already
 exist with mode `0600`, and never writes it. The upstream key file holds only
 `upstream-key`, 32 random bytes in standard Base64, generated on first use with
@@ -238,7 +240,9 @@ python3 authotron/examples/ecmwf-api-key/render_api_key.py \
 
 `--oauth-aviso-resource URL` is optional and also requires `--oauth-secret-file`.
 It registers one extra resource (scope `aviso:read`) for the pre-registered MCP
-clients below. The URL must be a canonical HTTPS resource identifier: lowercase
+clients below, with `identity_claims: {roles: [aviso-reader]}`: its access tokens
+carry the user's `realm` and, if the user holds it, `aviso-reader` in `roles`, for
+aviso-server's `mcp.identity.source: token_claims`. The URL must be a canonical HTTPS resource identifier: lowercase
 host, no default `:443`, a path, and no query, fragment or userinfo.
 
 `--trusted-proxy CIDR` is optional, repeatable (at most 64) and also requires
@@ -321,6 +325,8 @@ oauth:
       scopes:
         - name: aviso:read
           required_roles: []
+      identity_claims:
+        roles: [aviso-reader]
 augmenters:
   - type: plain_advanced # only with Basic; mcp-demo only with OAuth
     name: Playground Basic roles
@@ -357,7 +363,10 @@ explicitly to 1024; the server splits it into non-borrowable per-client shares
 
 **OAuth policy.** `aviso:read` requires no role: any user who signs in through a
 playground browser method (realms `browser-demo`, `ecmwf`, `demo-sso`) may obtain it, the same
-audience as the Aviso playground. `mcp:read` requires role `mcp-demo`. `allowed_realms` stays
+audience as the Aviso playground. What a token then reads is aviso-server's decision
+from its `realm` and `roles`: the Aviso configuration lets the `browser-demo` and
+`ecmwf` realms read every stream and requires `aviso-reader` in `demo-sso`, a Keycloak
+realm role that `alice` does not hold until it is assigned. `mcp:read` requires role `mcp-demo`. `allowed_realms` stays
 derived from the browser providers, so realm membership alone is not enough:
 
 - the Basic demo user `browser-demo` receives `mcp-demo` from its augmenter;

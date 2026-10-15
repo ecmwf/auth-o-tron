@@ -1352,6 +1352,7 @@ class RendererTests(unittest.TestCase):
                         "resource": AVISO,
                         "allowed_realms": realms,
                         "scopes": [{"name": "aviso:read", "required_roles": []}],
+                        "identity_claims": {"roles": ["aviso-reader"]},
                     },
                 )
                 self.assertEqual(
@@ -1489,6 +1490,9 @@ class RendererTests(unittest.TestCase):
             self.assertIn(realm, aviso["allowed_realms"])
         self.assertEqual(scope["required_roles"], [])
         self.assertNotIn("other", aviso["allowed_realms"])
+        # Tokens tell aviso-server the realm and whether the user holds aviso-reader.
+        self.assertEqual(aviso["identity_claims"], {"roles": ["aviso-reader"]})
+        self.assertNotIn("identity_claims", config["resources"][0])
 
     def test_oauth_ecmwf_allowlist_grants_role_only_to_listed_uids(self):
         baseline, _ = self.baseline()

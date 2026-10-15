@@ -78,6 +78,8 @@ class OidcRendererTests(unittest.TestCase):
                         "client_id": "authotron-playground",
                         "client_secret_file": "/run/secrets/oidc/client-secret",
                         "scopes": ["profile", "email"],
+                        "roles_claim": "roles",
+                        "role_map": {"aviso-reader": "aviso-reader"},
                         "offline_access": True,
                     }
                 ],
@@ -394,6 +396,9 @@ class OidcRendererTests(unittest.TestCase):
             sso.OFFLINE_MAX_SECONDS,
             renderer.OAUTH_REFRESH_TOKENS["absolute_ttl_seconds"],
         )
+        # The realm role the Aviso tokens name reaches the ID token under that claim.
+        self.assertEqual(sso.ROLES_CLAIM, renderer.OIDC_ROLES_CLAIM)
+        self.assertEqual(sso.AVISO_ROLES, renderer.OAUTH_AVISO_IDENTITY_ROLES)
 
 
 if __name__ == "__main__":

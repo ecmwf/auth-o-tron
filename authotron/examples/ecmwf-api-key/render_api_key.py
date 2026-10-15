@@ -87,6 +87,9 @@ OAUTH_API_KEY_REFRESH_MAX_LIFETIME_SECONDS = 30 * 86400
 # Opt-in Aviso MCP resource (--oauth-aviso-resource): any authenticated browser user
 # of the playground may use it, so its scope requires no role.
 OAUTH_AVISO_SCOPE = "aviso:read"
+# Aviso tokens carry the user's realm and these roles: aviso-server grants the
+# browser-demo and ecmwf realms by realm and requires aviso-reader in demo-sso.
+OAUTH_AVISO_IDENTITY_ROLES = ("aviso-reader",)
 # ECMWF uids become `username` in realm `ecmwf`; bounded like the server's browser uid.
 OAUTH_MAX_ECMWF_UIDS = 32
 OAUTH_MAX_UID_LENGTH = 128
@@ -173,6 +176,8 @@ OIDC_METHOD_ID = "demo-sso"
 OIDC_LABEL = "Demo SSO (Keycloak)"
 OIDC_REALM = "demo-sso"
 OIDC_CLIENT_ID = "authotron-playground"
+# The top-level ID-token claim into which render_sso.py's realm maps realm roles.
+OIDC_ROLES_CLAIM = "roles"
 # Key of the client secret in render_sso.py's private secret bundle.
 OIDC_BUNDLE_KEY = "authotron-client-secret"
 OIDC_DIR = "/run/secrets/oidc"
@@ -905,6 +910,8 @@ def upstream_kid(key):
 
 
 def oidc_method(issuer):
+    """The demo SSO method. Keycloak puts the user's realm roles into the ID-token claim
+    `roles`; only aviso-reader becomes a local role, of the same name."""
     return {
         "id": OIDC_METHOD_ID,
         "label": OIDC_LABEL,
@@ -913,6 +920,8 @@ def oidc_method(issuer):
         "client_id": OIDC_CLIENT_ID,
         "client_secret_file": f"{OIDC_DIR}/{OIDC_SECRET_KEYS['oidc-client-secret']}",
         "scopes": ["profile", "email"],
+        "roles_claim": OIDC_ROLES_CLAIM,
+        "role_map": {role: role for role in OAUTH_AVISO_IDENTITY_ROLES},
         "offline_access": True,
     }
 
@@ -981,6 +990,7 @@ def oauth_config(
                 "resource": aviso_resource,
                 "allowed_realms": list(realms),
                 "scopes": [{"name": OAUTH_AVISO_SCOPE, "required_roles": []}],
+                "identity_claims": {"roles": list(OAUTH_AVISO_IDENTITY_ROLES)},
             }
         )
     config = {
