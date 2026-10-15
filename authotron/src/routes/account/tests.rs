@@ -8,7 +8,14 @@
 
 //! The account page and its forms, through the application router.
 
-use crate::routes::oidc_login::tests::{Fixture, Jar, ORIGIN, fixture, get, location, text};
+use crate::{
+    oauth::{audit::family_ref, refresh::FamilySummary},
+    oidc::mock::SUBJECT,
+    routes::oidc_login::{
+        offline_tests::{approve_and_exchange, offline_fixture, refresh, revoked, sign_in},
+        tests::{Fixture, Jar, ORIGIN, fixture, get, local, location, start, text},
+    },
+};
 use axum::{
     body::Body,
     http::{Request, StatusCode, header},
@@ -266,4 +273,187 @@ async fn signing_out_without_a_session_still_clears_the_cookie() {
     )
     .await;
     assert_eq!(location(&response), "/login?signed-out");
+}
+
+const REVOKE: &str = "/login/account/logins/revoke";
+/// The Origin, fields and status of a refused form.
+type Refusal<'a> = (Option<&'a str>, &'a [(&'a str, &'a str)], StatusCode);
+
+/// A browser signed in with the OIDC method, as the provider's current subject.
+async fn oidc_session(fixture: &Fixture) -> Jar {
+    let mut jar = Jar::default();
+    let authorization = start(fixture, &mut jar).await;
+    let callback = local(&fixture.idp.authorize(&authorization));
+    let response = get(&fixture.app, &callback, &jar).await;
+    assert_eq!(location(&response), "/login/account");
+    jar.update(&response);
+    jar
+}
+
+/// Starts `count` coupled logins of the provider's current subject; their refresh tokens.
+async fn logins(fixture: &Fixture, count: usize) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for _ in 0..count {
+        let mut jar = Jar::default();
+        sign_in(fixture, &mut jar).await;
+        tokens.push(approve_and_exchange(&fixture.app, &jar).await);
+    }
+    tokens
+}
+
+async fn listed(fixture: &Fixture, username: &str) -> Vec<FamilySummary> {
+    let runtime = fixture.state.oauth.as_ref().unwrap();
+    runtime.logins("idp", username).await.unwrap()
+}
+
+/// How many of `tokens` still refresh. Each refresh rotates, so `tokens` are replaced
+/// by their successors.
+async fn refreshing(fixture: &Fixture, tokens: &mut [String]) -> usize {
+    let mut live = 0;
+    for token in tokens.iter_mut() {
+        let (status, body) = refresh(&fixture.app, token).await;
+        if status == StatusCode::OK {
+            *token = body["refresh_token"].as_str().unwrap().into();
+            live += 1;
+        }
+    }
+    live
+}
+
+#[tokio::test]
+async fn your_logins_are_listed_and_revoked_one_at_a_time_or_all_at_once() {
+    let (fixture, _files) = offline_fixture(true).await;
+    let mut tokens = logins(&fixture, 3).await;
+    let mut jar = oidc_session(&fixture).await;
+    let families = listed(&fixture, SUBJECT).await;
+    assert_eq!(families.len(), 3);
+    let response = get(&fixture.app, "/login/account", &jar).await;
+    jar.update(&response);
+    let html = text(response).await;
+    assert!(html.contains("<h3 id=\"logins-title\">Your logins</h3>"));
+    assert_eq!(html.matches("<h4>Desktop</h4>").count(), 3);
+    assert_eq!(html.matches("<dd>Demo SSO</dd>").count(), 3);
+    assert!(html.contains("<time datetime=\""));
+    assert!(html.contains("Revoke all logins"));
+    for family in &families {
+        let reference = family_ref(&family.family_id);
+        assert!(html.contains(&format!("name=\"login\" value=\"{reference}\"")));
+        assert!(!html.contains(&family.family_id));
+    }
+    for token in &tokens {
+        assert!(!html.contains(token.as_str()));
+    }
+    // One login: only that family ends, and its upstream grant is revoked.
+    let csrf = hidden(&html, "csrf");
+    let one = family_ref(&families[1].family_id);
+    let fields = [("csrf", csrf.as_str()), ("login", one.as_str())];
+    let response = post(&fixture, REVOKE, &jar, Some(ORIGIN), &fields).await;
+    assert_eq!(location(&response), "/login/account?revoked");
+    assert_eq!(revoked(&fixture, 1).await.len(), 1);
+    assert_eq!(refreshing(&fixture, &mut tokens).await, 2);
+    let remaining = listed(&fixture, SUBJECT).await;
+    assert_eq!(remaining.len(), 2);
+    assert!(
+        remaining
+            .iter()
+            .all(|family| family.family_id != families[1].family_id)
+    );
+    let page = text(get(&fixture.app, "/login/account?revoked", &jar).await).await;
+    assert!(page.contains("Revoked. An application whose login you revoked"));
+    let html = text(get(&fixture.app, "/login/account", &jar).await).await;
+    assert!(!html.contains("Revoked. An application"));
+    // All of them.
+    let csrf = hidden(&html, "csrf");
+    let fields = [("csrf", csrf.as_str()), ("login", "all")];
+    let response = post(&fixture, REVOKE, &jar, Some(ORIGIN), &fields).await;
+    assert_eq!(location(&response), "/login/account?revoked");
+    assert_eq!(revoked(&fixture, 3).await.len(), 3);
+    assert_eq!(refreshing(&fixture, &mut tokens).await, 0);
+    let html = text(get(&fixture.app, "/login/account", &jar).await).await;
+    assert!(html.contains("No application is signed in."));
+    assert!(!html.contains("Revoke all logins"));
+}
+
+#[tokio::test]
+async fn logins_of_other_users_and_forged_forms_are_never_revoked() {
+    let (fixture, _files) = offline_fixture(true).await;
+    *fixture.idp.state.subject.lock().unwrap() = "other-subject".into();
+    let mut theirs = logins(&fixture, 1).await;
+    *fixture.idp.state.subject.lock().unwrap() = SUBJECT.into();
+    let mut mine = logins(&fixture, 1).await;
+    let mut jar = oidc_session(&fixture).await;
+    let other = family_ref(&listed(&fixture, "other-subject").await[0].family_id);
+    let html = text(get(&fixture.app, "/login/account", &jar).await).await;
+    assert!(!html.contains(&other));
+    let response = get(&fixture.app, "/login/account", &jar).await;
+    jar.update(&response);
+    let csrf = hidden(&text(response).await, "csrf");
+    let token = csrf.as_str();
+    let refused: [Refusal; 7] = [
+        (
+            None,
+            &[("csrf", token), ("login", "all")],
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            Some(ORIGIN),
+            &[("csrf", "forged"), ("login", "all")],
+            StatusCode::FORBIDDEN,
+        ),
+        (Some(ORIGIN), &[("csrf", token)], StatusCode::BAD_REQUEST),
+        (
+            Some(ORIGIN),
+            &[("csrf", token), ("login", "ALL")],
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            Some(ORIGIN),
+            &[("csrf", token), ("login", &other.to_uppercase())],
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            Some(ORIGIN),
+            &[("csrf", token), ("login", &other[..11])],
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            Some(ORIGIN),
+            &[("csrf", token), ("login", "all"), ("user", "x")],
+            StatusCode::BAD_REQUEST,
+        ),
+    ];
+    for (origin, fields, status) in refused {
+        let response = post(&fixture, REVOKE, &jar, origin, fields).await;
+        assert_eq!(response.status(), status, "{origin:?} {fields:?}");
+        assert!(text(response).await.contains("Request not completed"));
+    }
+    // A forged reference to another user's login is accepted as a form, but matches
+    // none of this user's logins.
+    let fields = [("csrf", token), ("login", other.as_str())];
+    let response = post(&fixture, REVOKE, &jar, Some(ORIGIN), &fields).await;
+    assert_eq!(location(&response), "/login/account?revoked");
+    assert_eq!(refreshing(&fixture, &mut theirs).await, 1);
+    assert_eq!(refreshing(&fixture, &mut mine).await, 1);
+    assert!(fixture.idp.state.revoked.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_store_failure_hides_only_the_logins() {
+    let (fixture, _files) = offline_fixture(true).await;
+    let runtime = fixture.state.oauth.as_ref().unwrap();
+    let section = super::logins_section(&fixture.state, runtime, None, "csrf").into_string();
+    assert!(section.contains("Your logins cannot be shown right now"));
+    assert!(!section.contains("<form"));
+}
+
+#[tokio::test]
+async fn without_refresh_tokens_the_account_page_lists_no_logins() {
+    let fixture = fixture(|_| {}).await;
+    let mut jar = signed_in(&fixture).await;
+    let csrf = account_csrf(&fixture, &mut jar).await;
+    let html = text(get(&fixture.app, "/login/account", &jar).await).await;
+    assert!(!html.contains("Your logins"));
+    let fields = [("csrf", csrf.as_str()), ("login", "all")];
+    let response = post(&fixture, REVOKE, &jar, Some(ORIGIN), &fields).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }

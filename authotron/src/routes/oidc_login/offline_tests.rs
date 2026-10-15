@@ -30,7 +30,7 @@ use url::Url;
 
 /// The OIDC-only authorization server with sealing keys, an OIDC method allowing
 /// offline access, and refresh tokens for `desktop`, coupled when `opted_in`.
-async fn offline_fixture(opted_in: bool) -> (Fixture, [NamedTempFile; 2]) {
+pub(in crate::routes) async fn offline_fixture(opted_in: bool) -> (Fixture, [NamedTempFile; 2]) {
     let mut key = NamedTempFile::new().unwrap();
     writeln!(key, "{}", STANDARD.encode([9u8; 32])).unwrap();
     let path = key.path().to_owned();
@@ -47,7 +47,7 @@ async fn offline_fixture(opted_in: bool) -> (Fixture, [NamedTempFile; 2]) {
 }
 
 /// Starts an authorization, signs in at the provider and returns the callback's answer.
-async fn sign_in(fixture: &Fixture, jar: &mut Jar) -> (Url, Response) {
+pub(in crate::routes) async fn sign_in(fixture: &Fixture, jar: &mut Jar) -> (Url, Response) {
     *jar = authorize(&fixture.app).await;
     let request = start(fixture, jar).await;
     let response = get(&fixture.app, &local(&fixture.idp.authorize(&request)), jar).await;
@@ -100,7 +100,7 @@ pub(super) async fn post(app: &Router, path: &str, fields: &[(&str, &str)]) -> (
 }
 
 /// Approves consent, exchanges the code and returns the refresh token.
-pub(super) async fn approve_and_exchange(app: &Router, jar: &Jar) -> String {
+pub(in crate::routes) async fn approve_and_exchange(app: &Router, jar: &Jar) -> String {
     let redirect = decide(app, jar, "approve").await;
     let code = redirect
         .query_pairs()
@@ -125,7 +125,7 @@ pub(super) async fn approve_and_exchange(app: &Router, jar: &Jar) -> String {
     tokens["refresh_token"].as_str().unwrap().to_owned()
 }
 
-pub(super) async fn refresh(app: &Router, token: &str) -> (StatusCode, Value) {
+pub(in crate::routes) async fn refresh(app: &Router, token: &str) -> (StatusCode, Value) {
     post(
         app,
         "/oauth/token",
@@ -139,7 +139,7 @@ pub(super) async fn refresh(app: &Router, token: &str) -> (StatusCode, Value) {
 }
 
 /// Waits for the background worker to send `count` upstream revocations.
-async fn revoked(fixture: &Fixture, count: usize) -> Vec<String> {
+pub(in crate::routes) async fn revoked(fixture: &Fixture, count: usize) -> Vec<String> {
     for _ in 0..300 {
         let revoked = fixture.idp.state.revoked.lock().unwrap().clone();
         if revoked.len() >= count {

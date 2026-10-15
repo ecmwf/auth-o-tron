@@ -490,6 +490,6 @@ mod authorization_tests;
 #[cfg(all(test, unix))]
 mod keycloak_tests;
 #[cfg(test)]
-mod offline_tests;
+pub(super) mod offline_tests;
 #[cfg(test)]
 pub(super) mod tests;
