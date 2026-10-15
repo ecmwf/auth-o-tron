@@ -242,8 +242,9 @@ python3 authotron/examples/ecmwf-api-key/render_api_key.py \
 It registers one extra resource (scope `aviso:read`) for the pre-registered MCP
 clients below, with `identity_claims: {roles: [aviso-reader]}`: its access tokens
 carry the user's `realm` and, if the user holds it, `aviso-reader` in `roles`, for
-aviso-server's `mcp.identity.source: token_claims`. The URL must be a canonical HTTPS resource identifier: lowercase
-host, no default `:443`, a path, and no query, fragment or userinfo.
+aviso-server's `mcp.identity.source: token_claims`. The URL must be a canonical
+HTTPS resource identifier: lowercase host, no default `:443`, a path, and no query,
+fragment or userinfo.
 
 `--trusted-proxy CIDR` is optional, repeatable (at most 64) and also requires
 `--oauth-secret-file`. It sets `oauth.endpoint_rate_limit.trusted_proxies` so the
@@ -264,7 +265,9 @@ with this flag. Deleting the file rotates the key on the next render.
 The key is stored as `data.oauth-signing.pem` in the existing Opaque Secret and
 mounted read-only (mode 0440, group 1000) at `/run/secrets/oauth/signing.pem`,
 only into the application container. Configuration references the path, never the
-PEM.
+PEM. `active_kid` is `playground-<first 16 hex of SHA-256(public SPKI DER)>`, so a
+new key changes the configuration checksum; the pod template additionally carries
+`checksum/oauth-signing-key` (a SHA-256 digest only).
 
 `--retry-key-file` goes with `--oauth-secret-file`: refresh tokens live in Valkey,
 so every replica needs the same `oauth.refresh_token_retry_key_file` (see the OAuth
@@ -273,9 +276,9 @@ standard Base64, generated on first use with mode `0600` under the same private-
 rules, and must differ from the upstream key. It is stored as `data.oauth-retry.key`
 beside the signing key and mounted with it at `/run/secrets/oauth/retry.key`; the pod
 template carries `checksum/oauth-retry-key`. Deleting the file rotates the key on the
-next render; only retries spanning that rollout fail. `active_kid` is `playground-<first 16 hex of SHA-256(public SPKI DER)>`, so a
-new key changes the configuration checksum; the pod template additionally carries
-`checksum/oauth-signing-key` (a SHA-256 digest only). The rendered fragment is:
+next render; only retries spanning that rollout fail.
+
+The rendered fragment is:
 
 ```yaml
 oauth:
@@ -362,12 +365,13 @@ explicitly to 1024; the server splits it into non-borrowable per-client shares
 (113–114 slots for each of the 9 clients). Other OAuth settings keep server defaults.
 
 **OAuth policy.** `aviso:read` requires no role: any user who signs in through a
-playground browser method (realms `browser-demo`, `ecmwf`, `demo-sso`) may obtain it, the same
-audience as the Aviso playground. What a token then reads is aviso-server's decision
-from its `realm` and `roles`: the Aviso configuration lets the `browser-demo` and
-`ecmwf` realms read every stream and requires `aviso-reader` in `demo-sso`, a Keycloak
-realm role that `alice` does not hold until it is assigned. `mcp:read` requires role `mcp-demo`. `allowed_realms` stays
-derived from the browser providers, so realm membership alone is not enough:
+playground browser method (realms `browser-demo`, `ecmwf`, `demo-sso`) may obtain it,
+the same audience as the Aviso playground. What a token then reads is aviso-server's
+decision from its `realm` and `roles`: the Aviso configuration lets the `browser-demo`
+and `ecmwf` realms read every stream and requires `aviso-reader` in `demo-sso`, a
+Keycloak realm role that `alice` does not hold until it is assigned. `mcp:read`
+requires role `mcp-demo`. `allowed_realms` stays derived from the browser providers,
+so realm membership alone is not enough:
 
 - the Basic demo user `browser-demo` receives `mcp-demo` from its augmenter;
 - an ECMWF API-key user receives it only if its uid was passed with
