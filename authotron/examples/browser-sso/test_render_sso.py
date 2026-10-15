@@ -196,6 +196,33 @@ class RendererTests(unittest.TestCase):
         ):
             self.assertEqual(realm[key], 900)
 
+    def test_aviso_reader_reaches_the_id_token_claim_roles(self):
+        realm = renderer.realm_config(self.profile)
+        self.assertEqual(
+            [role["name"] for role in realm["roles"]["realm"]], ["aviso-reader"]
+        )
+        self.assertEqual(
+            realm["scopeMappings"],
+            [{"client": "authotron-playground", "roles": ["aviso-reader"]}],
+        )
+        clients = {client["clientId"]: client for client in realm["clients"]}
+        (mapper,) = clients["authotron-playground"]["protocolMappers"]
+        self.assertEqual(mapper["protocolMapper"], "oidc-usermodel-realm-role-mapper")
+        self.assertEqual(
+            {k: mapper["config"][k] for k in ("claim.name", "multivalued")},
+            {"claim.name": "roles", "multivalued": "true"},
+        )
+        self.assertEqual(
+            [
+                mapper["config"][f"{token}.claim"]
+                for token in ("id.token", "access.token", "userinfo.token")
+            ],
+            ["true", "false", "false"],
+        )
+        self.assertNotIn("protocolMappers", clients["authotron-e2e-admin"])
+        users = {user["username"]: user for user in realm["users"]}
+        self.assertNotIn("aviso-reader", users["alice"]["realmRoles"])
+
     def test_authotron_client_offline_sessions_and_e2e_admin(self):
         realm = renderer.realm_config(self.profile)
         for key, value in {
@@ -237,6 +264,7 @@ class RendererTests(unittest.TestCase):
         self.assertFalse(admin["standardFlowEnabled"] or admin["redirectUris"])
         users = {user["username"]: user for user in realm["users"]}
         self.assertEqual(users["alice"]["id"], renderer.DEMO_USER_ID)
+        # alice does not hold aviso-reader until someone assigns it.
         self.assertEqual(
             users["alice"]["realmRoles"], ["default-roles-aviso-demo", "offline_access"]
         )

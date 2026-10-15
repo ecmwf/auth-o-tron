@@ -49,9 +49,15 @@ AUTHOTRON_CLIENT_ID = "authotron-playground"
 AUTHOTRON_CLIENT_UUID = "c307be16-5d3f-43da-9130-f74645cdf791"
 DEMO_USER_ID = "cde07bd3-b04d-4390-b75c-e7bfb4135940"
 # Service account for end-to-end checks through `kubectl port-forward` only: the
-# admin API has no ingress route.
+# admin API has no ingress route. These roles also let it assign and remove realm roles
+# such as aviso-reader (checked against the server's Keycloak fixture).
 E2E_ADMIN_CLIENT_ID = "authotron-e2e-admin"
 E2E_ADMIN_ROLES = ("manage-users", "view-users")
+# Realm roles that reach Auth-O-Tron, in the top-level ID-token claim ROLES_CLAIM;
+# render_api_key.py maps them and names them in the Aviso tokens. No user holds one
+# by default: assign it in the admin console, or with the e2e admin account.
+AVISO_ROLES = ("aviso-reader",)
+ROLES_CLAIM = "roles"
 # Offline sessions follow the playground's OAuth refresh-token lifetimes.
 OFFLINE_IDLE_SECONDS = 30 * 86400
 OFFLINE_MAX_SECONDS = 90 * 86400
@@ -169,6 +175,14 @@ def realm_config(profile):
         "offlineSessionIdleTimeout": OFFLINE_IDLE_SECONDS,
         "offlineSessionMaxLifespanEnabled": True,
         "offlineSessionMaxLifespan": OFFLINE_MAX_SECONDS,
+        "roles": {
+            "realm": [
+                {"name": role, "description": "Reads Aviso through the MCP playground"}
+                for role in AVISO_ROLES
+            ]
+        },
+        # Without full scope, a realm role reaches the client's tokens only when mapped.
+        "scopeMappings": [{"client": AUTHOTRON_CLIENT_ID, "roles": list(AVISO_ROLES)}],
         "clients": [
             {
                 "id": AUTHOTRON_CLIENT_UUID,
@@ -177,9 +191,9 @@ def realm_config(profile):
                 "protocol": "openid-connect",
                 "publicClient": False,
                 "secret": "${AUTHOTRON_CLIENT_SECRET}",
-                # Tokens carry no realm roles beyond those of the client's scopes;
-                # `offline_access` comes with its client scope. Auth-O-Tron maps no
-                # provider roles here, and `sub` comes from `basic`.
+                # Tokens carry no realm roles beyond the scope mappings above and
+                # `offline_access`, which comes with its client scope; `sub` comes from
+                # `basic`.
                 "fullScopeAllowed": False,
                 "standardFlowEnabled": True,
                 "directAccessGrantsEnabled": False,
@@ -192,6 +206,24 @@ def realm_config(profile):
                 "defaultClientScopes": ["basic", "profile", "email"],
                 "optionalClientScopes": ["offline_access"],
                 "attributes": {"pkce.code.challenge.method": "S256"},
+                # Realm roles in scope go into the ID token only, as a top-level list.
+                "protocolMappers": [
+                    {
+                        "name": "realm roles in the ID token",
+                        "protocol": "openid-connect",
+                        "protocolMapper": "oidc-usermodel-realm-role-mapper",
+                        "consentRequired": False,
+                        "config": {
+                            "claim.name": ROLES_CLAIM,
+                            "jsonType.label": "String",
+                            "multivalued": "true",
+                            "id.token.claim": "true",
+                            "access.token.claim": "false",
+                            "userinfo.token.claim": "false",
+                            "introspection.token.claim": "false",
+                        },
+                    }
+                ],
             },
             {
                 "clientId": E2E_ADMIN_CLIENT_ID,

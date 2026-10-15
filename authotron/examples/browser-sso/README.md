@@ -12,20 +12,26 @@ or accounts.
 - Client `authotron-playground`: confidential, PKCE S256, the single redirect URI
   `https://<ui-host>/login/method/demo-sso/callback`, default scopes `basic`,
   `profile` and `email`, optional scope `offline_access`, and "Full scope allowed"
-  off: tokens carry no realm roles beyond those of its scopes. Its secret is the bundle
+  off: tokens carry no realm roles beyond its scope mapping of `aviso-reader` and
+  those of its scopes. A protocol mapper puts the realm roles in scope into the
+  top-level ID-token claim `roles`, which the playground's `demo-sso` method maps. Its secret is the bundle
   key `authotron-client-secret`; pass the bundle file to
   `../ecmwf-api-key/render_api_key.py --sso-secret-file`.
 - Strict refresh-token rotation (`revokeRefreshToken`, reuse 0) and offline
   sessions of 30 days idle and at most 90 days, matching the playground's OAuth
   refresh-token lifetimes. Browser SSO sessions last 15 minutes; access tokens 60
   seconds.
+- Realm role `aviso-reader`, which Aviso requires in realm `demo-sso`. No user holds
+  it by default: assign it to `alice` in the admin console, or through the e2e admin
+  account, and her next sign-in or coupled refresh carries it.
 - User `alice` with a fixed id, so her `sub` (the Auth-O-Tron username) survives
   Keycloak restarts, and the default roles, which include `offline_access`. Her
   password is the bundle key `demo-user-password`.
 - Client `authotron-e2e-admin`: a service account with `realm-management`
   `manage-users` and `view-users` (which its token must carry, so it keeps full
   scope), secret `e2e-admin-secret`, for end-to-end
-  checks such as disabling `alice` or listing her offline sessions. The admin API
+  checks such as disabling `alice`, listing her offline sessions or assigning and
+  removing her realm roles. The admin API
   has no ingress route; reach it only through
   `kubectl port-forward service/authotron-sso-keycloak 8080`.
 
