@@ -8,6 +8,8 @@ pub mod code_grant;
 pub mod codes;
 pub mod consent;
 pub mod context;
+#[cfg(all(test, unix))]
+mod key_rotation_tests;
 pub mod keys;
 pub mod rate_limit;
 pub mod records;

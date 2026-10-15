@@ -35,12 +35,13 @@ OTHER_OAUTH_KEY = renderer.oauth_pem(
 # (the only difference from the previous digests), and again when provider `browser`
 # blocks gained stable ids and the Valkey key_prefix dropped its `v1` segment, and
 # again whenever the source manifest gains modules (refresh tokens, rate limits,
-# OIDC sign-in), again when every playground profile enabled the in-cluster
-# metrics port, and again when the configuration stopped carrying an empty `ui.sso`.
+# OIDC sign-in, key rotation tests), again when every playground profile enabled the
+# in-cluster metrics port, and again when the configuration stopped carrying an empty
+# `ui.sso`.
 PRE_OAUTH_DIGESTS = {
-    "plain": "92d47a758cb86d49942ca85787888e53e3d73b1a56f4177efb66060ba6a5499a",
-    "basic": "ff4a9f4743d550073f150f4b081f1b63fbca8110eac0bb97f9dc3fd835cfc9c8",
-    "shared": "c22393bd2c4d13023a3f6bc886a834b31ab8580b9da269278fca43f5b63e6f27",
+    "plain": "256b71b731490aa4c6303afbca9903e4d19ee0aa0f3b97e20b832f57ea0f9b5c",
+    "basic": "2445bb334e969f11d686887f037e15752616cf808371b3ade26af6d874d8d7f7",
+    "shared": "eecf51b35128aec4c65f785f532050380b555ca529e6bacf4d5a41f24e9f995f",
 }
 # One `/login/` Prefix replaces per-method Exact paths, independent of method count.
 API_KEY_PATH_RULES = [
