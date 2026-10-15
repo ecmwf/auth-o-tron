@@ -568,7 +568,9 @@ tokens, and deny `MONITOR` and `SLOWLOG` in Valkey's ACLs to every user that doe
 need them; Auth-O-Tron needs neither. The key is required when a client has refresh
 tokens and the browser-session backend is Valkey; startup refuses to start without it,
 before reading any file or connecting, and refuses a file that is another configured
-key or secret, or a key equal to an upstream token key. A Memory store, which answers
+key or secret file, under its name or another one such as a symbolic link, and a key
+equal to an upstream token key or to an OIDC client secret that is 32 bytes of
+standard Base64. A Memory store, which answers
 every retry in the process that rotated, uses a random key per process when the
 setting is absent. Any replica holding the key can answer a retry.
 

@@ -22,10 +22,13 @@ use ring::{
     hkdf,
 };
 use rsa::rand_core::{OsRng, RngCore};
+use std::path::Path;
 use zeroize::Zeroizing;
 
 /// HKDF info label of successor keys, ahead of the family id.
 const SUCCESSOR_LABEL: &[u8] = b"authotron-refresh-successor-v2";
+const SHARED_FILE: &str =
+    "oauth.refresh_token_retry_key_file must be a file of its own, not another key or secret file";
 
 /// Deliberately not Debug.
 pub struct RetryKey(Zeroizing<[u8; 32]>);
@@ -33,8 +36,10 @@ pub struct RetryKey(Zeroizing<[u8; 32]>);
 impl RetryKey {
     /// `oauth.refresh_token_retry_key_file`, or else a random key for this process,
     /// which [`validate`] allows only without a Valkey store of refresh tokens: a memory
-    /// store answers every retry in the process that rotated. A key that is also an
-    /// upstream token encryption key is refused.
+    /// store answers every retry in the process that rotated. Refused: the file of
+    /// another key or secret under another name (a symbolic link, `..`), and a key that
+    /// is also an upstream token encryption key or, as 32 Base64 bytes, an OIDC client
+    /// secret.
     pub(super) fn load(config: &ConfigV2) -> Result<Self, String> {
         let Some(path) = &config.oauth.refresh_token_retry_key_file else {
             let mut key = Zeroizing::new([0; 32]);
@@ -43,15 +48,31 @@ impl RetryKey {
                 .map_err(|_| "no randomness for the refresh-token retry key")?;
             return Ok(Self(key));
         };
-        let key = read_key_file(path).ok_or(
-            "oauth.refresh_token_retry_key_file is unreadable or not 32 bytes of standard Base64",
-        )?;
+        let unreadable =
+            "oauth.refresh_token_retry_key_file is unreadable or not 32 bytes of standard Base64";
+        let key = read_key_file(path).ok_or(unreadable)?;
+        let canonical = path.canonicalize().map_err(|_| unreadable)?;
+        if other_files(config).any(|other| other.canonicalize().is_ok_and(|o| o == canonical)) {
+            return Err(SHARED_FILE.into());
+        }
         let upstream = config.oauth.upstream_token_encryption.iter();
         for other in upstream.flat_map(|encryption| &encryption.keys) {
             if read_key_file(&other.key_file).is_some_and(|bytes| *bytes == *key) {
                 return Err(format!(
                     "oauth.refresh_token_retry_key_file holds upstream token key {}; give it a key of its own",
                     other.kid
+                ));
+            }
+        }
+        for method in &config.ui.oidc {
+            let secret = method.client_secret_file.as_deref();
+            if secret
+                .and_then(read_key_file)
+                .is_some_and(|bytes| *bytes == *key)
+            {
+                return Err(format!(
+                    "oauth.refresh_token_retry_key_file holds the client secret of OIDC method {}; give it a key of its own",
+                    method.id
                 ));
             }
         }
@@ -98,6 +119,16 @@ pub(super) fn validate(config: &ConfigV2) -> Result<(), &'static str> {
             _ => Ok(()),
         };
     };
+    if other_files(config).any(|other| other == path) {
+        return Err(SHARED_FILE);
+    }
+    Ok(())
+}
+
+/// The other key and secret files: upstream token keys, signing keys and OIDC client
+/// secrets.
+fn other_files(config: &ConfigV2) -> impl Iterator<Item = &Path> {
+    let oauth = &config.oauth;
     let upstream = oauth.upstream_token_encryption.iter();
     let upstream = upstream.flat_map(|e| e.keys.iter().map(|key| key.key_file.as_path()));
     let signing = oauth.signing.iter().flat_map(|signing| {
@@ -108,16 +139,7 @@ pub(super) fn validate(config: &ConfigV2) -> Result<(), &'static str> {
     });
     let methods = config.ui.oidc.iter();
     let secrets = methods.filter_map(|method| method.client_secret_file.as_deref());
-    if upstream
-        .chain(signing)
-        .chain(secrets)
-        .any(|other| other == path)
-    {
-        return Err(
-            "oauth.refresh_token_retry_key_file must be a file of its own, not another key or secret file",
-        );
-    }
-    Ok(())
+    upstream.chain(signing).chain(secrets)
 }
 
 #[cfg(test)]
@@ -202,5 +224,41 @@ mod tests {
             *RetryKey::load(&random).unwrap().0,
             *RetryKey::load(&random).unwrap().0
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn another_name_for_a_key_file_and_a_client_secret_of_the_same_bytes_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (retry, upstream) = (key_file([1; 32]), key_file([2; 32]));
+        // The upstream key under another name.
+        let alias = dir.path().join("retry.key");
+        std::os::unix::fs::symlink(upstream.path(), &alias).unwrap();
+        let aliased = config(|c| {
+            c["oauth"]["refresh_token_retry_key_file"] = json!(alias);
+            c["oauth"]["upstream_token_encryption"]["keys"][0]["key_file"] = json!(upstream.path());
+        });
+        assert_eq!(validate(&aliased), Ok(()));
+        let error = RetryKey::load(&aliased).err().unwrap();
+        assert_eq!(error, SHARED_FILE);
+        // A client secret file holding the same 32 bytes as the retry key.
+        let secret = key_file([1; 32]);
+        let with_secret = |secret: &tempfile::NamedTempFile| {
+            config(|c| {
+                c["oauth"]["refresh_token_retry_key_file"] = json!(retry.path());
+                c["oauth"]["upstream_token_encryption"]["keys"][0]["key_file"] =
+                    json!(upstream.path());
+                c["ui"]["oidc"] = json!([{"id": "sso", "label": "SSO", "realm": "idp",
+                    "issuer": "https://idp.example.org/realms/test", "client_id": "authotron",
+                    "client_secret_file": secret.path()}]);
+            })
+        };
+        let error = RetryKey::load(&with_secret(&secret)).err().unwrap();
+        assert!(
+            error.contains("client secret of OIDC method sso"),
+            "{error}"
+        );
+        let other = key_file([3; 32]);
+        assert!(RetryKey::load(&with_secret(&other)).is_ok());
     }
 }
