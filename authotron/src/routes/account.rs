@@ -64,8 +64,16 @@ async fn page(State(state): State<AppState>, uri: Uri, headers: HeaderMap) -> Re
     let logins = match state.oauth.as_deref().filter(|oauth| oauth.has_logins()) {
         Some(runtime) => {
             let user = &session.user;
-            let logins = runtime.logins(&user.realm, &user.username).await.ok();
-            Some((runtime, logins))
+            let logins = runtime.logins(&user.realm, &user.username).await;
+            if let Err(error) = &logins {
+                tracing::warn!(
+                    event_name = "browser.account.logins_unavailable",
+                    event_domain = "browser",
+                    ?error,
+                    "account page shows no logins: the refresh-token store failed"
+                );
+            }
+            Some((runtime, logins.ok()))
         }
         None => None,
     };
@@ -212,6 +220,22 @@ fn refused(state: &AppState, status: StatusCode) -> Response {
     private_response((status, Html(private_page(state, card))).into_response())
 }
 
+/// An account form the backend could not complete: 429 when it limits forms, else 503,
+/// with one neutral page; part of the request may have been applied.
+fn not_completed(state: &AppState, error: BrowserVerifyError) -> Response {
+    let status = if error == BrowserVerifyError::Limited {
+        StatusCode::TOO_MANY_REQUESTS
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let card = html! {
+        h2 id="login-card-title" { "Request not completed" }
+        p class="login-card-detail" { "This could not be completed right now. Reload your account page to see where things stand, and try again later." }
+        p { a href="/login/account" { "Back to your account" } }
+    };
+    private_response((status, Html(private_page(state, card))).into_response())
+}
+
 /// Whether the posted `csrf` consumes this browser's account form transaction.
 async fn consumed(
     state: &AppState,
@@ -249,12 +273,18 @@ async fn sign_out(
     match consumed(&state, &headers, &form.csrf).await {
         Ok(true) => {}
         Ok(false) => return refused(&state, StatusCode::FORBIDDEN),
-        Err(error) => return unavailable(error),
+        Err(error) => return not_completed(&state, error),
     }
     if let Some(sid) = cookie_value(&headers, SESSION_COOKIE)
         && let Err(error) = state.browser.end_session(&sid).await
     {
-        return unavailable(error);
+        tracing::warn!(
+            event_name = "browser.account.sign_out_failed",
+            event_domain = "browser",
+            ?error,
+            "browser session not ended: the session store failed"
+        );
+        return not_completed(&state, error);
     }
     let mut response =
         private_response(Redirect::to(super::login::SIGNED_OUT_LOCATION).into_response());
@@ -305,12 +335,12 @@ async fn revoke(
     match consumed(&state, &headers, &form.csrf).await {
         Ok(true) => {}
         Ok(false) => return refused(&state, StatusCode::FORBIDDEN),
-        Err(error) => return unavailable(error),
+        Err(error) => return not_completed(&state, error),
     }
     let session = match current_session(&state, &headers).await {
         Ok(Some(session)) => session,
         Ok(None) => return private_response(Redirect::to("/login").into_response()),
-        Err(error) => return unavailable(error),
+        Err(error) => return not_completed(&state, error),
     };
     let Some(runtime) = &state.oauth else {
         return refused(&state, StatusCode::NOT_FOUND);
@@ -325,8 +355,14 @@ async fn revoke(
             &state.metrics,
         )
         .await;
-    if revoked.is_err() {
-        return unavailable(BrowserVerifyError::Unavailable);
+    if let Err(error) = revoked {
+        tracing::warn!(
+            event_name = "browser.account.revoke_failed",
+            event_domain = "browser",
+            ?error,
+            "logins not revoked, or not all: the refresh-token store failed"
+        );
+        return not_completed(&state, BrowserVerifyError::Unavailable);
     }
     private_response(Redirect::to(REVOKED_LOCATION).into_response())
 }
