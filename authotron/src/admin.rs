@@ -173,7 +173,7 @@ async fn runtime(config: &ConfigV2) -> Result<Arc<OAuthRuntime>, String> {
     match OAuthRuntime::initialize(config).await {
         Ok(Some(runtime)) => Ok(runtime),
         Ok(None) => Err("OAuth is not enabled, so there are no logins".into()),
-        Err(error) => Err(format!("cannot reach the store: {error}")),
+        Err(error) => Err(format!("cannot start the OAuth runtime: {error}")),
     }
 }
 
@@ -494,6 +494,17 @@ mod tests {
         assert!(error.contains("OAuth is not enabled"), "{error}");
         let error = run(&config(true), &list, &mut out).await.unwrap_err();
         assert!(error.contains("inside each server process"), "{error}");
+        // An invalid OAuth configuration is reported before any store is reached.
+        let mut invalid = config(true);
+        invalid.ui.browser_session.as_mut().unwrap().backend =
+            serde_json::from_value(serde_json::json!({"type": "valkey",
+                "url": "redis://127.0.0.1:9/0", "key_prefix": "authotron", "password": "unused"}))
+            .unwrap();
+        let error = run(&invalid, &list, &mut out).await.unwrap_err();
+        assert!(
+            error.starts_with("cannot start the OAuth runtime: "),
+            "{error}"
+        );
         assert!(out.is_empty());
         run(&config(false), &Command::Help, &mut out).await.unwrap();
         assert!(
