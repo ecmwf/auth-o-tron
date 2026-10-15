@@ -548,10 +548,15 @@ mod tests {
         let issuer = TokenIssuer::new(&config, &keys).unwrap();
         let refused = issuer.issue_access_token("desktop", RESOURCE, &["read".into()], &user);
         assert_eq!(refused.err(), Some(TokenError::Identity));
-        // Without identity claims there is no realm claim.
+        // Without identity claims there is no realm claim, and `roles` stays the union
+        // of the granted scopes' required roles, whatever else the user holds.
         config.resources[0].identity_claims = None;
-        user.roles = vec!["reader".into(), "member".into()];
-        assert!(claims_of(&config, &user).get("realm").is_none());
+        user.roles = ["unrelated", "member", "reader", "admin"]
+            .map(String::from)
+            .into();
+        let claims = claims_of(&config, &user);
+        assert!(claims.get("realm").is_none());
+        assert_eq!(claims["roles"], json!(["reader", "member"]));
     }
     #[test]
     fn policy_identity_time_and_signing_binding_fail_closed() {
