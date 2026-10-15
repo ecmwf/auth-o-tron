@@ -560,4 +560,73 @@ mod tests {
         let clone: u64 = connection.clone().query(&client_id()).await.unwrap();
         assert_eq!((clone, proxy.accepted()), (second, 2));
     }
+
+    /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
+    #[tokio::test]
+    #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+    async fn disposable_valkey_keeps_a_connection_whose_command_was_only_slow() {
+        let (_fixture, admin, proxy, connection) = proxied().await;
+        let first: u64 = connection.query(&client_id()).await.unwrap();
+        // Writes wait 600 ms: the command times out, but the PING queued behind it
+        // is answered within the confirmation window.
+        let pause = redis::cmd("CLIENT")
+            .arg(&["PAUSE", "600", "WRITE"])
+            .to_owned();
+        let _: String = admin.query(&pause).await.unwrap();
+        assert_eq!(
+            connection
+                .query::<u64>(redis::cmd("INCR").arg("fixture:slow"))
+                .await
+                .err(),
+            Some(ConnectionError::Unavailable)
+        );
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        let same: u64 = connection.query(&client_id()).await.unwrap();
+        assert_eq!((same, proxy.accepted()), (first, 1));
+        assert_eq!(count(&admin, "fixture:slow").await, 1);
+    }
+
+    /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
+    #[tokio::test]
+    #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+    async fn disposable_valkey_replaces_a_silent_connection_once_for_concurrent_commands() {
+        let (_fixture, admin, proxy, connection) = proxied().await;
+        connection.query::<u64>(&client_id()).await.unwrap();
+        proxy.blackhole();
+        let commands = (0..8).map(|_| {
+            let connection = connection.clone();
+            async move {
+                connection
+                    .query::<u64>(redis::cmd("INCR").arg("fixture:concurrent"))
+                    .await
+            }
+        });
+        let results = futures::future::join_all(commands).await;
+        assert!(results.iter().all(|result| result.is_err()));
+        accepted(&proxy, 2).await;
+        connection.query::<u64>(&client_id()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(proxy.accepted(), 2, "replaced once");
+        assert_eq!(count(&admin, "fixture:concurrent").await, 8);
+    }
+
+    /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
+    #[tokio::test]
+    #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+    async fn disposable_valkey_replaces_a_silent_connection_after_its_caller_gave_up() {
+        let (_fixture, _admin, proxy, connection) = proxied().await;
+        connection.query::<u64>(&client_id()).await.unwrap();
+        proxy.blackhole();
+        // The caller stops waiting long before the operation timeout; the command still
+        // times out on its own and its connection is still replaced.
+        let incr = redis::cmd("INCR").arg("fixture:abandoned").to_owned();
+        let abandoned = connection.query::<u64>(&incr);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), abandoned)
+                .await
+                .is_err()
+        );
+        accepted(&proxy, 2).await;
+        connection.query::<u64>(&client_id()).await.unwrap();
+    }
 }
