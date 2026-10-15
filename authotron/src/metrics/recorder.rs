@@ -175,6 +175,7 @@ pub struct Metrics {
     browser_inflight: IntGauge,
     browser_attempts: IntCounterVec,
     browser_duration: HistogramVec,
+    browser_account_forms: IntCounterVec,
     oauth_refresh_tokens: IntCounterVec,
     oauth_upstream_tokens: IntCounterVec,
     oidc_up: IntGaugeVec,
@@ -271,6 +272,62 @@ impl UpstreamTokenEvent {
             Self::RevocationUnsupported => "revocation_unsupported",
             Self::RevocationFailed => "revocation_failed",
             Self::RevocationSkipped => "revocation_skipped",
+        }
+    }
+}
+
+/// The forms of the browser account page: the `form` label of their outcomes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountForm {
+    SignOut,
+    Revoke,
+}
+impl AccountForm {
+    const ALL: [Self; 2] = [Self::SignOut, Self::Revoke];
+    fn label(self) -> &'static str {
+        match self {
+            Self::SignOut => "sign_out",
+            Self::Revoke => "revoke",
+        }
+    }
+}
+
+/// Bounded `outcome` label values for the account page's form POSTs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountFormOutcome {
+    Success,
+    /// The `Origin` was not exactly the public origin.
+    Origin,
+    /// The body was not the form's.
+    Malformed,
+    /// The form transaction was missing, spent, expired or not this browser's.
+    Csrf,
+    /// A revoke form from a browser without a session.
+    NoSession,
+    /// Account forms were limited.
+    Limited,
+    /// The session or refresh-token store failed.
+    BackendUnavailable,
+}
+impl AccountFormOutcome {
+    const ALL: [Self; 7] = [
+        Self::Success,
+        Self::Origin,
+        Self::Malformed,
+        Self::Csrf,
+        Self::NoSession,
+        Self::Limited,
+        Self::BackendUnavailable,
+    ];
+    fn label(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Origin => "origin",
+            Self::Malformed => "malformed",
+            Self::Csrf => "csrf",
+            Self::NoSession => "no_session",
+            Self::Limited => "limited",
+            Self::BackendUnavailable => "backend_unavailable",
         }
     }
 }
@@ -429,6 +486,18 @@ impl Metrics {
             registry.clone()
         )
         .expect("register browser duration");
+        let browser_account_forms = register_int_counter_vec_with_registry!(
+            "authotron_browser_account_forms_total",
+            "Completed POSTs of the browser account page's forms",
+            &["form", "outcome"],
+            registry.clone()
+        )
+        .expect("register browser account forms");
+        for form in AccountForm::ALL {
+            for outcome in AccountFormOutcome::ALL {
+                browser_account_forms.with_label_values(&[form.label(), outcome.label()]);
+            }
+        }
         let oauth_refresh_tokens = register_int_counter_vec_with_registry!(
             "authotron_oauth_refresh_tokens_total",
             "OAuth refresh-token lifecycle events",
@@ -472,6 +541,7 @@ impl Metrics {
             browser_inflight,
             browser_attempts,
             browser_duration,
+            browser_account_forms,
             oauth_refresh_tokens,
             oauth_upstream_tokens,
             oidc_up,
@@ -492,6 +562,12 @@ impl Metrics {
     pub fn record_upstream_token(&self, event: UpstreamTokenEvent) {
         self.oauth_upstream_tokens
             .with_label_values(&[event.label()])
+            .inc();
+    }
+
+    pub fn record_account_form(&self, form: AccountForm, outcome: AccountFormOutcome) {
+        self.browser_account_forms
+            .with_label_values(&[form.label(), outcome.label()])
             .inc();
     }
 

@@ -17,6 +17,7 @@ use super::browser_login::{
 };
 use crate::{
     browser::{BrowserVerifyError, DISPLAY_ATTRIBUTES},
+    metrics::{AccountForm, AccountFormOutcome},
     oauth::{audit::family_ref, logins::Logins, refresh::FamilySummary, runtime::OAuthRuntime},
     state::AppState,
 };
@@ -273,18 +274,22 @@ async fn sign_out_refused(state: &AppState, headers: &HeaderMap) -> Response {
 
 /// An account form the backend could not complete: 429 when it limits forms, else 503,
 /// with one neutral page; part of the request may have been applied.
-fn not_completed(state: &AppState, error: BrowserVerifyError) -> Response {
-    let status = if error == BrowserVerifyError::Limited {
-        StatusCode::TOO_MANY_REQUESTS
+fn not_completed(state: &AppState, error: BrowserVerifyError) -> (AccountFormOutcome, Response) {
+    let (outcome, status) = if error == BrowserVerifyError::Limited {
+        (AccountFormOutcome::Limited, StatusCode::TOO_MANY_REQUESTS)
     } else {
-        StatusCode::SERVICE_UNAVAILABLE
+        (
+            AccountFormOutcome::BackendUnavailable,
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
     };
     let card = html! {
         h2 id="login-card-title" { "Request not completed" }
         p class="login-card-detail" { "This could not be completed right now. Reload your account page to see where things stand, and try again later." }
         p { a href="/login/account" { "Back to your account" } }
     };
-    private_response((status, Html(private_page(state, card))).into_response())
+    let page = Html(private_page(state, card));
+    (outcome, private_response((status, page).into_response()))
 }
 
 /// Whether the posted `csrf` consumes this browser's account form transaction.
@@ -315,18 +320,35 @@ async fn sign_out(
     headers: HeaderMap,
     payload: Result<Form<SignOutForm>, FormRejection>,
 ) -> Response {
-    if !same_origin(&state, &headers) {
-        return refused(&state, StatusCode::FORBIDDEN);
+    let (outcome, response) = sign_out_inner(&state, &headers, payload).await;
+    state
+        .metrics
+        .record_account_form(AccountForm::SignOut, outcome);
+    response
+}
+
+async fn sign_out_inner(
+    state: &AppState,
+    headers: &HeaderMap,
+    payload: Result<Form<SignOutForm>, FormRejection>,
+) -> (AccountFormOutcome, Response) {
+    if !same_origin(state, headers) {
+        let refused = refused(state, StatusCode::FORBIDDEN);
+        return (AccountFormOutcome::Origin, refused);
     }
     let Ok(Form(form)) = payload else {
-        return refused(&state, StatusCode::BAD_REQUEST);
+        let refused = refused(state, StatusCode::BAD_REQUEST);
+        return (AccountFormOutcome::Malformed, refused);
     };
-    match consumed(&state, &headers, &form.csrf).await {
+    match consumed(state, headers, &form.csrf).await {
         Ok(true) => {}
-        Ok(false) => return sign_out_refused(&state, &headers).await,
-        Err(error) => return not_completed(&state, error),
+        Ok(false) => {
+            let refused = sign_out_refused(state, headers).await;
+            return (AccountFormOutcome::Csrf, refused);
+        }
+        Err(error) => return not_completed(state, error),
     }
-    if let Some(sid) = cookie_value(&headers, SESSION_COOKIE)
+    if let Some(sid) = cookie_value(headers, SESSION_COOKIE)
         && let Err(error) = state.browser.end_session(&sid).await
     {
         tracing::warn!(
@@ -335,12 +357,12 @@ async fn sign_out(
             ?error,
             "browser session not ended: the session store failed"
         );
-        return not_completed(&state, error);
+        return not_completed(state, error);
     }
     let mut response =
         private_response(Redirect::to(super::login::SIGNED_OUT_LOCATION).into_response());
     set_cookie(&mut response, SESSION_COOKIE, String::new(), 0);
-    response
+    (AccountFormOutcome::Success, response)
 }
 
 // `csrf` is the account page's token; `login` names the logins to revoke: one by its
@@ -374,27 +396,54 @@ async fn revoke(
     headers: HeaderMap,
     payload: Result<Form<RevokeForm>, FormRejection>,
 ) -> Response {
-    if !same_origin(&state, &headers) {
-        return refused(&state, StatusCode::FORBIDDEN);
+    // The route exists only with OAuth logins.
+    let Some(runtime) = state.oauth.as_deref() else {
+        return refused(&state, StatusCode::NOT_FOUND);
+    };
+    let (outcome, response) = revoke_inner(&state, runtime, &headers, payload).await;
+    state
+        .metrics
+        .record_account_form(AccountForm::Revoke, outcome);
+    response
+}
+
+async fn revoke_inner(
+    state: &AppState,
+    runtime: &OAuthRuntime,
+    headers: &HeaderMap,
+    payload: Result<Form<RevokeForm>, FormRejection>,
+) -> (AccountFormOutcome, Response) {
+    if !same_origin(state, headers) {
+        let refused = refused(state, StatusCode::FORBIDDEN);
+        return (AccountFormOutcome::Origin, refused);
     }
+    let malformed = || {
+        (
+            AccountFormOutcome::Malformed,
+            refused(state, StatusCode::BAD_REQUEST),
+        )
+    };
     let Ok(Form(form)) = payload else {
-        return refused(&state, StatusCode::BAD_REQUEST);
+        return malformed();
     };
     let Some(which) = selected(&form.login) else {
-        return refused(&state, StatusCode::BAD_REQUEST);
+        return malformed();
     };
-    match consumed(&state, &headers, &form.csrf).await {
+    match consumed(state, headers, &form.csrf).await {
         Ok(true) => {}
-        Ok(false) => return refused(&state, StatusCode::FORBIDDEN),
-        Err(error) => return not_completed(&state, error),
+        Ok(false) => {
+            let refused = refused(state, StatusCode::FORBIDDEN);
+            return (AccountFormOutcome::Csrf, refused);
+        }
+        Err(error) => return not_completed(state, error),
     }
-    let session = match current_session(&state, &headers).await {
+    let session = match current_session(state, headers).await {
         Ok(Some(session)) => session,
-        Ok(None) => return private_response(Redirect::to("/login").into_response()),
-        Err(error) => return not_completed(&state, error),
-    };
-    let Some(runtime) = &state.oauth else {
-        return refused(&state, StatusCode::NOT_FOUND);
+        Ok(None) => {
+            let redirect = private_response(Redirect::to("/login").into_response());
+            return (AccountFormOutcome::NoSession, redirect);
+        }
+        Err(error) => return not_completed(state, error),
     };
     let user = &session.user;
     let revoked = runtime
@@ -413,9 +462,10 @@ async fn revoke(
             ?error,
             "logins not revoked, or not all: the refresh-token store failed"
         );
-        return not_completed(&state, BrowserVerifyError::Unavailable);
+        return not_completed(state, BrowserVerifyError::Unavailable);
     }
-    private_response(Redirect::to(REVOKED_LOCATION).into_response())
+    let revoked = private_response(Redirect::to(REVOKED_LOCATION).into_response());
+    (AccountFormOutcome::Success, revoked)
 }
 
 #[cfg(test)]

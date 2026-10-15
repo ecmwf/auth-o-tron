@@ -1051,7 +1051,9 @@ mod tests {
         assert!(response.headers().get("set-cookie").is_none());
         let metrics = app_state.metrics.render().unwrap();
         assert!(metrics.contains("authotron_browser_login_attempts_total{flow=\"basic\",method=\"password\",outcome=\"backend_unavailable\"} 1"));
-        assert!(!metrics.contains("outcome=\"success\""));
+        assert!(!metrics.contains(
+            "authotron_browser_login_attempts_total{flow=\"basic\",method=\"password\",outcome=\"success\"}"
+        ));
         assert!(metrics.contains("authotron_browser_logins_inflight 0"));
         let form = app
             .clone()

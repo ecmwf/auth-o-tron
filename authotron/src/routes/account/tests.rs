@@ -91,6 +91,17 @@ async fn account_csrf(fixture: &Fixture, jar: &mut Jar) -> String {
     hidden(&html, "csrf")
 }
 
+/// Asserts the account form counters of `form`, as `(outcome, count)` pairs.
+fn counted(fixture: &Fixture, form: &str, counts: &[(&str, u32)]) {
+    let output = fixture.state.metrics.render().unwrap();
+    for (outcome, count) in counts {
+        let line = format!(
+            "authotron_browser_account_forms_total{{form=\"{form}\",outcome=\"{outcome}\"}} {count}\n"
+        );
+        assert!(output.contains(&line), "{line}");
+    }
+}
+
 async fn signed_in_still(fixture: &Fixture, jar: &Jar) -> bool {
     get(&fixture.app, "/login/account", jar).await.status() == StatusCode::OK
 }
@@ -273,6 +284,16 @@ async fn sign_out_refuses_forged_requests_and_keeps_the_session() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let counts = [
+        ("success", 1),
+        ("origin", 3),
+        ("malformed", 3),
+        ("csrf", 3),
+        ("limited", 0),
+        ("backend_unavailable", 0),
+    ];
+    counted(&fixture, "sign_out", &counts);
+    counted(&fixture, "revoke", &[("success", 0), ("no_session", 0)]);
 }
 
 #[tokio::test]
@@ -498,6 +519,8 @@ async fn logins_of_other_users_and_forged_forms_are_never_revoked() {
     assert_eq!(refreshing(&fixture, &mut theirs).await, 1);
     assert_eq!(refreshing(&fixture, &mut mine).await, 1);
     assert!(fixture.idp.state.revoked.lock().unwrap().is_empty());
+    let counts = [("success", 1), ("origin", 1), ("csrf", 1), ("malformed", 5)];
+    counted(&fixture, "revoke", &counts);
 }
 
 #[tokio::test]
