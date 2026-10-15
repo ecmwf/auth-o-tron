@@ -277,18 +277,27 @@ fn printable(text: &str) -> String {
 }
 
 /// The soft hyphen, the bidirectional controls and marks, the zero-width and invisible
-/// format characters, the line and paragraph separators and the byte-order mark.
+/// format characters, the line and paragraph separators, the byte-order mark, and
+/// characters that render as nothing: the combining grapheme joiner, the Hangul fillers,
+/// variation selectors, tags and musical-symbol format characters.
 fn hidden_format(c: char) -> bool {
     matches!(
         c,
         '\u{ad}'
+            | '\u{34f}'
             | '\u{61c}'
+            | '\u{115f}'..='\u{1160}'
             | '\u{180e}'
             | '\u{200b}'..='\u{200f}'
             | '\u{2028}'..='\u{202e}'
             | '\u{2060}'..='\u{206f}'
+            | '\u{3164}'
+            | '\u{fe00}'..='\u{fe0f}'
             | '\u{feff}'
+            | '\u{ffa0}'
             | '\u{fff9}'..='\u{fffb}'
+            | '\u{1d173}'..='\u{1d17a}'
+            | '\u{e0000}'..='\u{e007f}'
     )
 }
 
@@ -473,6 +482,27 @@ mod tests {
             shown,
             "\\u{202e}eci\\u{200b}la\\u{2066}\\u{2028}\\u{feff}\\u{ad}Zoë 名"
         );
+        for invisible in [
+            '\u{34f}',
+            '\u{115f}',
+            '\u{1160}',
+            '\u{3164}',
+            '\u{ffa0}',
+            '\u{fe00}',
+            '\u{fe0f}',
+            '\u{e0000}',
+            '\u{e0041}',
+            '\u{e007f}',
+            '\u{1d173}',
+            '\u{1d17a}',
+        ] {
+            let shown = printable(&format!("a{invisible}b"));
+            assert_eq!(shown, format!("a{}b", invisible.escape_default()));
+        }
+        // Their neighbours stay as they are.
+        for visible in ['\u{1161}', '\u{3165}', '\u{ffa1}', '\u{fe10}', '\u{1d17b}'] {
+            assert_eq!(printable(&visible.to_string()), visible.to_string());
+        }
     }
 
     #[tokio::test]
