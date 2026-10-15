@@ -374,8 +374,8 @@ impl OAuthRuntime {
                 metrics.record_refresh_token(RefreshTokenEvent::Rotated);
                 Ok(response.with_refresh_token(&next))
             }
-            // A concurrent refresh of the same token rotated it first, or an earlier run
-            // of this rotation did: answer as for a retry.
+            // A concurrent refresh of the same token rotated it first: answer as for a
+            // retry. An earlier run of this rotation reports `Rotated`.
             Rotated::Repeated(repetition) => answer_again(
                 &self.retry_key,
                 &presented,

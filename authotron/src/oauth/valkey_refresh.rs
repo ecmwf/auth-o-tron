@@ -277,7 +277,8 @@ impl ValkeyRefreshStore {
     }
     /// Rotates the family of `presented` if that token is still its current one. If it
     /// is the previous one, the latest rotation is answered again as by
-    /// [`Self::repeat`]: a concurrent refresh, or an earlier run of this one, applied it.
+    /// [`Self::repeat`]: a concurrent refresh applied it. A run resent after a lost reply
+    /// finds this very rotation applied and reports it `Rotated`.
     pub async fn rotate(
         &self,
         presented: &[u8; 32],

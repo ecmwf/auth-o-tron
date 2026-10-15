@@ -269,8 +269,8 @@ pub struct Repetition {
 pub enum Rotated {
     /// Applied now, or by an earlier run of this very rotation whose reply was lost.
     Rotated,
-    /// The presented token is the previous one, rotated by a concurrent refresh or an
-    /// earlier run of this rotation, within the retry window and cap.
+    /// The presented token is the previous one, rotated by a concurrent refresh, within
+    /// the retry window and cap.
     Repeated(Box<Repetition>),
     /// The presented token is neither, or its family ended.
     Stale,
