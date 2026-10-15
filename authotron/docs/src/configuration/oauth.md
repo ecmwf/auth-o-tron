@@ -383,8 +383,9 @@ Access tokens for that resource then carry two more claims:
 - `realm`: the user's realm, a string.
 - `roles`: the user's roles after augmentation that `identity_claims.roles` names,
   compared exactly, sorted and unique, instead of the required roles; `["*"]` alone
-  names every role. For a family coupled to an OIDC offline session these come from
-  the latest upstream refresh, through the method's `role_map`.
+  names every role the list could name, leaving out one with surrounding whitespace or
+  control characters, or named `*`. For a family coupled to an OIDC offline session
+  these come from the latest upstream refresh, through the method's `role_map`.
 
 Both are present whenever the resource opted in; `roles` may be empty. The list holds 1
 to 64 names of 1 to 128 bytes, without control characters or surrounding whitespace,

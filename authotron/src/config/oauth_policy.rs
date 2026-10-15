@@ -39,21 +39,35 @@ pub struct IdentityClaims {
     pub roles: Vec<String>,
 }
 
+/// A role name identity claims can carry: 1-128 bytes, no control characters or
+/// surrounding whitespace, and not `*`.
+/// Valid: `aviso-reader`, `Team Lead`. Invalid: ``, ` aviso-reader`, `reader\t`, `*`.
+fn claim_role(role: &str) -> bool {
+    text(role) && role.trim() == role && role != "*"
+}
+
 impl IdentityClaims {
     /// Valid: `["aviso-reader"]`, `["aviso-reader", "aviso-admin"]`, `["*"]`. Invalid:
     /// `[]`, `["*", "aviso-reader"]`, `[" aviso-reader"]`, a repeated name, 65 names.
     fn valid(&self) -> bool {
-        let named = |role: &String| text(role) && role.trim() == role && role != "*";
         (1..=64).contains(&self.roles.len())
             && unique(&self.roles)
-            && (self.roles == ["*"] || self.roles.iter().all(named))
+            && (self.roles == ["*"] || self.roles.iter().all(|role| claim_role(role)))
     }
-    /// The roles of `held` that the claims name, sorted and unique.
+    /// The roles of `held` that the claims name, sorted and unique. `["*"]` names every
+    /// role that [`claim_role`] accepts, so a role padded or holding control characters
+    /// is left out, as it could not be named.
     pub fn select(&self, held: &[String]) -> Vec<String> {
         let all = self.roles == ["*"];
         let mut roles: Vec<String> = held
             .iter()
-            .filter(|role| all || self.roles.contains(role))
+            .filter(|role| {
+                if all {
+                    claim_role(role)
+                } else {
+                    self.roles.contains(role)
+                }
+            })
             .cloned()
             .collect();
         roles.sort();
@@ -410,6 +424,10 @@ mod tests {
         assert_eq!(claims(&["reader", "absent"]).select(&held), ["reader"]);
         assert_eq!(claims(&["*"]).select(&held), ["admin", "reader", "writer"]);
         assert!(claims(&["Reader"]).select(&held).is_empty());
+        let odd: Vec<String> = [" reader", "reader\t", "re\u{7}ader", "*", "", "Team Lead"]
+            .map(String::from)
+            .into();
+        assert_eq!(claims(&["*"]).select(&odd), ["Team Lead"]);
     }
 
     #[test]
