@@ -11,12 +11,14 @@
 
 use super::*;
 use crate::oauth::{
+    audit::family_ref,
     refresh::RefreshToken,
     refresh_grant::refresh_dispatch,
     upstream::tests::{Coupled, Valkey, coupled},
 };
 use crate::oidc::mock::SUBJECT;
 use serde_json::{Value, json};
+use std::sync::atomic::Ordering;
 
 /// Adds the client `cli` beside `desktop`.
 fn second_client(config: &mut Value) {
@@ -146,7 +148,10 @@ async fn disposable_valkey_logins_are_found_by_realm_user_and_client_and_revoked
 }
 
 /// Runs `authotron admin <line>` with `config`; its result and report.
-async fn command(config: &crate::config::ConfigV2, line: &str) -> (Result<(), String>, String) {
+async fn command(
+    config: &crate::config::ConfigV2,
+    line: &str,
+) -> (Result<crate::admin::Finished, String>, String) {
     let args: Vec<String> = line.split_whitespace().map(String::from).collect();
     let command = crate::admin::parse(&args).unwrap();
     let mut out = Vec::new();
@@ -196,7 +201,7 @@ async fn disposable_valkey_the_admin_command_lists_dry_runs_and_revokes_a_realm(
     assert_eq!(rows[3], ["2", "logins"]);
     let all = filter("idp", None, None);
     for family in coupled.runtime.find_logins(&all).await.unwrap() {
-        assert!(listed.contains(&crate::oauth::audit::family_ref(&family.family_id)));
+        assert!(listed.contains(&family_ref(&family.family_id)));
         assert!(!listed.contains(&family.family_id));
     }
     let (_, limited) = command(config, "logins list --realm idp --limit 1").await;
@@ -237,6 +242,61 @@ async fn disposable_valkey_the_admin_command_lists_dry_runs_and_revokes_a_realm(
     assert_eq!(coupled.runtime.find_logins(&other).await.unwrap().len(), 1);
     assert!(logs_contain("reason=\"admin_revoke\""));
     assert!(logs_contain("username=bob"));
+}
+
+/// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
+#[tokio::test]
+#[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+async fn disposable_valkey_a_failing_provider_ends_the_upstream_phase_and_each_grant_is_named() {
+    let valkey = Valkey::start("authotron:admin-upstream-test").await;
+    let coupled = coupled(|config| {
+        config["ui"]["browser_session"]["backend"] = valkey.backend.clone();
+    })
+    .await;
+    let users = MAX_CONSECUTIVE_UPSTREAM_FAILURES + 4;
+    for user in 0..users {
+        login(&coupled, "idp", &format!("user{user:02}"), "desktop").await;
+    }
+    let all = filter("idp", None, None);
+    let found = coupled.runtime.find_logins(&all).await.unwrap();
+    assert_eq!(found.len(), users);
+    let state = &coupled.idp.state;
+    state.revocation_fails.store(true, Ordering::SeqCst);
+    let (result, report) = command(&coupled.config, "logins revoke --realm idp --all-users").await;
+    assert_eq!(result, Ok(crate::admin::Finished::UpstreamLeft));
+    assert!(report.contains(&format!(
+        "revoked {users} logins; upstream grants: 0 revoked at the provider, 0 not supported \
+         there, {users} failed, 0 skipped\n"
+    )));
+    let left: Vec<_> = report
+        .lines()
+        .filter_map(|line| line.strip_prefix("upstream grant left: "))
+        .collect();
+    assert_eq!(left.len(), users, "{report}");
+    for login in &found {
+        let named = format!(
+            "{} {} (",
+            family_ref(&login.family_id),
+            login.grant.username
+        );
+        assert_eq!(
+            left.iter().filter(|line| line.starts_with(&named)).count(),
+            1
+        );
+    }
+    let failed = left
+        .iter()
+        .filter(|line| line.ends_with("(failed)"))
+        .count();
+    assert_eq!(failed, MAX_CONSECUTIVE_UPSTREAM_FAILURES);
+    let stopped =
+        format!("(not attempted after {MAX_CONSECUTIVE_UPSTREAM_FAILURES} failures in a row)");
+    assert_eq!(
+        left.iter().filter(|line| line.ends_with(&stopped)).count(),
+        4
+    );
+    assert!(state.revoked.lock().unwrap().is_empty());
+    assert!(coupled.runtime.find_logins(&all).await.unwrap().is_empty());
 }
 
 #[tokio::test]

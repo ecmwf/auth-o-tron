@@ -15,7 +15,7 @@ use crate::{
     config::{ConfigV2, LoggingConfig, ui::BrowserBackendConfig},
     metrics::Metrics,
     oauth::{
-        admin::{AdminError, LoginFilter},
+        admin::{AdminError, LeftReason, LoginFilter, MAX_CONSECUTIVE_UPSTREAM_FAILURES},
         audit::{self, family_ref},
         refresh::FamilySummary,
         runtime::OAuthRuntime,
@@ -33,6 +33,15 @@ usage: authotron admin logins list   --realm <realm> [--username <name>] [--clie
 /// Logins `list` shows unless `--limit` says otherwise, and the most it accepts.
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 10_000;
+
+/// How a command that did not fail ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Finished {
+    Done,
+    /// The logins were revoked, but some of their upstream grants may still be live at
+    /// the provider; the report names them.
+    UpstreamLeft,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -177,10 +186,17 @@ pub fn init_logging(logging: &LoggingConfig) {
 /// Runs `command` against the store of `config`, writing its report to `out`: the
 /// selected logins, then for `revoke` what it did. Audit events go to the log
 /// ([`init_logging`]).
-pub async fn run(config: &ConfigV2, command: &Command, out: &mut impl Write) -> Result<(), String> {
+pub async fn run(
+    config: &ConfigV2,
+    command: &Command,
+    out: &mut impl Write,
+) -> Result<Finished, String> {
     let write = |error: std::io::Error| format!("cannot write the report: {error}");
     let filter = match command {
-        Command::Help => return writeln!(out, "{USAGE}").map_err(write),
+        Command::Help => {
+            writeln!(out, "{USAGE}").map_err(write)?;
+            return Ok(Finished::Done);
+        }
         Command::List { filter, .. } | Command::Revoke { filter, .. } => filter,
     };
     let runtime = runtime(config).await?;
@@ -217,12 +233,31 @@ pub async fn run(config: &ConfigV2, command: &Command, out: &mut impl Write) -> 
                 revoked.upstream_skipped
             )
             .map_err(write)?;
+            for left in &revoked.upstream_left {
+                let reason = match left.reason {
+                    LeftReason::Failed => "failed".into(),
+                    LeftReason::NotAttempted => format!(
+                        "not attempted after {MAX_CONSECUTIVE_UPSTREAM_FAILURES} failures in a row"
+                    ),
+                    LeftReason::Skipped => "skipped".into(),
+                };
+                let username = printable(&left.username);
+                writeln!(
+                    out,
+                    "upstream grant left: {} {username} ({reason})",
+                    left.family
+                )
+                .map_err(write)?;
+            }
             if revoked.interrupted {
                 return Err("the store failed during the revocation; run the command again".into());
             }
+            if !revoked.upstream_left.is_empty() {
+                return Ok(Finished::UpstreamLeft);
+            }
         }
     }
-    Ok(())
+    Ok(Finished::Done)
 }
 
 /// Text with control characters escaped, so a stored name cannot steer the terminal.

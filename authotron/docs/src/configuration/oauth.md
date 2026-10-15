@@ -640,7 +640,13 @@ ends them, then revokes the upstream grants of coupled families at the provider
 itself, eight at a time and waiting at most ten seconds for each answer, and prints
 how many logins ended and how the upstream revocations went: revoked, not supported
 by the provider, failed or timed out, or skipped because no configured key and method
-open the grant any more. A login that ended meanwhile is not counted. The command
+open the grant any more. After 16 failures in a row it takes the provider to be down
+and attempts no more; those not attempted count as failed. A login that ended
+meanwhile is not counted. Each upstream grant that failed, was not attempted or was
+skipped, and may still be live at the provider, gets a line with its family
+reference and username, such as
+`upstream grant left: 3f2a9c0b71de alice (failed)`; its login is revoked all the same,
+and the provider's own expiry of the grant still applies. The command
 writes its report to standard output and logs to standard error in the configured
 `logging` format and level, including the store's durability check of a server start;
 the `family_revoked` and `oauth.upstream.revocation_*` events of a revocation are
@@ -658,8 +664,10 @@ kubectl exec deploy/authotron -- /app/authotron admin logins revoke --realm ecmw
 Who ran the command is recorded by the Kubernetes API server's audit log, if enabled,
 as an `exec` into the pod; Auth-O-Tron does not know the operator.
 
-The exit status is 0 when done, 1 when it failed and 2 for invalid arguments; after a
-failure during `revoke`, run it again. With the Memory backend it fails: families live
+The exit status is 0 when done, 1 when it failed, 2 for invalid arguments and 3 when
+`revoke` revoked the logins but left upstream grants; after a failure during `revoke`,
+run it again, and revoke the grants it left at the provider, or wait for their expiry
+there. With the Memory backend it fails: families live
 inside each server process, and restarting the server ends them all.
 
 **Cost.** With `--username`, the command reads that user's family index only. Without,

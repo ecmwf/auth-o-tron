@@ -130,6 +130,8 @@ pub(crate) struct MockState {
     pub issue_offline_tokens: AtomicBool,
     /// Advertise the RFC 7009 revocation endpoint.
     pub revocation: AtomicBool,
+    /// The revocation endpoint answers 503 and revokes nothing.
+    pub revocation_fails: AtomicBool,
     /// Refresh responses carry a new refresh token, invalidating the presented one.
     pub rotate_refresh_tokens: AtomicBool,
     /// Refresh responses carry a new ID token.
@@ -386,6 +388,9 @@ fn revoke(state: &MockState, headers: &HeaderMap, body: &str) -> StatusCode {
     let form = form(body);
     if !authenticated(headers, &form) {
         return StatusCode::UNAUTHORIZED;
+    }
+    if state.revocation_fails.load(Ordering::SeqCst) {
+        return StatusCode::SERVICE_UNAVAILABLE;
     }
     if let Some(token) = form.get("token") {
         state.offline.lock().unwrap().remove(token);

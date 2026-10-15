@@ -43,8 +43,8 @@ async fn main() {
     }
 }
 
-/// `authotron admin ...`, whose exit status is 0 when done, 1 when it failed and 2 for
-/// invalid arguments. The report goes to standard output and the log to standard error.
+/// `authotron admin ...`, whose exit status is 0 when done, 1 when it failed, 2 for
+/// invalid arguments and 3 when logins were revoked but upstream grants were left. The report goes to standard output and the log to standard error.
 /// Help and invalid arguments are answered before the configuration is loaded.
 async fn run_admin(args: &[String]) -> i32 {
     let command = match admin::parse(args) {
@@ -61,7 +61,8 @@ async fn run_admin(args: &[String]) -> i32 {
     let config = load_config();
     admin::init_logging(&config.logging);
     match admin::run(&config, &command, &mut std::io::stdout()).await {
-        Ok(()) => 0,
+        Ok(admin::Finished::Done) => 0,
+        Ok(admin::Finished::UpstreamLeft) => 3,
         Err(error) => {
             eprintln!("authotron admin: {error}");
             1

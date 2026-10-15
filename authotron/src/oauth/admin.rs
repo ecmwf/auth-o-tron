@@ -28,6 +28,9 @@ use std::time::Duration;
 const UPSTREAM_CONCURRENCY: usize = 8;
 /// How long one upstream revocation may take, the provider's metadata included.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(10);
+/// Consecutive failed upstream revocations after which the provider is taken to be
+/// down and the rest are not attempted, so a large revocation ends in bounded time.
+pub const MAX_CONSECUTIVE_UPSTREAM_FAILURES: usize = 16;
 /// The largest per-user family cap, so a user's index never holds more live families.
 const MAX_FAMILIES_PER_USER: usize = 1000;
 
@@ -62,18 +65,40 @@ pub enum AdminError {
 }
 
 /// What an admin revocation did.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Revoked {
     /// Families revoked; one that ended meanwhile is not counted.
     pub families: usize,
     /// The store failed before every family was revoked.
     pub interrupted: bool,
     /// Upstream grants of coupled families: revoked at the provider, unsupported there,
-    /// failed or timed out, and skipped because no key or method opens them.
+    /// failed, timed out or not attempted, and skipped because no key or method opens
+    /// them.
     pub upstream_sent: usize,
     pub upstream_unsupported: usize,
     pub upstream_failed: usize,
     pub upstream_skipped: usize,
+    /// The failed and skipped upstream grants, which may still be live at the provider.
+    pub upstream_left: Vec<UpstreamLeft>,
+}
+
+/// An upstream grant an admin revocation left at the provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpstreamLeft {
+    /// The reference of its family.
+    pub family: String,
+    pub username: String,
+    pub reason: LeftReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeftReason {
+    /// The provider refused it, failed or did not answer in time.
+    Failed,
+    /// Not attempted, or abandoned, after [`MAX_CONSECUTIVE_UPSTREAM_FAILURES`].
+    NotAttempted,
+    /// No configured key and method open the grant any more.
+    Skipped,
 }
 
 impl OAuthRuntime {
@@ -123,7 +148,8 @@ impl OAuthRuntime {
     }
 
     /// Revokes `logins` as `admin_revoke`, then the upstream grants of the coupled ones at
-    /// the provider, waiting for each answer for at most ten seconds.
+    /// the provider, waiting for each answer for at most ten seconds and attempting no
+    /// more after [`MAX_CONSECUTIVE_UPSTREAM_FAILURES`] failed in a row.
     pub async fn revoke_found(
         &self,
         logins: &[FamilySummary],
@@ -147,22 +173,72 @@ impl OAuthRuntime {
                 sealed.push((ended.grant, grant, reference));
             }
         }
-        let outcomes: Vec<_> =
-            futures::stream::iter(sealed.iter().map(|(grant, sealed, family)| {
-                self.revoke_sealed_now(grant, sealed, family, browser, metrics, UPSTREAM_TIMEOUT)
-            }))
-            .buffer_unordered(UPSTREAM_CONCURRENCY)
-            .collect()
-            .await;
-        for outcome in outcomes {
-            match outcome {
-                UpstreamTokenEvent::RevocationSent => revoked.upstream_sent += 1,
-                UpstreamTokenEvent::RevocationUnsupported => revoked.upstream_unsupported += 1,
-                UpstreamTokenEvent::RevocationSkipped => revoked.upstream_skipped += 1,
-                _ => revoked.upstream_failed += 1,
+        let mut answered = vec![false; sealed.len()];
+        let mut pending = futures::stream::iter(sealed.iter().enumerate().map(
+            |(index, (grant, sealed, family))| async move {
+                let timeout = UPSTREAM_TIMEOUT;
+                let outcome = self
+                    .revoke_sealed_now(grant, sealed, family, browser, metrics, timeout)
+                    .await;
+                (index, outcome)
+            },
+        ))
+        .buffer_unordered(UPSTREAM_CONCURRENCY);
+        let mut failed_in_a_row = 0;
+        while let Some((index, outcome)) = pending.next().await {
+            answered[index] = true;
+            let left = match outcome {
+                UpstreamTokenEvent::RevocationSent => {
+                    revoked.upstream_sent += 1;
+                    None
+                }
+                UpstreamTokenEvent::RevocationUnsupported => {
+                    revoked.upstream_unsupported += 1;
+                    None
+                }
+                UpstreamTokenEvent::RevocationSkipped => {
+                    revoked.upstream_skipped += 1;
+                    Some(LeftReason::Skipped)
+                }
+                _ => {
+                    revoked.upstream_failed += 1;
+                    Some(LeftReason::Failed)
+                }
+            };
+            failed_in_a_row = match left {
+                Some(LeftReason::Failed) => failed_in_a_row + 1,
+                _ => 0,
+            };
+            if let Some(reason) = left {
+                revoked.upstream_left.push(left_at(&sealed[index], reason));
+            }
+            if failed_in_a_row == MAX_CONSECUTIVE_UPSTREAM_FAILURES {
+                break;
             }
         }
+        // Dropping the stream abandons the revocations still waiting for an answer.
+        drop(pending);
+        for (login, _) in sealed
+            .iter()
+            .zip(&answered)
+            .filter(|(_, answered)| !**answered)
+        {
+            revoked.upstream_failed += 1;
+            let left = left_at(login, LeftReason::NotAttempted);
+            revoked.upstream_left.push(left);
+        }
         Ok(revoked)
+    }
+}
+
+fn left_at(
+    (grant, _, family): &(RefreshGrant, String, String),
+    reason: LeftReason,
+) -> UpstreamLeft {
+    UpstreamLeft {
+        family: family.clone(),
+        username: grant.username.clone(),
+        reason,
     }
 }
 
