@@ -189,6 +189,22 @@ body.login-page {
   margin-top: 1.5rem;
 }
 
+.login-page .account-logins {
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.login-page .account-logins > li {
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.login-page .account-logins h4 {
+  margin: 0;
+  font-size: 1rem;
+}
+
 .login-page .key-form label {
   font-weight: 600;
 }

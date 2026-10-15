@@ -79,7 +79,7 @@ pub fn routes(state: &AppState) -> Router<AppState> {
             "/login/method/{id}/callback",
             get(super::oidc_login::callback),
         )
-        .merge(super::account::routes())
+        .merge(super::account::routes(state))
         .layer(DefaultBodyLimit::max(8 * 1024))
 }
 
