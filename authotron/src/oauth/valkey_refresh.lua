@@ -149,6 +149,12 @@ if op == 'lookup' then
     end
     return append({'reused'}, revoke(id))
 end
+-- Repetition: ARGV[6] is the retry window in ms and ARGV[7] the cap.
+if op == 'repeat' then
+    local window, cap = tonumber(ARGV[6]), tonumber(ARGV[7])
+    if not count(window) or not count(cap) then return {'unavailable'} end
+    return repeated(window, cap)
+end
 -- Rotation: ARGV[9] is the grant the next token carries, replacing the family's, ARGV[11]
 -- the next token sealed by the presented one, ARGV[12] the retry window and ARGV[13] the
 -- cap that apply if the presented token turns out to be the previous one.

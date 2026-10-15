@@ -244,8 +244,8 @@ impl ValkeyRefreshStore {
         })
     }
     /// Rotates the family of `presented` if that token is still its current one. If it
-    /// is the previous one, a concurrent refresh or an earlier run of this one applied
-    /// the rotation, which is answered again within the window and cap.
+    /// is the previous one, the latest rotation is answered again as by
+    /// [`Self::repeat`]: a concurrent refresh, or an earlier run of this one, applied it.
     pub async fn rotate(
         &self,
         presented: &[u8; 32],
@@ -285,6 +285,29 @@ impl ValkeyRefreshStore {
             [status] if status == b"rotated" => Ok(Rotated::Rotated),
             reply => Ok(repetition(reply)?.map_or(Rotated::Stale, Rotated::Repeated)),
         }
+    }
+    /// Answers the latest rotation of the family of `presented` again, if that is its
+    /// previous token, within `window_ms` of the rotation and at most
+    /// [`MAX_RETRIES_PER_ROTATION`] times; otherwise `None`.
+    pub async fn repeat(
+        &self,
+        presented: &[u8; 32],
+        window_ms: u64,
+        now_ms: u64,
+    ) -> Result<Option<Box<Repetition>>, RefreshStoreError> {
+        let reply = self
+            .run(
+                &[self.token_key(presented)],
+                "repeat",
+                now_ms,
+                &[
+                    URL_SAFE_NO_PAD.encode(presented).as_bytes(),
+                    window_ms.to_string().as_bytes(),
+                    MAX_RETRIES_PER_ROTATION.to_string().as_bytes(),
+                ],
+            )
+            .await?;
+        repetition(&reply)
     }
     /// Replaces the sealed upstream grant of a live family while `generation` is its
     /// upstream generation, whichever token is current: a client's rotation must not
@@ -686,6 +709,53 @@ mod tests {
                 .unwrap();
             assert!(!found, "revocation removes token {step}");
         }
+    }
+
+    /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
+    #[tokio::test]
+    #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+    async fn disposable_valkey_previous_tokens_repeat_within_window_and_cap() {
+        let (_fixture, backend, a) = disposable(50).await;
+        let b = ValkeyRefreshStore::new(&backend, 50).await.unwrap();
+        let now = server_now(&a).await;
+        a.issue(&grant(), [1; 32], now, &policy(), None)
+            .await
+            .unwrap();
+        let ceiling = now + 3_600_000;
+        let rotate = |from: u8, at| {
+            let a = &a;
+            async move {
+                let grant = grant();
+                let rotation = rotation([from + 1; 32], &grant, ceiling);
+                a.rotate(&[from; 32], &rotation, at).await.unwrap()
+            }
+        };
+        let repeat = |from: u8, window, at| {
+            let b = &b;
+            async move { b.repeat(&[from; 32], window, at).await.unwrap() }
+        };
+        assert_eq!(rotate(1, now).await, Rotated::Rotated);
+        assert_eq!(repeat(1, 10, now + 10).await, None, "outside its window");
+        for retries in 1..=MAX_RETRIES_PER_ROTATION {
+            assert_eq!(repeat(1, 10, now + 9).await, repetition(2, retries, 1));
+        }
+        assert_eq!(repeat(1, 10, now + 9).await, None, "past the cap");
+        assert_eq!(repeat(2, 10, now + 9).await, None, "the current token");
+        assert_eq!(rotate(2, now + 1).await, Rotated::Rotated);
+        assert_eq!(repeat(2, 10, now + 2).await, repetition(3, 1, 2));
+        assert_eq!(rotate(3, now + 3).await, Rotated::Rotated);
+        assert_eq!(rotate(4, now + 4).await, Rotated::Rotated);
+        assert_eq!(repeat(4, 10, now + 5).await, repetition(5, 1, 1));
+        assert_eq!(repeat(2, 10, now + 5).await, None, "an older token");
+        let grant = grant();
+        let closed = Rotation {
+            retry_window_ms: 0,
+            ..rotation([9; 32], &grant, ceiling)
+        };
+        assert_eq!(
+            b.rotate(&[4; 32], &closed, now + 5).await.unwrap(),
+            Rotated::Stale
+        );
     }
 
     /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.

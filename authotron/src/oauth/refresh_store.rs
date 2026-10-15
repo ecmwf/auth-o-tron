@@ -227,8 +227,8 @@ impl MemoryRefreshStore {
         Ok(Presented::Reused(Box::new(family.ended(id))))
     }
     /// Rotates the family of `presented` if that token is still its current one. If it
-    /// is the previous one, a concurrent refresh or an earlier run of this one applied
-    /// the rotation, which is answered again within the window and cap.
+    /// is the previous one, the latest rotation is answered again as by
+    /// [`Self::repeat`]: a concurrent refresh, or an earlier run of this one, applied it.
     pub async fn rotate(
         &self,
         presented: &[u8; 32],
@@ -297,6 +297,20 @@ impl MemoryRefreshStore {
             .insert(*presented, (family_id.clone(), idle_ms));
         inner.tokens.insert(next, (family_id, idle_ms));
         Ok(Rotated::Rotated)
+    }
+    /// Answers the latest rotation of the family of `presented` again, if that is its
+    /// previous token, within `window_ms` of the rotation and at most
+    /// [`MAX_RETRIES_PER_ROTATION`] times; otherwise `None`.
+    pub async fn repeat(
+        &self,
+        presented: &[u8; 32],
+        window_ms: u64,
+        now_ms: u64,
+    ) -> Result<Option<Box<Repetition>>, RefreshStoreError> {
+        let mut inner = self.lock()?;
+        Ok(inner
+            .family_of(presented, now_ms)
+            .and_then(|family| family.repeat(presented, window_ms, now_ms)))
     }
     /// Replaces the sealed upstream grant of a live family while `generation` is its
     /// upstream generation, whichever token is current: a client's rotation must not
@@ -498,6 +512,53 @@ mod tests {
             store.lookup(&[9; 32], NOW).await.unwrap(),
             Presented::Missing
         ));
+    }
+
+    #[tokio::test]
+    async fn previous_tokens_repeat_the_latest_rotation_within_window_and_cap() {
+        let store = MemoryRefreshStore::new(50);
+        store
+            .issue(&grant(), [1; 32], NOW, &policy(), None)
+            .await
+            .unwrap();
+        let ceiling = NOW + 3_600_000;
+        let rotate = |from: u8, at| {
+            let store = &store;
+            async move {
+                let grant = grant();
+                let rotation = rotation([from + 1; 32], &grant, ceiling);
+                store.rotate(&[from; 32], &rotation, at).await.unwrap()
+            }
+        };
+        let repeat = |from: u8, window, at| {
+            let store = &store;
+            async move { store.repeat(&[from; 32], window, at).await.unwrap() }
+        };
+        assert_eq!(rotate(1, NOW).await, Rotated::Rotated);
+        assert_eq!(repeat(1, 10, NOW + 10).await, None, "outside its window");
+        for retries in 1..=MAX_RETRIES_PER_ROTATION {
+            assert_eq!(repeat(1, 10, NOW + 9).await, repetition(2, retries, 1));
+        }
+        assert_eq!(repeat(1, 10, NOW + 9).await, None, "past the cap");
+        assert_eq!(repeat(2, 10, NOW + 9).await, None, "the current token");
+        // Rotations answered again in a row lengthen the streak; one that is not
+        // breaks it.
+        assert_eq!(rotate(2, NOW + 1).await, Rotated::Rotated);
+        assert_eq!(repeat(2, 10, NOW + 2).await, repetition(3, 1, 2));
+        assert_eq!(rotate(3, NOW + 3).await, Rotated::Rotated);
+        assert_eq!(rotate(4, NOW + 4).await, Rotated::Rotated);
+        assert_eq!(repeat(4, 10, NOW + 5).await, repetition(5, 1, 1));
+        assert_eq!(repeat(2, 10, NOW + 5).await, None, "an older token");
+        // A rotation of the previous token honours the window it is given.
+        let grant = grant();
+        let closed = Rotation {
+            retry_window_ms: 0,
+            ..rotation([9; 32], &grant, ceiling)
+        };
+        assert_eq!(
+            store.rotate(&[4; 32], &closed, NOW + 5).await.unwrap(),
+            Rotated::Stale
+        );
     }
 
     #[tokio::test]
