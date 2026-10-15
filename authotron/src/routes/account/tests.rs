@@ -9,18 +9,23 @@
 //! The account page and its forms, through the application router.
 
 use crate::{
-    oauth::{audit::family_ref, refresh::FamilySummary},
+    oauth::{audit::family_ref, refresh::FamilySummary, upstream::tests::Valkey},
     oidc::mock::SUBJECT,
     routes::oidc_login::{
+        authorization_tests::authorization_fixture_with,
         offline_tests::{approve_and_exchange, offline_fixture, refresh, revoked, sign_in},
         tests::{Fixture, Jar, ORIGIN, fixture, get, local, location, start, text},
     },
+    utils::valkey::ValkeyConnection,
 };
 use axum::{
     body::Body,
     http::{Request, StatusCode, header},
     response::Response,
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
+use serde_json::json;
+use std::io::Write;
 use tower::ServiceExt;
 
 const SESSION: &str = "__Host-authotron_session";
@@ -568,6 +573,78 @@ async fn a_store_failure_hides_only_the_logins() {
     let section = super::logins_section(&fixture.state, runtime, None, Some("csrf")).into_string();
     assert!(section.contains("Your logins cannot be shown right now"));
     assert!(!section.contains("<form"));
+}
+
+/// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
+#[tokio::test]
+#[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+async fn disposable_valkey_an_unreadable_login_hides_the_logins_but_not_sign_out() {
+    let valkey = Valkey::start("authotron:account-test").await;
+    let mut retry_key = tempfile::NamedTempFile::new().unwrap();
+    writeln!(retry_key, "{}", STANDARD.encode([4u8; 32])).unwrap();
+    let (fixture, _signing) = authorization_fixture_with(|config| {
+        config["ui"]["browser_session"]["backend"] = valkey.backend.clone();
+        let oauth = &mut config["oauth"];
+        oauth["refresh_token_retry_key_file"] = json!(retry_key.path());
+        oauth["clients"][0]["refresh_tokens"] = json!({"enabled": true});
+    })
+    .await;
+    logins(&fixture, 1).await;
+    let mut jar = oidc_session(&fixture).await;
+    let family = listed(&fixture, SUBJECT).await.remove(0).family_id;
+    // The family's grant no longer decodes.
+    let settings = serde_json::from_value(valkey.backend.clone()).unwrap();
+    let connection = ValkeyConnection::connect(&settings).await.unwrap();
+    let pattern = format!("authotron:account-test:*:family:{family}");
+    let keys: Vec<String> = connection
+        .query(redis::cmd("KEYS").arg(pattern))
+        .await
+        .unwrap();
+    let [key] = &keys[..] else {
+        panic!("one family hash expected");
+    };
+    let () = connection
+        .query(redis::cmd("HSET").arg(key).arg("grant").arg("{"))
+        .await
+        .unwrap();
+    let runtime = fixture.state.oauth.as_ref().unwrap();
+    assert!(runtime.logins("idp", SUBJECT).await.is_err());
+
+    let response = get(&fixture.app, "/login/account", &jar).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    jar.update(&response);
+    let html = text(response).await;
+    assert!(html.contains(&format!("<dt>Username</dt><dd>{SUBJECT}</dd>")));
+    assert!(html.contains("Your logins cannot be shown right now"));
+    assert!(html.contains("action=\"/login/logout\""));
+    // Revoking it answers 503 and changes nothing.
+    let (csrf, reference) = (hidden(&html, "csrf"), family_ref(&family));
+    let fields = [("csrf", csrf.as_str()), ("login", reference.as_str())];
+    let response = post(&fixture, REVOKE, &jar, Some(ORIGIN), &fields).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        text(response)
+            .await
+            .contains("This could not be completed right now")
+    );
+    let kept: bool = connection
+        .query(redis::cmd("EXISTS").arg(key))
+        .await
+        .unwrap();
+    assert!(kept);
+    counted(&fixture, "revoke", &[("backend_unavailable", 1)]);
+    // Signing out works all the same.
+    let html = text(get(&fixture.app, "/login/account", &jar).await).await;
+    let csrf = hidden(&html, "csrf");
+    let response = post(
+        &fixture,
+        "/login/logout",
+        &jar,
+        Some(ORIGIN),
+        &[("csrf", &csrf)],
+    )
+    .await;
+    assert_eq!(location(&response), "/login?signed-out");
 }
 
 #[tokio::test]

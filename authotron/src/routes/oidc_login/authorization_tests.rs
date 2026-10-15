@@ -30,7 +30,7 @@ const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 /// The OIDC method as the only sign-in method of an OAuth server whose `read` scope
 /// needs the `reader` role, granted only through the method's `role_map` from the
 /// provider role `mcp-demo`. `edit` adjusts the JSON config afterwards.
-pub(super) async fn authorization_fixture_with(
+pub(in crate::routes) async fn authorization_fixture_with(
     edit: impl FnOnce(&mut Value),
 ) -> (Fixture, tempfile::NamedTempFile) {
     let mut key = tempfile::NamedTempFile::new().unwrap();

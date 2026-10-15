@@ -45,7 +45,7 @@ pub(in crate::oauth) struct Coupled {
 }
 
 /// A disposable Valkey container for the browser-session backend, removed when dropped.
-pub(in crate::oauth) struct Valkey {
+pub(crate) struct Valkey {
     container: String,
     /// The `backend` setting of `ui.browser_session` that reaches it.
     pub backend: Value,
@@ -53,7 +53,7 @@ pub(in crate::oauth) struct Valkey {
 
 impl Valkey {
     /// Starts the container and waits until it answers, with keys under `key_prefix`.
-    pub(in crate::oauth) async fn start(key_prefix: &str) -> Self {
+    pub(crate) async fn start(key_prefix: &str) -> Self {
         let docker = |args: &[&str]| {
             let output = std::process::Command::new("docker")
                 .args(args)

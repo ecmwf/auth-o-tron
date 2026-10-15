@@ -321,4 +321,4 @@ impl OAuthRuntime {
 }
 
 #[cfg(all(test, unix))]
-pub(super) mod tests;
+pub(crate) mod tests;
