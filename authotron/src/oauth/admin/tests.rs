@@ -341,6 +341,7 @@ async fn disposable_valkey_a_failing_provider_ends_the_upstream_phase_and_each_g
 
 /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
 #[tokio::test]
+#[tracing_test::traced_test]
 #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
 async fn disposable_valkey_one_failing_provider_is_given_up_alone() {
     let valkey = Valkey::start("authotron:admin-providers-test").await;
@@ -397,6 +398,25 @@ async fn disposable_valkey_one_failing_provider_is_given_up_alone() {
         .filter(|left| left.reason == LeftReason::NotAttempted)
         .collect();
     assert!(not_attempted.len() >= failing - MAX_CONSECUTIVE_UPSTREAM_FAILURES - 7);
+    // Each is logged as a failed revocation, with its family reference.
+    let count = not_attempted.len();
+    logs_assert(|lines: &[&str]| {
+        let logged: Vec<_> = lines
+            .iter()
+            .filter(|line| line.contains("reason=\"not_attempted\""))
+            .collect();
+        let named = not_attempted.iter().all(|left| {
+            let family = format!("family={}", left.family);
+            logged.iter().any(|line| line.contains(&family))
+        });
+        match (logged.len() == count, named) {
+            (true, true) => Ok(()),
+            _ => Err(format!(
+                "{} not_attempted lines for {count} grants",
+                logged.len()
+            )),
+        }
+    });
     assert_eq!(revoked.upstream_left.len(), failing);
     // Only the failing provider's grants are left.
     let left = &revoked.upstream_left;

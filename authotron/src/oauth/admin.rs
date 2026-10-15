@@ -15,6 +15,7 @@ use super::{
     refresh::{FamilySummary, RefreshGrant, user_key},
     refresh_grant::RefreshBackend,
     runtime::OAuthRuntime,
+    upstream::revocation_not_attempted,
     valkey_refresh::ValkeyRefreshStore,
 };
 use crate::{
@@ -207,6 +208,7 @@ impl OAuthRuntime {
             let method = login.0.method.as_str();
             let left = match outcome {
                 None => {
+                    revocation_not_attempted(&login.0, &login.2, metrics);
                     revoked.upstream_failed += 1;
                     Some(LeftReason::NotAttempted)
                 }

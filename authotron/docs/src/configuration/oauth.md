@@ -662,7 +662,8 @@ waiting at most ten seconds for each answer, and prints how many logins ended an
 the upstream revocations went: revoked, not supported by the provider, failed or timed
 out, or skipped because no configured key and method open the grant any more. Each
 provider (sign-in method) is given up on alone: after 16 failures in a row there, its
-grants not yet started are not attempted and count as failed, while revocations
+grants not yet started are not attempted, count as failed and are logged as
+`oauth.upstream.revocation_failed` with `reason="not_attempted"`, while revocations
 already waiting for an answer complete and other providers' grants go on. A skipped
 grant says nothing about its provider and does not count. A login that ended
 meanwhile is not counted. Each upstream grant that failed, was not attempted or was

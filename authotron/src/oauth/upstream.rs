@@ -78,6 +78,23 @@ impl RevocationAudit {
         );
         metrics.record_upstream_token(UpstreamTokenEvent::RevocationSkipped);
     }
+    fn not_attempted(&self, metrics: &Metrics) {
+        family_event!(
+            warn,
+            self,
+            self.family,
+            event_name = "oauth.upstream.revocation_failed",
+            reason = "not_attempted",
+            "upstream refresh token not revoked: its provider failed too often in a row"
+        );
+        metrics.record_upstream_token(UpstreamTokenEvent::RevocationFailed);
+    }
+}
+
+/// Logs and counts the upstream grant of `grant`, in family `family`, as not revoked
+/// without asking its provider, which an admin revocation gave up on.
+pub(super) fn revocation_not_attempted(grant: &RefreshGrant, family: &str, metrics: &Metrics) {
+    RevocationAudit::of(grant, family).not_attempted(metrics);
 }
 
 /// One revocation for the worker. Deliberately not Debug.
