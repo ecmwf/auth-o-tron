@@ -15,6 +15,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// The largest permitted `max_refresh_token_families_per_user` as a literal, which error
+/// messages spell out with `concat!`.
+macro_rules! max_refresh_token_families_per_user {
+    () => {
+        1000
+    };
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct OAuthConfig {
@@ -124,7 +132,10 @@ impl OAuthConfig {
         if !(1..=MAX_REFRESH_TOKEN_FAMILIES_PER_USER)
             .contains(&self.max_refresh_token_families_per_user)
         {
-            return Err("oauth.max_refresh_token_families_per_user must be between 1 and 1000");
+            return Err(concat!(
+                "oauth.max_refresh_token_families_per_user must be between 1 and ",
+                max_refresh_token_families_per_user!()
+            ));
         }
         self.endpoint_rate_limit.validate()?;
         if self.clients.len() > 64 {
@@ -229,7 +240,7 @@ pub struct OAuthClient {
 
 /// The largest permitted `max_refresh_token_families_per_user`, so no user's family
 /// index holds more live families.
-pub const MAX_REFRESH_TOKEN_FAMILIES_PER_USER: usize = 1000;
+pub const MAX_REFRESH_TOKEN_FAMILIES_PER_USER: usize = max_refresh_token_families_per_user!();
 /// Longest permitted refresh-token family lifetime (400 days).
 pub const MAX_REFRESH_TOKEN_ABSOLUTE_TTL_SECONDS: u64 = 400 * 86_400;
 /// Longest permitted retry window of a rotated refresh token.
@@ -578,6 +589,15 @@ mod tests {
                 }
             }
         }
+        // The family cap's message names the constant's value.
+        let cap = MAX_REFRESH_TOKEN_FAMILIES_PER_USER;
+        let above = json!({"max_refresh_token_families_per_user": cap + 1});
+        let error = serde_json::from_value::<OAuthConfig>(above)
+            .unwrap()
+            .validate();
+        let expected =
+            format!("oauth.max_refresh_token_families_per_user must be between 1 and {cap}");
+        assert_eq!(error, Err(expected.as_str()));
     }
 
     #[test]
