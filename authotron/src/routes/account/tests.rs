@@ -173,7 +173,18 @@ async fn without_an_account_form_the_identity_is_still_shown() {
     assert!(response.headers().get(header::SET_COOKIE).is_none());
     let html = text(response).await;
     assert!(html.contains("<dt>Username</dt><dd>alice</dd>"));
+    assert!(html.contains("Signing out is unavailable right now"));
+    assert!(!html.contains("<form"));
+    // With refresh tokens, revoking logins is unavailable as well.
+    let (fixture, _signing) = authorization_fixture_with(|config| {
+        config["ui"]["browser_session"]["max_forms_per_window"] = 1.into();
+        config["oauth"]["clients"][0]["refresh_tokens"] = json!({"enabled": true});
+    })
+    .await;
+    let jar = oidc_session(&fixture).await;
+    let html = text(get(&fixture.app, "/login/account", &jar).await).await;
     assert!(html.contains("Signing out and revoking logins are unavailable right now"));
+    assert!(html.contains("Your logins"));
     assert!(!html.contains("<form"));
 }
 

@@ -120,8 +120,10 @@ async fn page(State(state): State<AppState>, uri: Uri, headers: HeaderMap) -> Re
             p class="login-card-detail" { "This session displays your Auth-O-Tron identity. Application sign-in handoff is separate." }
             @if let Some(csrf) = &csrf {
                 (sign_out_form(csrf))
-            } @else {
+            } @else if logins.is_some() {
                 p class="login-card-message" role="status" { "Signing out and revoking logins are unavailable right now; reload this page to try again." }
+            } @else {
+                p class="login-card-message" role="status" { "Signing out is unavailable right now; reload this page to try again." }
             }
             @if let Some((runtime, logins)) = &logins {
                 (logins_section(&state, runtime, logins.as_deref(), csrf.as_deref()))
