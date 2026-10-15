@@ -191,4 +191,89 @@ mod tests {
             }
         });
     }
+
+    /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+    async fn disposable_valkey_an_unreadable_login_does_not_hide_those_revoked_with_it() {
+        use crate::{
+            oauth::upstream::tests::{Valkey, coupled},
+            oidc::mock::SUBJECT,
+            utils::valkey::ValkeyConnection,
+        };
+        let valkey = Valkey::start("authotron:logins-test").await;
+        let coupled = coupled(|config| {
+            config["ui"]["browser_session"]["backend"] = valkey.backend.clone();
+        })
+        .await;
+        let runtime = &coupled.runtime;
+        let backend = runtime.refresh.as_ref().unwrap();
+        let policy = &coupled.config.oauth.clients[0].refresh_tokens;
+        let grant = coupled.grant();
+        let mut upstream = Vec::new();
+        for _ in 0..3 {
+            let token = coupled.idp.state.offline_token(SUBJECT);
+            let sealed = coupled.seal(&grant, &token);
+            let hash = RefreshToken::generate().unwrap().hash();
+            let now = runtime.now().await.unwrap();
+            refresh_dispatch!(backend, issue(&grant, hash, now, policy, Some(&sealed))).unwrap();
+            upstream.push(token);
+        }
+        // The middle login's stored grant no longer decodes.
+        let (realm, username) = (&grant.realm, &grant.username);
+        let unreadable = runtime.logins(realm, username).await.unwrap()[1]
+            .family_id
+            .clone();
+        let settings = serde_json::from_value(valkey.backend.clone()).unwrap();
+        let connection = ValkeyConnection::connect(&settings).await.unwrap();
+        let pattern = format!("authotron:logins-test:*:family:{unreadable}");
+        let keys: Vec<String> = connection
+            .query(redis::cmd("KEYS").arg(pattern))
+            .await
+            .unwrap();
+        let [key] = &keys[..] else {
+            panic!("one family hash expected");
+        };
+        let _: i64 = connection
+            .query(redis::cmd("HSET").arg(key).arg("grant").arg("{"))
+            .await
+            .unwrap();
+
+        let (browser, metrics) = (&coupled.browser, &coupled.metrics);
+        runtime
+            .revoke_logins(realm, username, Logins::All, browser, metrics)
+            .await
+            .unwrap();
+        // All three ended; the two readable ones are logged and their upstream grants
+        // revoked, and the unreadable one is named in a warning.
+        assert!(runtime.logins(realm, username).await.unwrap().is_empty());
+        let revoked = &coupled.idp.state.revoked;
+        for _ in 0..300 {
+            if revoked.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let mut sent = revoked.lock().unwrap().clone();
+        sent.sort();
+        let mut expected = vec![upstream[0].clone(), upstream[2].clone()];
+        expected.sort();
+        assert_eq!(sent, expected);
+        let reference = format!("family={}", family_ref(&unreadable));
+        logs_assert(|lines: &[&str]| {
+            let revoked = lines
+                .iter()
+                .filter(|line| line.contains("reason=\"user_revoke\""))
+                .count();
+            let warned = lines.iter().any(|line| {
+                line.contains("oauth.refresh_token.family_unreadable") && line.contains(&reference)
+            });
+            match (revoked, warned) {
+                (2, true) => Ok(()),
+                _ => Err(format!("{revoked} user_revoke lines, warned: {warned}")),
+            }
+        });
+    }
 }

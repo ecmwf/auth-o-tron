@@ -78,7 +78,11 @@ impl FamilyEnd {
 }
 
 /// The log targets of the events that end a family and revoke its upstream grant.
-pub(crate) const TARGETS: [&str; 2] = [module_path!(), super::upstream::LOG_TARGET];
+pub(crate) const TARGETS: [&str; 3] = [
+    module_path!(),
+    super::upstream::LOG_TARGET,
+    super::valkey_refresh::LOG_TARGET,
+];
 
 /// The `family` of lines about an upstream grant that no family holds.
 pub(crate) const NO_FAMILY: &str = "none";

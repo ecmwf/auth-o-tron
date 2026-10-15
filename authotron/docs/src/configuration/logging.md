@@ -127,6 +127,7 @@ upstream grants of such families are not revoked at the provider either.
 |-------|-------|---------|
 | `oauth.refresh_token.retried` | INFO | A family's previous token, presented again within the client's retry window, was answered with the current token (`retries`: answers of this rotation so far) |
 | `oauth.refresh_token.retry_pattern` | WARN | Three or more consecutive rotations of the family were each answered again (`streak`): a token shared by two holders refreshing in step looks like this |
+| `oauth.refresh_token.family_unreadable` | WARN | A family ended in Valkey, but its stored record could not be read: it is not logged as revoked and its upstream grant is not revoked; the families that ended with it are |
 
 Families coupled to an OIDC offline session also log their upstream grant, with the
 same identifiers (`family` is `none` for a sign-in's grant that never reached a

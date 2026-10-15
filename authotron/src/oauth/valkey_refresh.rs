@@ -13,7 +13,10 @@ use super::refresh::{
     Presented, RefreshFamily, RefreshGrant, RefreshStoreError, Repetition, Revocation, Rotated,
     Rotation, UpstreamState, UpstreamStored, deadline, initial_expiry, random_id,
 };
-use super::refresh_durability::{self, Durability};
+use super::{
+    audit::family_ref,
+    refresh_durability::{self, Durability},
+};
 use crate::{
     config::{RefreshTokenPolicy, ui::BrowserBackendConfig},
     utils::valkey::ValkeyConnection,
@@ -21,6 +24,8 @@ use crate::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
 const SCRIPT: &str = include_str!("valkey_refresh.lua");
+/// The log target of this module's events.
+pub(super) const LOG_TARGET: &str = module_path!();
 /// Keys one `SCAN` call of [`ValkeyRefreshStore::scan`] visits: few round trips, and
 /// each call short enough not to hold up other commands.
 const SCAN_COUNT: usize = 500;
@@ -41,22 +46,40 @@ fn text(bytes: &[u8]) -> Result<String, RefreshStoreError> {
     String::from_utf8(bytes.to_vec()).map_err(|_| RefreshStoreError::Unavailable)
 }
 /// The `id, grant, sealed` triples a reply appends for each ended family; `sealed` is
-/// empty for a family without an upstream grant.
+/// empty for a family without an upstream grant. The families have ended when the reply
+/// arrives, so one whose triple does not decode is logged at WARN by reference and left
+/// out, and the others are still returned to be logged and their grants revoked.
+/// Valid: `[]`, `[id, <grant JSON>, ""]`, `[id, <grant JSON>, <sealed grant>]`, repeated.
+/// Left out: a triple whose grant is not a grant's JSON, or whose id or sealed grant is
+/// not UTF-8. Invalid: a number of values that is not a multiple of three.
 fn ended(values: &[Vec<u8>]) -> Result<Vec<EndedFamily>, RefreshStoreError> {
     let (triples, rest) = values.as_chunks::<3>();
     if !rest.is_empty() {
         return Err(RefreshStoreError::Unavailable);
     }
-    triples
-        .iter()
-        .map(|[id, grant, sealed]| {
-            Ok(EndedFamily {
-                family_id: text(id)?,
-                grant: RefreshGrant::decode(grant)?,
-                sealed: (!sealed.is_empty()).then(|| text(sealed)).transpose()?,
-            })
+    let decode = |[id, grant, sealed]: &[Vec<u8>; 3]| {
+        Ok::<_, RefreshStoreError>(EndedFamily {
+            family_id: text(id)?,
+            grant: RefreshGrant::decode(grant)?,
+            sealed: (!sealed.is_empty()).then(|| text(sealed)).transpose()?,
         })
-        .collect()
+    };
+    Ok(triples
+        .iter()
+        .filter_map(|triple| {
+            let decoded = decode(triple);
+            if decoded.is_err() {
+                tracing::warn!(
+                    event_name = "oauth.refresh_token.family_unreadable",
+                    event_domain = "oauth",
+                    family = %family_ref(&String::from_utf8_lossy(&triple[0])),
+                    "family ended, but its stored record is unreadable: not logged as \
+                     revoked, and any upstream grant is not revoked"
+                );
+            }
+            decoded.ok()
+        })
+        .collect())
 }
 /// A family view: `id, grant, created, absolute, sealed, generation`, where `sealed` is
 /// empty for a family without an upstream grant. Any other number of values is invalid.
