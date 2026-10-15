@@ -617,10 +617,12 @@ as `oauth.refresh_token.family_revoked` with its
 - **The client**, with `POST /oauth/revoke` and any token of the family, as above
   (`client_revoke`).
 - **An operator**, with `authotron admin logins`, a command of the server binary
-  (`admin_revoke`). It reads the same configuration file (`AOT_CONFIG_PATH`) and
-  reaches the same Valkey, so it opens no listener and adds no endpoint. Run it where
-  the server runs; the image keeps the binary at `/app/authotron`, and `kubectl exec`
-  gets the container's environment, `AOT_CONFIG_PATH` included:
+  (`admin_revoke`). It loads its configuration as the server does (`AOT_CONFIG_PATH`
+  if set, else `./config.yaml`, then `AOT_` variables) and reaches the same Valkey,
+  so it opens no listener and adds no endpoint. Run it where the server runs: the
+  image keeps the binary at `/app/authotron`, and `kubectl exec` starts it in the
+  container's working directory with its environment, so it finds the server's file
+  (in the Helm chart's pods, `/app/config.yaml`) and its overrides:
 
 ```sh
 kubectl exec deploy/authotron -- /app/authotron admin logins list --realm ecmwf --username alice
@@ -635,12 +637,13 @@ must say so with `--all-users`. `list` prints client, method, realm, username, w
 login started, was last used (its latest refresh) and expires if unused and at the
 latest, and the family reference of the audit log, newest first and at most `--limit`
 rows (default 100, at most 10000); it never prints a token or a family id.
-`revoke --dry-run` prints the logins `revoke` would end. `revoke` prints them too,
-ends them, then revokes the upstream grants of coupled families at the provider
-itself, eight at a time and waiting at most ten seconds for each answer, and prints
-how many logins ended and how the upstream revocations went: revoked, not supported
-by the provider, failed or timed out, or skipped because no configured key and method
-open the grant any more. After 16 failures in a row it takes the provider to be down
+`revoke --dry-run` prints the logins `revoke` would end and changes none of them;
+with `--username`, it removes expired entries from that user's family index, as every
+listing of a user's logins does. `revoke` prints them too, ends them, then revokes the
+upstream grants of coupled families at the provider itself, eight at a time and
+waiting at most ten seconds for each answer, and prints how many logins ended and how
+the upstream revocations went: revoked, not supported by the provider, failed or timed
+out, or skipped because no configured key and method open the grant any more. After 16 failures in a row it takes the provider to be down
 and attempts no more; those not attempted count as failed. A login that ended
 meanwhile is not counted. Each upstream grant that failed, was not attempted or was
 skipped, and may still be live at the provider, gets a line with its family
@@ -662,7 +665,9 @@ kubectl exec deploy/authotron -- /app/authotron admin logins revoke --realm ecmw
 ```
 
 Who ran the command is recorded by the Kubernetes API server's audit log, if enabled,
-as an `exec` into the pod; Auth-O-Tron does not know the operator.
+as an `exec` into the pod; Auth-O-Tron does not know the operator. The command's
+counts are its own: the server's `authotron_oauth_refresh_tokens_total` and
+`authotron_oauth_upstream_tokens_total` do not include its revocations.
 
 The exit status is 0 when done, 1 when it failed, 2 for invalid arguments and 3 when
 `revoke` revoked the logins but left upstream grants; after a failure during `revoke`,
