@@ -374,6 +374,7 @@ oauth:
         idle_ttl_seconds: 2592000      # 30 days without use; default 30 days
         absolute_ttl_seconds: 7776000  # 90 days after login; default 90 days
         upstream_offline_access: false # couple OIDC sign-ins to the provider; default false
+        retry_window_seconds: 30       # 0..30; answer retried refreshes; default 30
 ```
 
 With `upstream_offline_access`, families started by an OIDC sign-in follow the
@@ -392,9 +393,10 @@ longer be retried. The client does not need to request `offline_access`,
 because common MCP clients never send it.
 
 **Format and storage.** A refresh token is 256 random bits encoded as 43 base64url
-characters. The server stores only its SHA-256 hash. Each login starts a *family*
-holding the client, resource, granted scopes, realm, username and the roles the
-provider returned before augmentation. Families live in the browser-session backend:
+characters. The server stores its SHA-256 hash, and the latest rotation keeps the
+current token sealed by the previous one (see *Retries* below). Each login starts a
+*family* holding the client, resource, granted scopes, realm, username and the roles
+the provider returned before augmentation. Families live in the browser-session backend:
 Memory (development, per process, lost on restart) or Valkey under
 `<key_prefix>:oauth:refresh-tokens:v3:`. Each Valkey operation is one Lua script, and
 keys expire at the family's idle deadline. The `v3` record adds the sealed successor and
@@ -461,11 +463,41 @@ which replaces the presented one. Responses are `Cache-Control: no-store`. Error
 | Unknown `client_id` | 400 `invalid_client` |
 | Augmentation failure/timeout or backend unavailable | 503 `server_error`; the token stays valid |
 
-**Rotation and reuse detection.** Each refresh token can be used once. If a client
-presents the token it rotated *within the last 30 seconds*, the server returns
-`invalid_grant` and leaves the family alone. This tolerates concurrent or retried
-refreshes. Presenting any other already-rotated token is treated as theft: the whole
-family is revoked, and the current token stops working too.
+**Rotation and reuse detection.** Each refresh replaces the presented token with a new
+random one. Presenting an already-rotated token is treated as theft: the whole family
+is revoked, and the current token stops working too. One exception keeps a lost
+response from costing the user a sign-in.
+
+**Retries.** A client may present a token again because the response never reached it
+(a network failure, a client killed mid-request), or because two processes share one
+credential file and refresh at the same time. If it presents the token the family
+rotated *within the last `retry_window_seconds`* (30 by default), the server answers
+as the first time: the **same** refresh token and a new access token, after the same
+policy checks and strict augmentation. The family is not rotated again. Each rotation
+is answered at most three times this way; further attempts get `invalid_grant` and
+the family is kept. A family coupled to an OIDC offline session does not call the
+provider again; the access token is built from the provider roles that the first
+answer's rotation stored. Two refreshes of one token at the same time both receive the
+token the first one rotated to. With `retry_window_seconds: 0` there are no retries:
+presenting the previous token is reuse at once. Answers count as `retried` and are
+logged as `oauth.refresh_token.retried`.
+
+To answer a retry, each rotation stores the new token encrypted (AES-256-GCM) under a
+key derived (HKDF-SHA256) from the token it replaces, which the store never holds, and
+the latest rotation overwrites the previous one's. A copy of the store therefore
+reveals no token on its own; together with the family's previous token it reveals
+the current one, and older tokens reveal nothing. Any replica can answer a retry; no
+key is shared between them.
+
+The window has a price: within it, whoever holds the previous token obtains the current
+one. Two holders of one token, a legitimate client and a thief or two processes
+sharing a file, stay in step as long as each refreshes within the window of the
+other's last rotation, and neither is detected. Reuse is detected once one of them
+presents its older token after the window has passed, or a token older than the
+previous one: then the family is revoked. When three consecutive rotations of a
+family were each answered again, the server logs a WARN
+`oauth.refresh_token.retry_pattern`, which this situation produces. Clients that
+never share tokens can set `retry_window_seconds: 0`.
 
 The server remembers only recent rotated tokens: the last 32 per family. Each one is
 also forgotten once the idle deadline set at its rotation passes. Older tokens can no
@@ -496,9 +528,9 @@ their `exp`.
 - With the Memory backend, families are per process. A refresh token works only on the
   replica that issued it and is lost on restart. Multi-replica deployments need Valkey.
 - Metrics: `authotron_oauth_refresh_tokens_total{event}` with `issued`, `rotated`,
-  `reuse_detected`, `family_revoked` (every revoked family, including per-user cap
-  evictions) and `issue_failed`, and `authotron_oauth_upstream_tokens_total{event}`
-  for coupled families.
+  `retried`, `reuse_detected`, `family_revoked` (every revoked family, including
+  per-user cap evictions) and `issue_failed`, and
+  `authotron_oauth_upstream_tokens_total{event}` for coupled families.
 - Every revoked family is logged as `oauth.refresh_token.family_revoked` with its
   reason ([audit events](logging.md#oauth-audit-events)).
 
@@ -542,8 +574,9 @@ finds its connection closed, reconnects and is sent once more, within
 `operation_timeout_ms`. Requests that arrive while Valkey is still down return 503 and
 leave the presented refresh token valid. The client cannot tell an unsent command from
 one whose reply was lost, so a rotation can run twice; the second run finds the token
-already rotated and the client gets `invalid_grant`, as for any rotated token. A
-rotation is never applied twice. Timeouts are never resent.
+already rotated and answers it again with the token the first run stored, like a
+retry, unless the client's `retry_window_seconds` is 0. A rotation is never applied
+twice. Timeouts are never resent.
 
 A Valkey node can also fail without closing its connections: a crashed host, a
 network partition or dropped packets leave commands unanswered. A command without a
@@ -553,10 +586,12 @@ have run. Its connection then gets a PING, with the shorter of one second and
 kept; one that stays silent is replaced, so the replica's next commands open a new
 connection instead of waiting on it. Only the requests in flight on that connection
 fail, including any sent while the PING is pending. A command runs to the end even
-if its request is abandoned. The presented refresh token of a timed-out refresh
-either still works or was rotated, as after a lost reply. Failed connection attempts
-are logged as `valkey.connection.attempt_failed` (WARN, error kind only), at most
-once a minute.
+if its request is abandoned. A timed-out refresh either left the presented token
+current or rotated it, so the client's retry within its `retry_window_seconds`
+succeeds either way while fewer than three retries answered that rotation; with a
+window of 0, a rotated token is reuse and the user signs in again. Failed connection
+attempts are logged as `valkey.connection.attempt_failed` (WARN, error kind only), at
+most once a minute.
 
 A single Valkey is still a single point of failure. For production, choose a managed
 or replicated Valkey, or a future database backend, as an operations decision.

@@ -107,6 +107,11 @@ revealing the id. Tokens, codes and sealed upstream grants are never logged.
 
 Families that expire, or are lost with backend data, are not logged.
 
+| Event | Level | Meaning |
+|-------|-------|---------|
+| `oauth.refresh_token.retried` | INFO | A family's previous token, presented again within the client's retry window, was answered with the current token (`retries`: answers of this rotation so far) |
+| `oauth.refresh_token.retry_pattern` | WARN | Three or more consecutive rotations of the family were each answered again (`streak`): a token shared by two holders refreshing in step looks like this |
+
 Families coupled to an OIDC offline session also log their upstream grant, with the
 same identifiers (`family` is `none` for a sign-in's grant that never reached a
 family):

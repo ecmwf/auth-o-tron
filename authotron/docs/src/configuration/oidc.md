@@ -267,9 +267,15 @@ families already coupled keep renewing at the provider until they end.
   endpoint and stores a rotated upstream token before anything else can fail. A
   refreshed ID token is validated like the sign-in's, except for the nonce and
   authentication age; its `sub` and username must be unchanged, and its mapped
-  roles replace the family's stored provider roles. Without an ID token, only a
-  method with `username_claim: sub` and no `roles_claim` can refresh. Then
-  augmentation, policy and the family's own rotation follow as usual.
+  roles replace the family's stored provider roles, and the rotation stores them.
+  Without an ID token, only a method with `username_claim: sub` and no `roles_claim`
+  can refresh. Then augmentation, policy and the family's own rotation follow as
+  usual. A [retried](oauth.md#refresh-tokens) refresh does not call the provider
+  again: it starts from the roles the rotation stored. Of two refreshes of one token
+  at the same time, the one that waited for the lock usually finds the token rotated
+  and does the same; if it gets the lock before the other rotates, the provider is
+  refreshed twice in turn, each time with the newest upstream token, which is
+  harmless.
 - **Revocation.** When a coupled family ends through `/oauth/revoke`, reuse
   detection, the per-user cap, a policy check at refresh or a refused upstream
   refresh, its upstream token is revoked at the provider's RFC 7009 endpoint, if
