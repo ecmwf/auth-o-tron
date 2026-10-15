@@ -374,8 +374,11 @@ may run a script twice. Scripts are guarded so that a second run never applies a
 one-use step twice: a repeated form consumption finds the form gone (retry with a
 fresh form), session and lease writes rewrite the same record, and rate quotas may
 count one extra attempt. Timeouts and server error replies are never resent; a
-command timeout can have an ambiguous outcome. Orphaned records and leases remain
-bounded by their expiry.
+command timeout can have an ambiguous outcome. After a timeout the connection must
+answer a PING within the shorter of one second and `operation_timeout_ms`; one that
+stays silent may be dead without having been closed (a crashed node, dropped
+packets) and is replaced, so later commands open a new connection instead of
+waiting on it. Orphaned records and leases remain bounded by their expiry.
 
 Scripts preflight mutation permissions with `redis.acl_check_cmd`, as well as key
 types, before writes. This requires Valkey/Redis support for that API (Valkey 8 is

@@ -544,6 +544,19 @@ one whose reply was lost, so a rotation can run twice; the second run finds the 
 already rotated and the client gets `invalid_grant`, as for any rotated token. A
 rotation is never applied twice. Timeouts are never resent.
 
+A Valkey node can also fail without closing its connections: a crashed host, a
+network partition or dropped packets leave commands unanswered. A command without a
+reply within `operation_timeout_ms` returns 503 and is not resent, because it may
+have run. Its connection then gets a PING, with the shorter of one second and
+`operation_timeout_ms` to answer: a connection that answers was only slow and is
+kept; one that stays silent is replaced, so the replica's next commands open a new
+connection instead of waiting on it. Only the requests in flight on that connection
+fail, including any sent while the PING is pending. A command runs to the end even
+if its request is abandoned. The presented refresh token of a timed-out refresh
+either still works or was rotated, as after a lost reply. Failed connection attempts
+are logged as `valkey.connection.attempt_failed` (WARN, error kind only), at most
+once a minute.
+
 A single Valkey is still a single point of failure. For production, choose a managed
 or replicated Valkey, or a future database backend, as an operations decision.
 

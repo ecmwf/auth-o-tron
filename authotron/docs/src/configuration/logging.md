@@ -81,6 +81,7 @@ Auth-O-Tron uses structured event naming following the pattern `domain.component
 | startup | Server initialization events |
 | browser | Browser sign-in methods |
 | oauth | OAuth endpoints, refresh-token families and upstream grants |
+| valkey | Shared Valkey connections of the browser and OAuth stores |
 
 ## OAuth Audit Events
 
