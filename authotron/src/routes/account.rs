@@ -149,3 +149,6 @@ async fn sign_out(
     set_cookie(&mut response, SESSION_COOKIE, String::new(), 0);
     response
 }
+
+#[cfg(test)]
+mod tests;

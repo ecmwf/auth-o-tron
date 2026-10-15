@@ -24,13 +24,13 @@ use std::{collections::HashMap, io::Write, sync::Arc};
 use tower::ServiceExt;
 use url::Url;
 
-pub(super) const ORIGIN: &str = "https://login.example.test";
+pub(in crate::routes) const ORIGIN: &str = "https://login.example.test";
 
 /// Cookies set by responses, sent back on later requests like a browser.
 #[derive(Clone, Default)]
-pub(super) struct Jar(pub(super) HashMap<String, String>);
+pub(in crate::routes) struct Jar(pub(in crate::routes) HashMap<String, String>);
 impl Jar {
-    pub(super) fn update(&mut self, response: &Response) {
+    pub(in crate::routes) fn update(&mut self, response: &Response) {
         for value in response.headers().get_all(header::SET_COOKIE) {
             let cookie = cookie::Cookie::parse(value.to_str().unwrap()).unwrap();
             assert_eq!(cookie.secure(), Some(true));
@@ -42,7 +42,7 @@ impl Jar {
             }
         }
     }
-    pub(super) fn header(&self) -> String {
+    pub(in crate::routes) fn header(&self) -> String {
         self.0
             .iter()
             .map(|(name, value)| format!("{name}={value}"))
@@ -51,7 +51,7 @@ impl Jar {
     }
 }
 
-pub(super) struct Fixture {
+pub(in crate::routes) struct Fixture {
     pub app: Router,
     pub state: AppState,
     pub idp: MockIdp,
@@ -59,7 +59,7 @@ pub(super) struct Fixture {
 }
 
 /// A password method and the `demo-sso` OIDC method; `edit` adjusts the JSON config.
-pub(super) async fn fixture(edit: impl FnOnce(&mut Value)) -> Fixture {
+pub(in crate::routes) async fn fixture(edit: impl FnOnce(&mut Value)) -> Fixture {
     let idp = MockIdp::start().await;
     let mut secret = tempfile::NamedTempFile::new().unwrap();
     writeln!(secret, "{CLIENT_SECRET}").unwrap();
@@ -88,7 +88,7 @@ pub(super) async fn fixture(edit: impl FnOnce(&mut Value)) -> Fixture {
     }
 }
 
-pub(super) async fn get(app: &Router, target: &str, jar: &Jar) -> Response {
+pub(in crate::routes) async fn get(app: &Router, target: &str, jar: &Jar) -> Response {
     app.clone()
         .oneshot(
             Request::get(target)
@@ -100,7 +100,7 @@ pub(super) async fn get(app: &Router, target: &str, jar: &Jar) -> Response {
         .unwrap()
 }
 
-pub(super) async fn text(response: Response) -> String {
+pub(in crate::routes) async fn text(response: Response) -> String {
     String::from_utf8(
         to_bytes(response.into_body(), 1024 * 1024)
             .await
@@ -110,7 +110,7 @@ pub(super) async fn text(response: Response) -> String {
     .unwrap()
 }
 
-pub(super) fn location(response: &Response) -> String {
+pub(in crate::routes) fn location(response: &Response) -> String {
     response.headers()[header::LOCATION]
         .to_str()
         .unwrap()
@@ -118,7 +118,7 @@ pub(super) fn location(response: &Response) -> String {
 }
 
 /// Path and query of a callback URL on [`ORIGIN`].
-pub(super) fn local(callback: &str) -> String {
+pub(in crate::routes) fn local(callback: &str) -> String {
     callback
         .strip_prefix(ORIGIN)
         .expect("callback on the public origin")
@@ -126,7 +126,7 @@ pub(super) fn local(callback: &str) -> String {
 }
 
 /// Starts sign-in and returns the provider authorization URL.
-pub(super) async fn start(fixture: &Fixture, jar: &mut Jar) -> Url {
+pub(in crate::routes) async fn start(fixture: &Fixture, jar: &mut Jar) -> Url {
     let response = get(&fixture.app, "/login/method/demo-sso", jar).await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     jar.update(&response);

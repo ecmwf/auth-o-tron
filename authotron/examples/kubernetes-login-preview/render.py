@@ -129,6 +129,7 @@ SOURCE_FILES = (
     "authotron/src/providers/openid_offline_provider.rs",
     "authotron/src/providers/plain_provider.rs",
     "authotron/src/routes/account.rs",
+    "authotron/src/routes/account/tests.rs",
     "authotron/src/routes/augmenters.rs",
     "authotron/src/routes/auth.rs",
     "authotron/src/routes/browser_login.rs",

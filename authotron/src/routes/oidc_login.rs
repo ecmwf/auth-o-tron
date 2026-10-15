@@ -492,4 +492,4 @@ mod keycloak_tests;
 #[cfg(test)]
 mod offline_tests;
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
