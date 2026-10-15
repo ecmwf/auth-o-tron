@@ -109,7 +109,11 @@ fn repetition(values: &[Vec<u8>]) -> Result<Option<Box<Repetition>>, RefreshStor
         _ => Err(RefreshStoreError::Unavailable),
     }
 }
-/// The `id, grant, created, last used, idle, absolute` sextuples of family summaries.
+/// The `id, grant, created, last used, idle, absolute` sextuples of family summaries,
+/// the times in decimal milliseconds.
+/// Valid: `[]`, `[id, <grant JSON>, "1760000000000", "1760000060000", "1760000660000",
+/// "1760003600000"]`. Invalid: five or seven values, a time such as `"-1"` or `"1e3"`,
+/// or a grant that does not decode.
 fn summaries(values: &[Vec<u8>]) -> Result<Vec<FamilySummary>, RefreshStoreError> {
     let (rows, rest) = values.as_chunks::<6>();
     if !rest.is_empty() {
@@ -464,7 +468,11 @@ impl ValkeyRefreshStore {
         cursor: u64,
         now_ms: u64,
     ) -> Result<(u64, Vec<FamilySummary>), RefreshStoreError> {
-        // Prefixes are `[A-Za-z0-9:_-]`, so the pattern has no other wildcard.
+        // Prefixes are `[A-Za-z0-9:_-]`, so the pattern has no other wildcard, e.g.
+        // `authotron:oauth:refresh-tokens:v3:family:*` matches
+        // `authotron:oauth:refresh-tokens:v3:family:<id>` but neither
+        // `authotron:oauth:refresh-tokens:v3:user:<user key>` nor
+        // `other:oauth:refresh-tokens:v3:family:<id>`.
         let families = self.family_key("");
         let (next, keys): (u64, Vec<String>) = self
             .connection
