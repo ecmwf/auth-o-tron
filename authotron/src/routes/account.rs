@@ -201,7 +201,8 @@ fn logins_section(
 }
 
 /// A refused account form: nothing was changed. Origin, CSRF and body failures share
-/// this page, so it tells an attacker nothing about which check failed.
+/// this page's text and differ only in their status: 403 for Origin and CSRF, 400 for
+/// a malformed body.
 fn refused(state: &AppState, status: StatusCode) -> Response {
     let card = html! {
         h2 id="login-card-title" { "Request not completed" }
@@ -260,9 +261,6 @@ async fn sign_out(
     set_cookie(&mut response, SESSION_COOKIE, String::new(), 0);
     response
 }
-
-#[cfg(test)]
-mod tests;
 
 // `csrf` is the account page's token; `login` names the logins to revoke: one by its
 // reference, or `all`.
@@ -332,3 +330,6 @@ async fn revoke(
     }
     private_response(Redirect::to(REVOKED_LOCATION).into_response())
 }
+
+#[cfg(test)]
+mod tests;
