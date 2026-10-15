@@ -114,20 +114,32 @@ if op == 'unlock' then
     return {'ok'}
 end
 
--- A user's families: KEYS[1] is the per-user index. 'list' replies with the summaries
--- {id, grant, created, last used, idle, absolute} of at most ARGV[5] live families,
--- newest first; the last use is the latest rotation, or the start. 'revoke_user' ends
--- every live family of the user.
+-- The summary {id, grant, created, last used, idle, absolute} of a live family; the
+-- last use is the latest rotation, or the start.
+local function summary(id)
+    local key = family_key(id)
+    local created, rotated = redis.call('HGET', key, 'created'), tonumber(redis.call('HGET', key, 'rotated')) or 0
+    return {id, redis.call('HGET', key, 'grant'), created, rotated > 0 and decimal(rotated) or created,
+        redis.call('HGET', key, 'idle'), redis.call('HGET', key, 'absolute')}
+end
+
+-- A user's families: KEYS[1] is the per-user index. 'list' replies with the summaries of
+-- at most ARGV[5] live families, newest first; 'revoke_user' ends every live family of
+-- the user.
 if op == 'list' then
     local limit = tonumber(ARGV[5])
     if not integer(limit) then return {'unavailable'} end
     prune_index(token)
     local reply = {'ok'}
-    for _, member in ipairs(redis.call('ZRANGE', token, 0, limit - 1, 'REV')) do
-        local key = family_key(member)
-        local created, rotated = redis.call('HGET', key, 'created'), tonumber(redis.call('HGET', key, 'rotated')) or 0
-        append(reply, {member, redis.call('HGET', key, 'grant'), created, rotated > 0 and decimal(rotated) or created,
-            redis.call('HGET', key, 'idle'), redis.call('HGET', key, 'absolute')})
+    for _, member in ipairs(redis.call('ZRANGE', token, 0, limit - 1, 'REV')) do append(reply, summary(member)) end
+    return reply
+end
+-- Summaries of the live families among the ids ARGV[5..], as a SCAN of family keys
+-- found them; KEYS[1] is any key of the namespace.
+if op == 'summaries' then
+    local reply = {'ok'}
+    for i = 5, #ARGV do
+        if live(family_key(ARGV[i])) then append(reply, summary(ARGV[i])) end
     end
     return reply
 end

@@ -21,6 +21,9 @@ use crate::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
 const SCRIPT: &str = include_str!("valkey_refresh.lua");
+/// Keys one `SCAN` call of [`ValkeyRefreshStore::scan`] visits: few round trips, and
+/// each call short enough not to hold up other commands.
+const SCAN_COUNT: usize = 500;
 
 pub struct ValkeyRefreshStore {
     connection: ValkeyConnection,
@@ -449,6 +452,51 @@ impl ValkeyRefreshStore {
             _ => Err(RefreshStoreError::Unavailable),
         }
     }
+    /// One step of a scan over every family of the namespace: the live families among the
+    /// keys one `SCAN` call visits from `cursor` (start with 0), and the cursor of the next
+    /// step, 0 when the scan is complete. A complete scan visits every key of the
+    /// database once, whichever namespace it belongs to; a family may be seen twice.
+    pub async fn scan(
+        &self,
+        cursor: u64,
+        now_ms: u64,
+    ) -> Result<(u64, Vec<FamilySummary>), RefreshStoreError> {
+        // Prefixes are `[A-Za-z0-9:_-]`, so the pattern has no other wildcard.
+        let families = self.family_key("");
+        let (next, keys): (u64, Vec<String>) = self
+            .connection
+            .query(
+                redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg(format!("{families}*"))
+                    .arg("COUNT")
+                    .arg(SCAN_COUNT),
+            )
+            .await
+            .map_err(|_| RefreshStoreError::Unavailable)?;
+        let ids: Vec<&[u8]> = keys
+            .iter()
+            .filter_map(|key| key.strip_prefix(&families))
+            .map(str::as_bytes)
+            .collect();
+        if ids.is_empty() {
+            return Ok((next, Vec::new()));
+        }
+        // The token key is unused by this operation; any key in the namespace routes it.
+        let reply = self
+            .run(
+                &[format!("{}token:-", self.prefix)],
+                "summaries",
+                now_ms,
+                &ids,
+            )
+            .await?;
+        match reply.split_first() {
+            Some((status, rest)) if status == b"ok" => Ok((next, summaries(rest)?)),
+            _ => Err(RefreshStoreError::Unavailable),
+        }
+    }
     /// RFC 7009: any token of a family revokes it, but only for the owning client.
     pub async fn revoke_token(
         &self,
@@ -477,6 +525,7 @@ impl ValkeyRefreshStore {
 mod tests {
     use super::*;
     use crate::oauth::refresh::tests::{grant, rotation};
+    use sha2::{Digest, Sha256};
     use std::{process::Command, time::Duration};
 
     struct Fixture(String);
@@ -872,6 +921,62 @@ mod tests {
             1
         );
         family(a.lookup(&[3; 32], now + 20).await.unwrap());
+    }
+
+    /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
+    #[tokio::test]
+    #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+    async fn disposable_valkey_a_scan_finds_every_live_family_of_the_namespace() {
+        let (_fixture, backend, store) = disposable(50).await;
+        let now = server_now(&store).await;
+        let mut expected = Vec::new();
+        for index in 0..1200u32 {
+            let mut grant = grant();
+            grant.username = format!("user-{index}");
+            let token: [u8; 32] = Sha256::digest(index.to_be_bytes()).into();
+            store
+                .issue(&grant, token, now, &policy(), None)
+                .await
+                .unwrap();
+            expected.push(grant.username);
+        }
+        // Keys of another namespace and of other kinds are not families.
+        let mut other = backend.clone();
+        let BrowserBackendConfig::Valkey { key_prefix, .. } = &mut other else {
+            unreachable!()
+        };
+        *key_prefix = "authotron:refresh:other".into();
+        let neighbour = ValkeyRefreshStore::new(&other, 50).await.unwrap();
+        neighbour
+            .issue(&grant(), [1; 32], now, &policy(), None)
+            .await
+            .unwrap();
+        // Every family once, in several bounded steps.
+        let scan = |at| {
+            let store = &store;
+            async move {
+                let (mut found, mut cursor, mut steps) = (Vec::new(), 0, 0);
+                loop {
+                    let (next, families) = store.scan(cursor, at).await.unwrap();
+                    found.extend(families);
+                    steps += 1;
+                    if next == 0 {
+                        return (found, steps);
+                    }
+                    cursor = next;
+                }
+            }
+        };
+        let (found, steps) = scan(now + 1).await;
+        assert!(steps > 1);
+        let found: std::collections::BTreeSet<_> = found
+            .into_iter()
+            .map(|family| family.grant.username)
+            .collect();
+        expected.sort();
+        assert_eq!(found.into_iter().collect::<Vec<_>>(), expected);
+        // Once the families expired, a scan finds none of them.
+        assert!(scan(now + 600_000).await.0.is_empty());
     }
 
     /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
