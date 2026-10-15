@@ -38,12 +38,32 @@ OTHER_OAUTH_KEY = renderer.oauth_pem(
 # again whenever the source manifest gains modules (refresh tokens, rate limits,
 # OIDC sign-in, key rotation tests, the account page), again when every playground
 # profile enabled the in-cluster metrics port, and again when the configuration stopped
-# carrying an empty `ui.sso`.
+# carrying an empty `ui.sso`. The digests are taken after `archive_neutral`, so they
+# hold for every zlib implementation.
 PRE_OAUTH_DIGESTS = {
-    "plain": "c8cf2b89bce71ac6f9de458d9dd83bdfa0afd3121c18cb76671dbda5d92dc7ff",
-    "basic": "4854488041d3be0552540ae5fa43d8f357ca9bda730bd1fffa83bf742d10c6a9",
-    "shared": "04ba1ff0d4eaef85a20e1f1f4a84000e8ce8d051e774c7aa0306b48e41c9c281",
+    "plain": "2e9d5ab100b45bec1f4b1eb1e8df13d98c31a7181670d2002dfaf2580a0ad821",
+    "basic": "bfba6928887c05ba9ebbbb96c8b68c1588980a9e42b5994a2dd1ae0c07a96144",
+    "shared": "ed5546bae5a0bcf7cd70be3ec6099a8ef3457619b21fd30eb0c62085a56c7bc5",
 }
+
+
+def archive_neutral(text, archive):
+    """Replace the gzip source archive and the values derived from its bytes.
+
+    zlib and zlib-ng compress the same tar to different bytes, so the archive's
+    Base64 payload, its sha256 and the 12-character name suffix are replaced by
+    placeholders before hashing. Valid: `...-source-<first 12 hex of sha256(archive)>`
+    becomes `...-source-<archive-sha256-12>`. Invalid (left unchanged): any other
+    hex string, such as the sha256 of a different archive.
+    """
+    digest = hashlib.sha256(archive).hexdigest()
+    return (
+        text.replace(base64.b64encode(archive).decode("ascii"), "<archive>")
+        .replace(digest, "<archive-sha256>")
+        .replace(digest[:12], "<archive-sha256-12>")
+    )
+
+
 # One `/login/` Prefix replaces per-method Exact paths, independent of method count.
 API_KEY_PATH_RULES = [
     ("/login", "Exact"),
@@ -1144,7 +1164,7 @@ class RendererTests(unittest.TestCase):
         )
 
     def test_oauth_off_output_is_unchanged_from_previous_profiles(self):
-        baseline, _ = self.baseline()
+        baseline, archive = self.baseline()
         for name, args, options in (
             ("plain", (), {}),
             ("basic", (BASIC,), {}),
@@ -1156,7 +1176,8 @@ class RendererTests(unittest.TestCase):
                     sort_keys=False,
                 )
                 self.assertEqual(
-                    hashlib.sha256(text.encode()).hexdigest(), PRE_OAUTH_DIGESTS[name]
+                    hashlib.sha256(archive_neutral(text, archive).encode()).hexdigest(),
+                    PRE_OAUTH_DIGESTS[name],
                 )
                 self.assertNotIn("oauth", text)
                 explicit = yaml.safe_dump_all(
