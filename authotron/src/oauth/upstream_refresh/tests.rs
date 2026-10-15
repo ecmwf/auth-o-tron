@@ -259,20 +259,17 @@ async fn a_retried_refresh_reuses_the_upstream_renewal_without_the_provider() {
 }
 
 #[tokio::test]
-async fn concurrent_refreshes_renew_one_after_the_other_with_the_newest_grant() {
+async fn concurrent_refreshes_share_one_successor_and_renew_upstream_in_turn() {
     let coupled = coupled(|_| {}).await;
     let (token, _) = live_family(&coupled).await;
     let (a, b) = tokio::join!(coupled.refresh(&token), coupled.refresh(&token));
-    // One client rotation wins; the provider never saw a spent token.
-    let winner = match (a, b) {
-        (Ok(next), Err(RefreshGrantError::InvalidGrant))
-        | (Err(RefreshGrantError::InvalidGrant), Ok(next)) => next,
-        _ => panic!("expected exactly one successful refresh"),
-    };
+    // Both get the same rotated token; the provider never saw a spent token.
+    let (a, b) = (a.unwrap(), b.unwrap());
+    assert_eq!(a.as_secret_str(), b.as_secret_str());
     assert_eq!(coupled.upstream_events("invalid_grant"), 0);
-    let held = held(&coupled, &winner).await;
+    let held = held(&coupled, &a).await;
     assert!(coupled.idp.state.refresh_token_live(&held));
-    coupled.refresh(&winner).await.unwrap();
+    coupled.refresh(&a).await.unwrap();
 }
 
 #[tokio::test]

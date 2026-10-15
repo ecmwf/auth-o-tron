@@ -368,7 +368,12 @@ impl OAuthRuntime {
                 metrics.record_refresh_token(RefreshTokenEvent::Rotated);
                 Ok(response.with_refresh_token(&next))
             }
-            Rotated::Repeated(_) | Rotated::Stale => Err(InvalidGrant),
+            // A concurrent refresh of the same token rotated it first, or an earlier run
+            // of this rotation did: answer as for a retry.
+            Rotated::Repeated(repetition) => {
+                answer_again(&presented, &family, &repetition, response, metrics)
+            }
+            Rotated::Stale => Err(InvalidGrant),
         }
     }
 
@@ -899,6 +904,49 @@ mod tests {
                 other => Err(format!("unexpected pattern lines: {other:?}")),
             }
         });
+    }
+
+    /// Holds every augmentation until two refreshes are augmenting at once.
+    struct Rendezvous(tokio::sync::Barrier);
+    #[async_trait::async_trait]
+    impl crate::augmenters::base::Augmenter for Rendezvous {
+        fn get_name(&self) -> &str {
+            "rendezvous"
+        }
+        fn get_type(&self) -> &str {
+            "rendezvous"
+        }
+        fn get_realm(&self) -> &str {
+            "local"
+        }
+        async fn augment(&self, _: Arc<futures::lock::Mutex<User>>) -> Result<(), String> {
+            self.0.wait().await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_refreshes_of_one_token_both_get_its_successor() {
+        let (_file, config, runtime) = runtime().await;
+        let mut auth = granting(&config);
+        auth.augmenters
+            .push(Box::new(Rendezvous(tokio::sync::Barrier::new(2))));
+        let (auth, browser, metrics) = (Arc::new(auth), Arc::new(browser(&config)), Metrics::new());
+        let token = Arc::new(family(&runtime, &grant()).await);
+        // Both look the token up as current before either rotates it.
+        let refresh = || {
+            let (runtime, auth, browser) = (runtime.clone(), auth.clone(), browser.clone());
+            let (metrics, token) = (metrics.clone(), token.clone());
+            tokio::spawn(
+                async move { refreshed(&runtime, &token, &auth, &browser, &metrics).await },
+            )
+        };
+        let (a, b) = (refresh(), refresh());
+        let (a, b) = (a.await.unwrap().unwrap(), b.await.unwrap().unwrap());
+        assert_eq!(a["refresh_token"], b["refresh_token"]);
+        assert_ne!(a["access_token"], b["access_token"]);
+        counted(&metrics, "rotated", 1);
+        counted(&metrics, "retried", 1);
     }
 
     #[tokio::test]

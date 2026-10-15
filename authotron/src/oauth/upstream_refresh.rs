@@ -42,6 +42,9 @@ const LOCK_MARGIN_MS: u64 = 5_000;
 enum Outcome {
     /// The refreshed identity's mapped provider roles.
     Roles(Vec<String>),
+    /// A concurrent refresh of the same token renewed the upstream grant and rotated
+    /// the token meanwhile: the provider roles it stored.
+    Concurrent(Vec<String>),
     /// 503; the family is kept.
     Unavailable,
     /// Another refresh of the family held the lock for the whole wait.
@@ -85,13 +88,13 @@ impl OAuthRuntime {
                 Some(UpstreamTokenEvent::IdentityChanged)
             }
             Ok(Outcome::Ended(_)) => Some(UpstreamTokenEvent::InvalidGrant),
-            Ok(Outcome::Reused(_)) | Err(_) => None,
+            Ok(Outcome::Concurrent(_) | Outcome::Reused(_)) | Err(_) => None,
         };
         if let Some(event) = event {
             metrics.record_upstream_token(event);
         }
         match outcome? {
-            Outcome::Roles(roles) => Ok(roles),
+            Outcome::Roles(roles) | Outcome::Concurrent(roles) => Ok(roles),
             Outcome::Unavailable => Err(Unavailable),
             Outcome::Busy => {
                 family_event!(
@@ -160,6 +163,11 @@ impl OAuthRuntime {
         // Another holder may have refreshed meanwhile: use the newest sealed grant.
         let current = match refresh_dispatch!(backend, lookup(presented, now))? {
             Presented::Current(current) if current.family_id == id => current,
+            // That holder also rotated the token: start from its roles, as a retry
+            // would, and let the rotation answer it again.
+            Presented::Previous(previous, _) if previous.family_id == id => {
+                return Ok(Outcome::Concurrent(previous.grant.provider_roles));
+            }
             Presented::Reused(ended) => return Ok(Outcome::Reused(ended)),
             _ => return Err(RefreshGrantError::InvalidGrant),
         };
