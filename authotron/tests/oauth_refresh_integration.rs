@@ -215,8 +215,11 @@ async fn rotation_issues_new_pairs_and_reuse_revokes_the_family() {
     assert_eq!(second["scope"], "read list");
     assert_eq!(second["token_type"], "Bearer");
     assert_ne!(second["access_token"], first["access_token"]);
-    // The immediate predecessor within the grace window is rejected but harmless.
-    error(refresh_as(&app, "desktop", &t1).await, "invalid_grant");
+    // A response lost on the way: the retried previous token gets the same token.
+    let (status, retried) = refresh_as(&app, "desktop", &t1).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(refresh_token(&retried), t2);
+    assert_ne!(retried["access_token"], second["access_token"]);
     let (status, third) = refresh_as(&app, "desktop", &t2).await;
     assert_eq!(status, StatusCode::OK);
     let t3 = refresh_token(&third);
@@ -227,6 +230,7 @@ async fn rotation_issues_new_pairs_and_reuse_revokes_the_family() {
     for line in [
         "authotron_oauth_refresh_tokens_total{event=\"issued\"} 1",
         "authotron_oauth_refresh_tokens_total{event=\"rotated\"} 2",
+        "authotron_oauth_refresh_tokens_total{event=\"retried\"} 1",
         "authotron_oauth_refresh_tokens_total{event=\"reuse_detected\"} 1",
         "authotron_oauth_refresh_tokens_total{event=\"family_revoked\"} 1",
     ] {
@@ -453,7 +457,10 @@ async fn disposable_valkey_refresh_rotates_across_replicas() {
     let (status, second) = refresh_as(&b, "desktop", &t1).await;
     assert_eq!(status, StatusCode::OK);
     let t2 = refresh_token(&second);
-    error(refresh_as(&a, "desktop", &t1).await, "invalid_grant");
+    // The answer of one replica was lost: the other answers the retry with that token.
+    let (status, retried) = refresh_as(&a, "desktop", &t1).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(refresh_token(&retried), t2);
     let (status, third) = refresh_as(&a, "desktop", &t2).await;
     assert_eq!(status, StatusCode::OK);
     let t3 = refresh_token(&third);

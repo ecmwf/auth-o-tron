@@ -10,11 +10,11 @@
 //! revocation. Every refresh re-runs augmentation and current policy before rotating.
 
 use super::{
-    audit::{FamilyEnd, NO_FAMILY},
+    audit::{FamilyEnd, NO_FAMILY, family_event, family_ref},
     authentication::projection,
     refresh::{
-        Presented, RefreshGrant, RefreshStoreError, RefreshToken, Revocation, Rotated, Rotation,
-        effective_absolute,
+        Presented, RefreshFamily, RefreshGrant, RefreshStoreError, RefreshToken, Repetition,
+        Revocation, Rotated, Rotation, effective_absolute,
     },
     refresh_store::MemoryRefreshStore,
     runtime::OAuthRuntime,
@@ -44,6 +44,10 @@ macro_rules! refresh_dispatch {
     };
 }
 pub(super) use refresh_dispatch;
+
+/// Consecutive rotations answered again from which a family logs
+/// `oauth.refresh_token.retry_pattern`.
+const RETRY_PATTERN_STREAK: u32 = 3;
 
 /// Token-endpoint outcomes; mapped to RFC 6749 §5.2 / RFC 8707 error codes by the route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +104,43 @@ fn method_policy(policy: &RefreshTokenPolicy, method: &BrowserMethod) -> Refresh
         absolute_ttl_seconds,
         ..policy.clone()
     }
+}
+
+/// Answers a refresh of the family's previous token with the current one, which the
+/// latest rotation sealed by that token: a response that was lost, or a concurrent
+/// refresh. A sealed token that does not open to the current one is rejected.
+fn answer_again(
+    presented: &RefreshToken,
+    family: &RefreshFamily,
+    repetition: &Repetition,
+    response: TokenResponse,
+    metrics: &Metrics,
+) -> Result<TokenResponse, RefreshGrantError> {
+    let next = presented
+        .open_successor(&family.family_id, &repetition.sealed)
+        .filter(|next| next.hash() == repetition.current)
+        .ok_or(RefreshGrantError::InvalidGrant)?;
+    let reference = family_ref(&family.family_id);
+    family_event!(
+        info,
+        family.grant,
+        reference,
+        event_name = "oauth.refresh_token.retried",
+        retries = repetition.retries,
+        "rotated refresh token presented again; answered with its successor"
+    );
+    if repetition.retries == 1 && repetition.streak >= RETRY_PATTERN_STREAK {
+        family_event!(
+            warn,
+            family.grant,
+            reference,
+            event_name = "oauth.refresh_token.retry_pattern",
+            streak = repetition.streak,
+            "consecutive rotations were each answered again: the token may be shared or copied"
+        );
+    }
+    metrics.record_refresh_token(RefreshTokenEvent::Retried);
+    Ok(response.with_refresh_token(&next))
 }
 
 impl OAuthRuntime {
@@ -209,14 +250,16 @@ impl OAuthRuntime {
         let presented = RefreshToken::parse(request.token).ok_or(InvalidGrant)?;
         let hash = presented.hash();
         let now = self.now().await.map_err(|_| Unavailable)?;
-        let family = match refresh_dispatch!(backend, lookup(&hash, now))? {
-            Presented::Current(family) => family,
+        // `rotated_at` is set for the family's previous token: when it was rotated.
+        let (family, rotated_at) = match refresh_dispatch!(backend, lookup(&hash, now))? {
+            Presented::Current(family) => (family, None),
+            Presented::Previous(family, rotated_at) => (family, Some(rotated_at)),
             Presented::Reused(ended) => {
                 metrics.record_refresh_token(RefreshTokenEvent::ReuseDetected);
                 self.families_ended([*ended], FamilyEnd::ReuseDetected, browser, metrics);
                 return Err(InvalidGrant);
             }
-            Presented::Previous(..) | Presented::Missing => return Err(InvalidGrant),
+            Presented::Missing => return Err(InvalidGrant),
         };
         // A token presented by another client is rejected without touching the family.
         if family.grant.client_id != request.client_id {
@@ -232,6 +275,12 @@ impl OAuthRuntime {
         let Some(policy) = self.refresh_policy(request.client_id) else {
             return revoke(FamilyEnd::ClientDisabled).await;
         };
+        // The previous token past its client's retry window is reuse, as an older one.
+        let retry_window_ms = policy.retry_window_seconds * 1000;
+        if rotated_at.is_some_and(|at| now >= at.saturating_add(retry_window_ms)) {
+            metrics.record_refresh_token(RefreshTokenEvent::ReuseDetected);
+            return revoke(FamilyEnd::ReuseDetected).await;
+        }
         let Some(method) = browser.method(&family.grant.method) else {
             return revoke(FamilyEnd::MethodRemoved).await;
         };
@@ -252,15 +301,15 @@ impl OAuthRuntime {
             return Err(InvalidTarget);
         }
         let scopes = narrowed_scopes(request.scope, &family.grant.scopes)?;
-        // A coupled family renews its upstream grant and takes the refreshed roles.
-        let provider_roles = if family.grant.upstream_coupled {
-            let Some(oidc) = method.oidc() else {
-                return revoke(FamilyEnd::MethodRemoved).await;
-            };
-            self.refresh_upstream(backend, &family, &hash, oidc, browser, metrics)
-                .await?
-        } else {
-            family.grant.provider_roles.clone()
+        // A coupled family renews its upstream grant and takes the refreshed roles. The
+        // previous token starts from the roles its rotation stored, without the provider.
+        let provider_roles = match (family.grant.upstream_coupled, method.oidc()) {
+            (true, None) => return revoke(FamilyEnd::MethodRemoved).await,
+            (true, Some(oidc)) if rotated_at.is_none() => {
+                self.refresh_upstream(backend, &family, &hash, oidc, browser, metrics)
+                    .await?
+            }
+            _ => family.grant.provider_roles.clone(),
         };
         let user = User::new(
             family.grant.realm.clone(),
@@ -292,6 +341,13 @@ impl OAuthRuntime {
                 TokenError::Policy(_) | TokenError::Identity => InvalidGrant,
                 _ => Unavailable,
             })?;
+        // The previous token is answered with the current one if the store still
+        // confirms it, within the window and cap, as the last step.
+        if rotated_at.is_some() {
+            let repetition = refresh_dispatch!(backend, repeat(&hash, retry_window_ms, now))?
+                .ok_or(InvalidGrant)?;
+            return answer_again(&presented, &family, &repetition, response, metrics);
+        }
         let next = RefreshToken::generate()?;
         // The successor carries the provider roles this refresh started from.
         let grant = RefreshGrant {
@@ -305,7 +361,7 @@ impl OAuthRuntime {
             grant: &grant,
             idle_ttl_seconds: policy.idle_ttl_seconds,
             ceiling,
-            retry_window_ms: policy.retry_window_seconds * 1000,
+            retry_window_ms,
         };
         match refresh_dispatch!(backend, rotate(&hash, &rotation, now))? {
             Rotated::Rotated => {
@@ -347,12 +403,18 @@ mod tests {
     use std::{io::Write, sync::Arc};
 
     async fn runtime() -> (tempfile::NamedTempFile, ConfigV2, Arc<OAuthRuntime>) {
+        runtime_with(|_| {}).await
+    }
+    /// The runtime, with `edit` applied to the `desktop` client's refresh-token policy.
+    async fn runtime_with(
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> (tempfile::NamedTempFile, ConfigV2, Arc<OAuthRuntime>) {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         let pem = super::super::keys::tests::keys()[0]
             .to_pkcs8_pem(LineEnding::LF)
             .unwrap();
         file.write_all(pem.as_bytes()).unwrap();
-        let config: ConfigV2 = serde_json::from_value(serde_json::json!({
+        let mut value = serde_json::json!({
             "store": {"enabled": false}, "services": [], "augmenters": [],
             "providers": [{"type": "plain", "name": "basic", "realm": "local", "users": [{"username": "alice", "password": "fixture-only"}], "browser": {"id": "password", "label": "Password"}}],
             "server": {"port": 0}, "jwt": {"iss": "fixture", "exp": 300, "secret": "fixture-only"}, "logging": {"level": "warn", "format": "console"},
@@ -362,8 +424,9 @@ mod tests {
                     "resources": [{"resource": "https://mcp.example.org/mcp", "scopes": ["read"]}],
                     "refresh_tokens": {"enabled": true, "idle_ttl_seconds": 600, "absolute_ttl_seconds": 3600}}],
                 "resources": [{"resource": "https://mcp.example.org/mcp", "allowed_realms": ["local"], "scopes": [{"name": "read", "required_roles": ["reader"]}]}]}
-        }))
-        .unwrap();
+        });
+        edit(&mut value["oauth"]["clients"][0]["refresh_tokens"]);
+        let config: ConfigV2 = serde_json::from_value(value).unwrap();
         let runtime = OAuthRuntime::initialize(&config).await.unwrap().unwrap();
         (file, config, runtime)
     }
@@ -721,6 +784,193 @@ mod tests {
         ] {
             assert!(!logs_contain(secret));
         }
+    }
+
+    /// The refresh response of `token` as JSON.
+    async fn refreshed(
+        runtime: &Arc<OAuthRuntime>,
+        token: &RefreshToken,
+        auth: &Auth,
+        browser: &BrowserLoginState,
+        metrics: &Metrics,
+    ) -> Result<serde_json::Value, RefreshGrantError> {
+        let response = runtime
+            .refresh(request(token), auth, browser, metrics)
+            .await?;
+        Ok(serde_json::to_value(response).unwrap())
+    }
+    fn refresh_token(response: &serde_json::Value) -> RefreshToken {
+        RefreshToken::parse(response["refresh_token"].as_str().unwrap()).unwrap()
+    }
+    fn granting(config: &ConfigV2) -> Auth {
+        auth(
+            config,
+            serde_json::json!([{"type": "plain", "name": "r", "realm": "local", "roles": {"reader": ["alice"]}}]),
+        )
+    }
+    fn counted(metrics: &Metrics, event: &str, count: u64) {
+        let line = format!("authotron_oauth_refresh_tokens_total{{event=\"{event}\"}} {count}");
+        assert!(metrics.render().unwrap().contains(&line), "{line}");
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn a_lost_refresh_response_is_answered_again_with_the_same_token() {
+        let (_file, config, runtime) = runtime().await;
+        let (metrics, browser, granting) = (Metrics::new(), browser(&config), granting(&config));
+        let refresh = |token| refreshed(&runtime, token, &granting, &browser, &metrics);
+        let first = family(&runtime, &grant()).await;
+        let lost = refresh(&first).await.unwrap();
+        // The client never received `lost` and presents its old token again.
+        for _ in 0..2 {
+            let retried = refresh(&first).await.unwrap();
+            assert_eq!(retried["refresh_token"], lost["refresh_token"]);
+            assert_ne!(retried["access_token"], lost["access_token"]);
+            assert_eq!(retried["scope"], "read");
+        }
+        // Once the successor is used, the old token is reuse and ends the family.
+        let second = refresh_token(&lost);
+        let third = refresh_token(&refresh(&second).await.unwrap());
+        let invalid = Some(RefreshGrantError::InvalidGrant);
+        assert_eq!(refresh(&first).await.err(), invalid);
+        assert_eq!(refresh(&third).await.err(), invalid);
+        for (event, count) in [("rotated", 2), ("retried", 2), ("reuse_detected", 1)] {
+            counted(&metrics, event, count);
+        }
+        logs_assert(|lines: &[&str]| {
+            let retried: Vec<_> = lines
+                .iter()
+                .filter(|line| line.contains("oauth.refresh_token.retried"))
+                .collect();
+            let fields = [
+                " INFO ",
+                "client_id=desktop",
+                "method=password",
+                "username=alice",
+            ];
+            match retried.as_slice() {
+                [a, b]
+                    if [a, b]
+                        .iter()
+                        .all(|line| fields.iter().all(|f| line.contains(f))) =>
+                {
+                    Ok(())
+                }
+                other => Err(format!("unexpected retry lines: {other:?}")),
+            }
+        });
+        for token in [&first, &second, &third] {
+            assert!(!logs_contain(token.as_secret_str()));
+        }
+    }
+
+    #[tokio::test]
+    #[tracing_test::traced_test]
+    async fn retries_are_capped_per_rotation_and_a_streak_of_them_is_reported() {
+        let (_file, config, runtime) = runtime().await;
+        let (metrics, browser, granting) = (Metrics::new(), browser(&config), granting(&config));
+        let mut token = family(&runtime, &grant()).await;
+        // Three rotations in a row, each answered again for its previous token.
+        for rotation in 1..=3 {
+            let refresh = || refreshed(&runtime, &token, &granting, &browser, &metrics);
+            let next = refresh_token(&refresh().await.unwrap());
+            for _ in 0..crate::oauth::refresh::MAX_RETRIES_PER_ROTATION {
+                let retried = refresh_token(&refresh().await.unwrap());
+                assert_eq!(retried.as_secret_str(), next.as_secret_str());
+            }
+            if rotation == 1 {
+                // Past the cap the previous token is rejected; the family is kept.
+                let refused = refresh().await.err();
+                assert_eq!(refused, Some(RefreshGrantError::InvalidGrant));
+            }
+            token = next;
+        }
+        refreshed(&runtime, &token, &granting, &browser, &metrics)
+            .await
+            .unwrap();
+        counted(&metrics, "retried", 9);
+        logs_assert(|lines: &[&str]| {
+            let pattern: Vec<_> = lines
+                .iter()
+                .filter(|line| line.contains("oauth.refresh_token.retry_pattern"))
+                .collect();
+            match pattern.as_slice() {
+                [line] if line.contains(" WARN ") && line.contains("streak=3") => Ok(()),
+                other => Err(format!("unexpected pattern lines: {other:?}")),
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn without_a_retry_window_the_previous_token_is_reuse_at_once() {
+        let (_file, config, runtime) = runtime_with(|policy| {
+            policy["retry_window_seconds"] = 0.into();
+        })
+        .await;
+        let (metrics, browser, granting) = (Metrics::new(), browser(&config), granting(&config));
+        let refresh = |token| refreshed(&runtime, token, &granting, &browser, &metrics);
+        let invalid = Some(RefreshGrantError::InvalidGrant);
+        let first = family(&runtime, &grant()).await;
+        let second = refresh_token(&refresh(&first).await.unwrap());
+        assert_eq!(refresh(&first).await.err(), invalid);
+        assert_eq!(refresh(&second).await.err(), invalid);
+        counted(&metrics, "reuse_detected", 1);
+    }
+
+    #[tokio::test]
+    async fn the_previous_token_past_its_window_or_sealed_otherwise_is_not_answered() {
+        let (_file, config, runtime) = runtime().await;
+        let (metrics, browser, granting) = (Metrics::new(), browser(&config), granting(&config));
+        let refresh = |token| refreshed(&runtime, token, &granting, &browser, &metrics);
+        let invalid = Some(RefreshGrantError::InvalidGrant);
+        let RefreshBackend::Memory(store) = runtime.refresh.as_ref().unwrap() else {
+            unreachable!()
+        };
+        let now = runtime.now().await.unwrap();
+        let fixture = grant();
+        // Rotated just over the window ago: presenting it again is reuse.
+        let rotated = |token: RefreshToken, at, sealed: String| {
+            let fixture = &fixture;
+            async move {
+                let next = RefreshToken::generate().unwrap();
+                let rotation = Rotation {
+                    next: next.hash(),
+                    sealed: &sealed,
+                    grant: fixture,
+                    idle_ttl_seconds: 600,
+                    ceiling: now + 3_600_000,
+                    retry_window_ms: 30_000,
+                };
+                let outcome = store.rotate(&token.hash(), &rotation, at).await.unwrap();
+                assert_eq!(outcome, Rotated::Rotated);
+                (token, next)
+            }
+        };
+        let issued = RefreshToken::generate().unwrap();
+        let policy = runtime.refresh_policy("desktop").unwrap();
+        store
+            .issue(&grant(), issued.hash(), now - 60_000, policy, None)
+            .await
+            .unwrap();
+        let (old, next) = rotated(issued, now - 30_001, "unused".into()).await;
+        assert_eq!(refresh(&old).await.err(), invalid);
+        assert_eq!(refresh(&next).await.err(), invalid);
+        // Moments ago, but sealed by another token: rejected, the family is kept.
+        let (old, next) = rotated(family(&runtime, &grant()).await, now, {
+            let other = RefreshToken::generate().unwrap();
+            other.seal_successor("family", &other).unwrap()
+        })
+        .await;
+        assert_eq!(refresh(&old).await.err(), invalid);
+        // Another client presenting the previous token is rejected too.
+        let other = RefreshRequest {
+            client_id: "other",
+            ..request(&old)
+        };
+        let response = runtime.refresh(other, &granting, &browser, &metrics).await;
+        assert_eq!(response.err(), invalid);
+        refresh(&next).await.unwrap();
+        counted(&metrics, "retried", 0);
     }
 
     #[test]

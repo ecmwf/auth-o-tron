@@ -235,6 +235,30 @@ async fn refreshed_roles_replace_the_family_roles_and_need_an_id_token() {
 }
 
 #[tokio::test]
+async fn a_retried_refresh_reuses_the_upstream_renewal_without_the_provider() {
+    let coupled = coupled(|config| {
+        let method = &mut config["ui"]["oidc"][0];
+        method["roles_claim"] = json!("realm_access.roles");
+        method["role_map"] = json!({"mcp-demo": "reader"});
+        config["oauth"]["resources"][0]["scopes"][0]["required_roles"] = json!(["reader"]);
+    })
+    .await;
+    let requests = || coupled.idp.state.refresh_requests.load(Ordering::SeqCst);
+    let (first, _) = live_family(&coupled).await;
+    let second = coupled.refresh(&first).await.unwrap();
+    assert_eq!(requests(), 1);
+    // The answer was lost. The retry gets the same token, and its access token the
+    // stored refreshed role: the family's sign-in roles lack `reader`.
+    let retried = coupled.refresh(&first).await.unwrap();
+    assert_eq!(retried.as_secret_str(), second.as_secret_str());
+    assert_eq!(requests(), 1);
+    assert_eq!(coupled.upstream_events("refreshed"), 1);
+    // The successor renews upstream as usual.
+    coupled.refresh(&second).await.unwrap();
+    assert_eq!(requests(), 2);
+}
+
+#[tokio::test]
 async fn concurrent_refreshes_renew_one_after_the_other_with_the_newest_grant() {
     let coupled = coupled(|_| {}).await;
     let (token, _) = live_family(&coupled).await;
