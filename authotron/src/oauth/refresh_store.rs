@@ -9,9 +9,9 @@
 //! Process-local refresh-token families for single-replica deployments.
 
 use super::refresh::{
-    EndedFamily, MAX_RETRIES_PER_ROTATION, MAX_RETRY_WINDOW_MS, MAX_ROTATED_HASHES, Presented,
-    RefreshFamily, RefreshGrant, RefreshStoreError, Repetition, Revocation, Rotated, Rotation,
-    UpstreamState, UpstreamStored, deadline, initial_expiry, random_id,
+    EndedFamily, FamilySummary, MAX_RETRIES_PER_ROTATION, MAX_RETRY_WINDOW_MS, MAX_ROTATED_HASHES,
+    Presented, RefreshFamily, RefreshGrant, RefreshStoreError, Repetition, Revocation, Rotated,
+    Rotation, UpstreamState, UpstreamStored, deadline, initial_expiry, random_id,
 };
 use crate::config::RefreshTokenPolicy;
 use std::{
@@ -79,6 +79,19 @@ impl Family {
             retries: previous.retries,
             streak: self.streak,
         }))
+    }
+    fn summary(&self, family_id: String) -> FamilySummary {
+        FamilySummary {
+            family_id,
+            grant: self.grant.clone(),
+            created_at_ms: self.created_at_ms,
+            last_used_at_ms: self
+                .previous
+                .as_ref()
+                .map_or(self.created_at_ms, |previous| previous.rotated_at_ms),
+            idle_expires_at_ms: self.idle_ms,
+            absolute_expires_at_ms: self.absolute_ms,
+        }
     }
     fn ended(self, family_id: String) -> EndedFamily {
         EndedFamily {
@@ -392,6 +405,45 @@ impl MemoryRefreshStore {
             .families
             .remove(family_id)
             .map(|family| family.ended(family_id.to_owned())))
+    }
+    /// The live families of the user with the key `user_key` (see
+    /// [`super::refresh::user_key`]), newest first, at most `limit`.
+    pub async fn families_of(
+        &self,
+        user_key: &str,
+        limit: usize,
+        now_ms: u64,
+    ) -> Result<Vec<FamilySummary>, RefreshStoreError> {
+        let inner = self.lock()?;
+        let mut families: Vec<_> = inner
+            .families
+            .iter()
+            .filter(|(_, family)| family.user_key == user_key && family.live(now_ms))
+            .map(|(id, family)| family.summary(id.clone()))
+            .collect();
+        families
+            .sort_by(|a, b| (b.created_at_ms, &b.family_id).cmp(&(a.created_at_ms, &a.family_id)));
+        families.truncate(limit);
+        Ok(families)
+    }
+    /// Revokes every live family of the user with the key `user_key` and returns them.
+    pub async fn revoke_user(
+        &self,
+        user_key: &str,
+        now_ms: u64,
+    ) -> Result<Vec<EndedFamily>, RefreshStoreError> {
+        let mut inner = self.lock()?;
+        inner.prune(now_ms);
+        let owned: Vec<String> = inner
+            .families
+            .iter()
+            .filter(|(_, family)| family.user_key == user_key)
+            .map(|(id, _)| id.clone())
+            .collect();
+        Ok(owned
+            .into_iter()
+            .filter_map(|id| Some(inner.families.remove(&id)?.ended(id)))
+            .collect())
     }
     /// RFC 7009: any token of a family revokes it, but only for the owning client.
     pub async fn revoke_token(
@@ -733,6 +785,84 @@ mod tests {
             current(store.lookup(&[2; 32], NOW).await.unwrap()).grant,
             refreshed
         );
+    }
+
+    #[tokio::test]
+    async fn a_users_families_are_listed_newest_first_and_revoked_together() {
+        let store = MemoryRefreshStore::new(50);
+        let bob = RefreshGrant {
+            username: "bob".into(),
+            ..grant()
+        };
+        for (index, (grant, token)) in [(grant(), 1), (grant(), 2), (bob.clone(), 3), (grant(), 4)]
+            .into_iter()
+            .enumerate()
+        {
+            store
+                .issue(&grant, [token; 32], NOW + index as u64, &policy(), None)
+                .await
+                .unwrap();
+        }
+        let ceiling = NOW + 3_600_000;
+        let rotated = store
+            .rotate(&[1; 32], &rotation([5; 32], &grant(), ceiling), NOW + 10)
+            .await
+            .unwrap();
+        assert_eq!(rotated, Rotated::Rotated);
+        let alice = grant().user_key();
+        let listed = store.families_of(&alice, 50, NOW + 20).await.unwrap();
+        let created: Vec<_> = listed.iter().map(|family| family.created_at_ms).collect();
+        assert_eq!(created, [NOW + 3, NOW + 1, NOW]);
+        assert!(listed.iter().all(|family| family.grant == grant()));
+        let oldest = &listed[2];
+        assert_eq!(oldest.last_used_at_ms, NOW + 10);
+        assert_eq!(oldest.idle_expires_at_ms, NOW + 10 + 600_000);
+        assert_eq!(oldest.absolute_expires_at_ms, ceiling);
+        assert_eq!(listed[0].last_used_at_ms, NOW + 3);
+        let newest = store.families_of(&alice, 2, NOW + 20).await.unwrap();
+        assert_eq!(newest, listed[..2]);
+        // Families past their idle deadline are not listed.
+        let late = store.families_of(&alice, 50, NOW + 600_005).await.unwrap();
+        assert_eq!(late, listed[2..]);
+
+        let ended = store.revoke_user(&alice, NOW + 20).await.unwrap();
+        let mut ids: Vec<_> = ended
+            .iter()
+            .map(|family| family.family_id.clone())
+            .collect();
+        ids.sort();
+        let mut expected: Vec<_> = listed
+            .iter()
+            .map(|family| family.family_id.clone())
+            .collect();
+        expected.sort();
+        assert_eq!(ids, expected);
+        assert!(
+            store
+                .families_of(&alice, 50, NOW + 20)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .revoke_user(&alice, NOW + 20)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        for token in [[2; 32], [4; 32], [5; 32]] {
+            assert!(matches!(
+                store.lookup(&token, NOW + 20).await.unwrap(),
+                Presented::Missing
+            ));
+        }
+        let bobs = store
+            .families_of(&bob.user_key(), 50, NOW + 20)
+            .await
+            .unwrap();
+        assert_eq!(bobs.len(), 1);
+        current(store.lookup(&[3; 32], NOW + 20).await.unwrap());
     }
 
     #[tokio::test]

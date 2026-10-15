@@ -9,9 +9,9 @@
 //! Shared refresh-token families in Valkey; every mutation is one atomic Lua script.
 
 use super::refresh::{
-    EndedFamily, MAX_RETRIES_PER_ROTATION, MAX_RETRY_WINDOW_MS, MAX_ROTATED_HASHES, Presented,
-    RefreshFamily, RefreshGrant, RefreshStoreError, Repetition, Revocation, Rotated, Rotation,
-    UpstreamState, UpstreamStored, deadline, initial_expiry, random_id,
+    EndedFamily, FamilySummary, MAX_RETRIES_PER_ROTATION, MAX_RETRY_WINDOW_MS, MAX_ROTATED_HASHES,
+    Presented, RefreshFamily, RefreshGrant, RefreshStoreError, Repetition, Revocation, Rotated,
+    Rotation, UpstreamState, UpstreamStored, deadline, initial_expiry, random_id,
 };
 use super::refresh_durability::{self, Durability};
 use crate::{
@@ -103,6 +103,25 @@ fn repetition(values: &[Vec<u8>]) -> Result<Option<Box<Repetition>>, RefreshStor
         _ => Err(RefreshStoreError::Unavailable),
     }
 }
+/// The `id, grant, created, last used, idle, absolute` sextuples of family summaries.
+fn summaries(values: &[Vec<u8>]) -> Result<Vec<FamilySummary>, RefreshStoreError> {
+    let (rows, rest) = values.as_chunks::<6>();
+    if !rest.is_empty() {
+        return Err(RefreshStoreError::Unavailable);
+    }
+    rows.iter()
+        .map(|[id, grant, created, used, idle, absolute]| {
+            Ok(FamilySummary {
+                family_id: text(id)?,
+                grant: RefreshGrant::decode(grant)?,
+                created_at_ms: number(created)?,
+                last_used_at_ms: number(used)?,
+                idle_expires_at_ms: number(idle)?,
+                absolute_expires_at_ms: number(absolute)?,
+            })
+        })
+        .collect()
+}
 /// At most one ended family, for replies that end a single family.
 fn ended_one(values: &[Vec<u8>]) -> Result<Option<EndedFamily>, RefreshStoreError> {
     let mut all = ended(values)?;
@@ -148,6 +167,9 @@ impl ValkeyRefreshStore {
     }
     fn family_key(&self, family_id: &str) -> String {
         format!("{}family:{family_id}", self.prefix)
+    }
+    fn index_key(&self, user_key: &str) -> String {
+        format!("{}user:{user_key}", self.prefix)
     }
     async fn run(
         &self,
@@ -389,6 +411,41 @@ impl ValkeyRefreshStore {
             .await?;
         match reply.split_first() {
             Some((status, rest)) if status == b"ok" => ended_one(rest),
+            _ => Err(RefreshStoreError::Unavailable),
+        }
+    }
+    /// The live families of the user with the key `user_key` (see
+    /// [`super::refresh::user_key`]), newest first, at most `limit`.
+    pub async fn families_of(
+        &self,
+        user_key: &str,
+        limit: usize,
+        now_ms: u64,
+    ) -> Result<Vec<FamilySummary>, RefreshStoreError> {
+        let reply = self
+            .run(
+                &[self.index_key(user_key)],
+                "list",
+                now_ms,
+                &[limit.to_string().as_bytes()],
+            )
+            .await?;
+        match reply.split_first() {
+            Some((status, rest)) if status == b"ok" => summaries(rest),
+            _ => Err(RefreshStoreError::Unavailable),
+        }
+    }
+    /// Revokes every live family of the user with the key `user_key` and returns them.
+    pub async fn revoke_user(
+        &self,
+        user_key: &str,
+        now_ms: u64,
+    ) -> Result<Vec<EndedFamily>, RefreshStoreError> {
+        let reply = self
+            .run(&[self.index_key(user_key)], "revoke_user", now_ms, &[])
+            .await?;
+        match reply.split_first() {
+            Some((status, rest)) if status == b"ok" => ended(rest),
             _ => Err(RefreshStoreError::Unavailable),
         }
     }
@@ -737,7 +794,7 @@ mod tests {
             .unwrap();
         assert!(evicted.is_empty());
         family(store.lookup(&[1; 32], now + 2).await.unwrap());
-        let index = format!("{}user:{}", store.prefix, grant().user_key());
+        let index = store.index_key(&grant().user_key());
         let members: Vec<String> = store
             .connection
             .query(redis::cmd("ZRANGE").arg(&index).arg(0).arg(-1))
@@ -745,6 +802,76 @@ mod tests {
             .unwrap();
         assert_eq!(members.len(), 2);
         assert!(!members.contains(&id));
+    }
+
+    /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
+    #[tokio::test]
+    #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+    async fn disposable_valkey_a_users_families_are_listed_and_revoked_together() {
+        let (_fixture, backend, a) = disposable(50).await;
+        let b = ValkeyRefreshStore::new(&backend, 50).await.unwrap();
+        let now = server_now(&a).await;
+        let mut bob = grant();
+        bob.username = "bob".into();
+        let issued = [(grant(), 1), (grant(), 2), (bob.clone(), 3), (grant(), 4)];
+        for (index, (grant, token)) in issued.into_iter().enumerate() {
+            a.issue(&grant, [token; 32], now + index as u64, &policy(), None)
+                .await
+                .unwrap();
+        }
+        let ceiling = now + 3_600_000;
+        let fixture = grant();
+        let rotation = rotation([5; 32], &fixture, ceiling);
+        assert_eq!(
+            a.rotate(&[1; 32], &rotation, now + 10).await.unwrap(),
+            Rotated::Rotated
+        );
+        let alice = grant().user_key();
+        let listed = b.families_of(&alice, 50, now + 20).await.unwrap();
+        let created: Vec<_> = listed.iter().map(|family| family.created_at_ms).collect();
+        assert_eq!(created, [now + 3, now + 1, now]);
+        assert!(listed.iter().all(|family| family.grant == grant()));
+        assert_eq!(
+            (listed[2].last_used_at_ms, listed[2].idle_expires_at_ms),
+            (now + 10, now + 10 + 600_000)
+        );
+        assert_eq!(listed[2].absolute_expires_at_ms, ceiling);
+        assert_eq!(listed[0].last_used_at_ms, now + 3);
+        assert_eq!(
+            b.families_of(&alice, 2, now + 20).await.unwrap(),
+            listed[..2]
+        );
+        let ended = b.revoke_user(&alice, now + 20).await.unwrap();
+        let mut ids: Vec<_> = ended
+            .iter()
+            .map(|family| family.family_id.clone())
+            .collect();
+        ids.sort();
+        let mut expected: Vec<_> = listed
+            .iter()
+            .map(|family| family.family_id.clone())
+            .collect();
+        expected.sort();
+        assert_eq!(ids, expected);
+        assert!(ended.iter().all(|family| family.sealed.is_none()));
+        assert!(
+            a.families_of(&alice, 50, now + 20)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(a.revoke_user(&alice, now + 20).await.unwrap().is_empty());
+        for token in [[2; 32], [4; 32], [5; 32]] {
+            assert!(matches!(
+                a.lookup(&token, now + 20).await.unwrap(),
+                Presented::Missing
+            ));
+        }
+        assert_eq!(
+            a.families_of(&bob.user_key(), 50, now).await.unwrap().len(),
+            1
+        );
+        family(a.lookup(&[3; 32], now + 20).await.unwrap());
     }
 
     /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.

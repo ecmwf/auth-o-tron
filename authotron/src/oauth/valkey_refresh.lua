@@ -114,6 +114,31 @@ if op == 'unlock' then
     return {'ok'}
 end
 
+-- A user's families: KEYS[1] is the per-user index. 'list' replies with the summaries
+-- {id, grant, created, last used, idle, absolute} of at most ARGV[5] live families,
+-- newest first; the last use is the latest rotation, or the start. 'revoke_user' ends
+-- every live family of the user.
+if op == 'list' then
+    local limit = tonumber(ARGV[5])
+    if not integer(limit) then return {'unavailable'} end
+    prune_index(token)
+    local reply = {'ok'}
+    for _, member in ipairs(redis.call('ZRANGE', token, 0, limit - 1, 'REV')) do
+        local key = family_key(member)
+        local created, rotated = redis.call('HGET', key, 'created'), tonumber(redis.call('HGET', key, 'rotated')) or 0
+        append(reply, {member, redis.call('HGET', key, 'grant'), created, rotated > 0 and decimal(rotated) or created,
+            redis.call('HGET', key, 'idle'), redis.call('HGET', key, 'absolute')})
+    end
+    return reply
+end
+if op == 'revoke_user' then
+    prune_index(token)
+    local reply = {'ok'}
+    for _, member in ipairs(redis.call('ZRANGE', token, 0, -1)) do append(reply, revoke(member)) end
+    redis.call('DEL', token)
+    return reply
+end
+
 local id = redis.call('GET', token)
 if op == 'revoke' then
     if not id then return {'missing'} end

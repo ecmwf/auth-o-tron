@@ -160,15 +160,34 @@ impl RefreshGrant {
         }
         serde_json::from_slice(bytes).map_err(|_| RefreshStoreError::InvalidRecord)
     }
-    /// Length-prefixed digest so `("ab", "c")` and `("a", "bc")` index differently.
+    /// The [`user_key`] of the grant's realm and username.
     pub(super) fn user_key(&self) -> String {
-        let mut digest = Sha256::new();
-        for value in [&self.realm, &self.username] {
-            digest.update((value.len() as u64).to_be_bytes());
-            digest.update(value.as_bytes());
-        }
-        URL_SAFE_NO_PAD.encode(digest.finalize())
+        user_key(&self.realm, &self.username)
     }
+}
+
+/// The key of a user's families: a length-prefixed digest of realm and username, so
+/// `("ab", "c")` and `("a", "bc")` index differently.
+pub fn user_key(realm: &str, username: &str) -> String {
+    let mut digest = Sha256::new();
+    for value in [realm, username] {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    URL_SAFE_NO_PAD.encode(digest.finalize())
+}
+
+/// A live family as lists of logins show it; it holds no token and no sealed grant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FamilySummary {
+    pub family_id: String,
+    pub grant: RefreshGrant,
+    pub created_at_ms: u64,
+    /// The latest rotation, or the start if none: every refresh rotates, and a retried
+    /// refresh is answered within seconds of the rotation it repeats.
+    pub last_used_at_ms: u64,
+    pub idle_expires_at_ms: u64,
+    pub absolute_expires_at_ms: u64,
 }
 
 /// A family's live view, returned for its current token and for the previous one.
