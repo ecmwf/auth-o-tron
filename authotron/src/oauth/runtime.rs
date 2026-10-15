@@ -19,6 +19,7 @@ use super::{
     refresh_durability::{self, Durability},
     refresh_grant::RefreshBackend,
     refresh_store::MemoryRefreshStore,
+    retry_key::{self, RetryKey},
     store::{
         CreatedTransaction, MemoryTransactionStore, RedeemedAuthorization, StoreError,
         TransactionId,
@@ -71,6 +72,7 @@ pub struct OAuthRuntime {
     pub(super) refresh: Option<RefreshBackend>,
     /// Present when `upstream_token_encryption` is configured.
     pub(super) upstream: Option<Upstream>,
+    pub(super) retry_key: RetryKey,
 }
 macro_rules! dispatch {
     ($self:expr, $method:ident($($arg:expr),*)) => {
@@ -100,6 +102,7 @@ impl OAuthRuntime {
         {
             return Err("OAuth requires signing keys, preregistered clients and resources");
         }
+        retry_key::validate(config)?;
         if config.oauth.max_authorization_transactions < config.oauth.clients.len() {
             return Err("OAuth transaction capacity must reserve at least one slot per client");
         }
@@ -135,6 +138,7 @@ impl OAuthRuntime {
         let cfg = Arc::new((*config.oauth).clone());
         let keys = KeyManager::load(cfg.signing.as_ref().ok_or("missing signing config")?)?;
         TokenIssuer::new(&cfg, &keys)?;
+        let retry_key = RetryKey::load(config)?;
         let session = config
             .ui
             .browser_session
@@ -187,6 +191,7 @@ impl OAuthRuntime {
             rate_limit,
             refresh,
             upstream,
+            retry_key,
         })))
     }
     pub(crate) async fn create(

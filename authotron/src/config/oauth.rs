@@ -13,6 +13,7 @@ use super::oauth_signing::OAuthSigningConfig;
 use super::oauth_upstream::UpstreamTokenEncryptionConfig;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
@@ -46,6 +47,11 @@ pub struct OAuthConfig {
     /// Keys sealing the upstream refresh tokens of OIDC sign-ins coupled to refresh
     /// families; keep them while coupled families may remain.
     pub upstream_token_encryption: Option<UpstreamTokenEncryptionConfig>,
+    /// File holding 32 bytes of standard Base64, the same on every replica, mixed into
+    /// the key that seals each rotated refresh token for retries. Required when a client
+    /// enables refresh tokens and the browser-session backend is Valkey; without it, a
+    /// memory store uses a random key per process.
+    pub refresh_token_retry_key_file: Option<PathBuf>,
 }
 
 impl Default for OAuthConfig {
@@ -66,6 +72,7 @@ impl Default for OAuthConfig {
             resources: Vec::new(),
             signing: None,
             upstream_token_encryption: None,
+            refresh_token_retry_key_file: None,
         }
     }
 }
@@ -77,6 +84,15 @@ impl OAuthConfig {
         }
         if let Some(encryption) = &self.upstream_token_encryption {
             encryption.validate()?;
+        }
+        if self
+            .refresh_token_retry_key_file
+            .as_deref()
+            .is_some_and(|path| !super::oauth_signing::valid_path(path))
+        {
+            return Err(
+                "oauth.refresh_token_retry_key_file must be an absolute path of at most 4096 UTF-8 bytes without controls",
+            );
         }
         if self.enabled && self.issuer.is_none() {
             return Err("oauth.issuer is required when OAuth is enabled");

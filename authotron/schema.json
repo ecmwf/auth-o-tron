@@ -1345,6 +1345,14 @@
             }
           ],
           "default": null
+        },
+        "refresh_token_retry_key_file": {
+          "description": "File holding 32 bytes of standard Base64, the same on every replica, mixed into\nthe key that seals each rotated refresh token for retries. Required when a client\nenables refresh tokens and the browser-session backend is Valkey; without it, a\nmemory store uses a random key per process.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         }
       },
       "additionalProperties": false
@@ -1747,7 +1755,8 @@
             "clients": [],
             "resources": [],
             "signing": null,
-            "upstream_token_encryption": null
+            "upstream_token_encryption": null,
+            "refresh_token_retry_key_file": null
           }
         }
       },

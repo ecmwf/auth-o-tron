@@ -7,6 +7,7 @@ use axum::{
     http::{Request, StatusCode, header},
     response::Response,
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
 use cookie::Cookie;
 use rsa::{
     RsaPrivateKey,
@@ -434,6 +435,15 @@ async fn disposable_valkey_refresh_rotates_across_replicas() {
         "no",
     ]));
     let (_key, mut config) = fixture();
+    // Every replica holds the same retry key; a replica with another one cannot answer
+    // retries of the others' rotations.
+    let retry_key = |bytes: [u8; 32]| {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(file, "{}", STANDARD.encode(bytes)).unwrap();
+        file
+    };
+    let (shared, other) = (retry_key([1; 32]), retry_key([2; 32]));
+    config.oauth.refresh_token_retry_key_file = Some(shared.path().to_owned());
     config.ui.browser_session.as_mut().unwrap().backend =
         authotron::config::ui::BrowserBackendConfig::Valkey {
             url: format!("redis://{}/0", docker(&["port", &container.0, "6379/tcp"])),
@@ -494,5 +504,15 @@ async fn disposable_valkey_refresh_rotates_across_replicas() {
     let _: usize = kill.query_async(&mut admin).await.unwrap();
     let (status, refreshed) = refresh_as(&b, "desktop", &t5).await;
     assert_eq!(status, StatusCode::OK);
-    refresh_token(&refreshed);
+    let t6 = refresh_token(&refreshed);
+
+    // A replica with another retry key, as while that key changes, cannot open the
+    // successor: the retry fails and the family is kept.
+    let (_other_signing, mut changed) = fixture();
+    changed.ui.browser_session = config.ui.browser_session.clone();
+    changed.oauth.refresh_token_retry_key_file = Some(other.path().to_owned());
+    let (c, _) = startup::build_app(Arc::new(changed)).await.unwrap();
+    error(refresh_as(&c, "desktop", &t5).await, "invalid_grant");
+    let (status, _) = refresh_as(&a, "desktop", &t6).await;
+    assert_eq!(status, StatusCode::OK);
 }

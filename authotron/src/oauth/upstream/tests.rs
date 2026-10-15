@@ -41,7 +41,7 @@ pub(in crate::oauth) struct Coupled {
     pub browser: BrowserLoginState,
     pub auth: Auth,
     pub metrics: Metrics,
-    _files: [NamedTempFile; 3],
+    _files: [NamedTempFile; 4],
 }
 
 /// A disposable Valkey container for the browser-session backend, removed when dropped.
@@ -117,6 +117,7 @@ pub(in crate::oauth) async fn coupled(edit: impl FnOnce(&mut Value)) -> Coupled 
     let signing = file(&rsa_key(1).to_pkcs8_pem(LineEnding::LF).unwrap());
     let secret = file(CLIENT_SECRET);
     let key = file(&STANDARD.encode([5u8; 32]));
+    let retry = file(&STANDARD.encode([4u8; 32]));
     let mut value = json!({
         "store": {"enabled": false}, "services": [], "augmenters": [], "providers": [],
         "server": {"port": 0}, "jwt": {"iss": "fixture", "exp": 300, "secret": "fixture-only"},
@@ -128,6 +129,7 @@ pub(in crate::oauth) async fn coupled(edit: impl FnOnce(&mut Value)) -> Coupled 
         "oauth": {"enabled": true, "issuer": "https://login.example.org/",
             "signing": {"active_kid": "k", "keys": [{"kid": "k", "private_key_file": signing.path()}]},
             "upstream_token_encryption": {"active_kid": "u1", "keys": [{"kid": "u1", "key_file": key.path()}]},
+            "refresh_token_retry_key_file": retry.path(),
             "clients": [{"client_id": "desktop", "display_name": "Desktop", "redirect_uris": ["https://app.example.org/cb"],
                 "resources": [{"resource": RESOURCE, "scopes": ["read"]}],
                 "refresh_tokens": {"enabled": true, "idle_ttl_seconds": 600, "absolute_ttl_seconds": 3600}}],
@@ -150,7 +152,7 @@ pub(in crate::oauth) async fn coupled(edit: impl FnOnce(&mut Value)) -> Coupled 
         browser,
         auth,
         metrics: Metrics::new(),
-        _files: [signing, secret, key],
+        _files: [signing, secret, key, retry],
     }
 }
 

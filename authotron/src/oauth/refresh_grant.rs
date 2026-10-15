@@ -17,6 +17,7 @@ use super::{
         Revocation, Rotated, Rotation, effective_absolute,
     },
     refresh_store::MemoryRefreshStore,
+    retry_key::RetryKey,
     runtime::OAuthRuntime,
     store::RedeemedAuthorization,
     tokens::{TokenError, TokenIssuer, TokenResponse},
@@ -110,6 +111,7 @@ fn method_policy(policy: &RefreshTokenPolicy, method: &BrowserMethod) -> Refresh
 /// latest rotation sealed by that token: a response that was lost, or a concurrent
 /// refresh. A sealed token that does not open to the current one is rejected.
 fn answer_again(
+    retry_key: &RetryKey,
     presented: &RefreshToken,
     family: &RefreshFamily,
     repetition: &Repetition,
@@ -117,7 +119,7 @@ fn answer_again(
     metrics: &Metrics,
 ) -> Result<TokenResponse, RefreshGrantError> {
     let next = presented
-        .open_successor(&family.family_id, &repetition.sealed)
+        .open_successor(retry_key, &family.family_id, &repetition.sealed)
         .filter(|next| next.hash() == repetition.current)
         .ok_or(RefreshGrantError::InvalidGrant)?;
     let reference = family_ref(&family.family_id);
@@ -346,7 +348,8 @@ impl OAuthRuntime {
         if rotated_at.is_some() {
             let repetition = refresh_dispatch!(backend, repeat(&hash, retry_window_ms, now))?
                 .ok_or(InvalidGrant)?;
-            return answer_again(&presented, &family, &repetition, response, metrics);
+            let key = &self.retry_key;
+            return answer_again(key, &presented, &family, &repetition, response, metrics);
         }
         let next = RefreshToken::generate()?;
         // The successor carries the provider roles this refresh started from.
@@ -354,7 +357,7 @@ impl OAuthRuntime {
             provider_roles,
             ..family.grant.clone()
         };
-        let sealed = presented.seal_successor(&family.family_id, &next)?;
+        let sealed = presented.seal_successor(&self.retry_key, &family.family_id, &next)?;
         let rotation = Rotation {
             next: next.hash(),
             sealed: &sealed,
@@ -370,9 +373,14 @@ impl OAuthRuntime {
             }
             // A concurrent refresh of the same token rotated it first, or an earlier run
             // of this rotation did: answer as for a retry.
-            Rotated::Repeated(repetition) => {
-                answer_again(&presented, &family, &repetition, response, metrics)
-            }
+            Rotated::Repeated(repetition) => answer_again(
+                &self.retry_key,
+                &presented,
+                &family,
+                &repetition,
+                response,
+                metrics,
+            ),
             Rotated::Stale => Err(InvalidGrant),
         }
     }
@@ -1006,7 +1014,9 @@ mod tests {
         // Moments ago, but sealed by another token: rejected, the family is kept.
         let (old, next) = rotated(family(&runtime, &grant()).await, now, {
             let other = RefreshToken::generate().unwrap();
-            other.seal_successor("family", &other).unwrap()
+            other
+                .seal_successor(&runtime.retry_key, "family", &other)
+                .unwrap()
         })
         .await;
         assert_eq!(refresh(&old).await.err(), invalid);

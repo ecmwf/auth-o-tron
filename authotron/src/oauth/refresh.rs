@@ -11,12 +11,10 @@
 //! the previous one; the plaintext token leaves only in a response.
 
 use super::records::valid_time;
+use super::retry_key::RetryKey;
 use crate::config::{MAX_REFRESH_RETRY_WINDOW_SECONDS, RefreshTokenPolicy};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use ring::{
-    aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey},
-    hkdf,
-};
+use ring::aead::{Aad, NONCE_LEN, Nonce};
 use rsa::rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -31,8 +29,6 @@ pub const MAX_RETRIES_PER_ROTATION: u32 = 3;
 /// forgotten and, if replayed, are merely unknown (`invalid_grant`, family kept).
 pub const MAX_ROTATED_HASHES: usize = 32;
 pub(super) const MAX_REFRESH_GRANT_BYTES: usize = 32 * 1024;
-/// HKDF salt separating successor keys from any other use of a token.
-const SUCCESSOR_SALT: &[u8] = b"authotron-refresh-successor-v1";
 /// A sealed successor: nonce, the 32 token bytes and the AES-GCM tag.
 const SEALED_SUCCESSOR_BYTES: usize = NONCE_LEN + 32 + 16;
 
@@ -63,26 +59,17 @@ impl RefreshToken {
     pub fn hash(&self) -> [u8; 32] {
         Sha256::digest(self.0.as_bytes()).into()
     }
-    /// The key this token seals its successor in family `family_id` with: HKDF-SHA256
-    /// of the token under a fixed salt, with the family id as info. The store keeps
-    /// only token hashes, so only a holder of this token can derive it.
-    fn successor_key(&self, family_id: &str) -> Result<LessSafeKey, RefreshStoreError> {
-        let secret = hkdf::Salt::new(hkdf::HKDF_SHA256, SUCCESSOR_SALT).extract(self.0.as_bytes());
-        let info = [family_id.as_bytes()];
-        let okm = secret
-            .expand(&info, &AES_256_GCM)
-            .map_err(|_| RefreshStoreError::Unavailable)?;
-        Ok(LessSafeKey::new(UnboundKey::from(okm)))
-    }
     /// `next`, the token that replaces this one, sealed for the family record:
     /// base64url of a fresh nonce, the AES-256-GCM ciphertext of its 32 bytes and the
-    /// tag, 80 characters.
+    /// tag, 80 characters. The key derives from this token, which the store never
+    /// holds, and from the retry key ([`RetryKey::successor_key`]).
     pub fn seal_successor(
         &self,
+        retry_key: &RetryKey,
         family_id: &str,
         next: &RefreshToken,
     ) -> Result<String, RefreshStoreError> {
-        let key = self.successor_key(family_id)?;
+        let key = retry_key.successor_key(&self.0, family_id)?;
         let mut nonce = [0; NONCE_LEN];
         OsRng
             .try_fill_bytes(&mut nonce)
@@ -101,11 +88,16 @@ impl RefreshToken {
         sealed.extend_from_slice(&data);
         Ok(URL_SAFE_NO_PAD.encode(sealed))
     }
-    /// The successor that [`Self::seal_successor`] sealed with this token for
-    /// `family_id`. Valid: the 80 base64url characters it returns. Invalid: another
-    /// length, `=` padding, standard Base64 characters such as `+`, another family or
-    /// token, or any altered character.
-    pub fn open_successor(&self, family_id: &str, sealed: &str) -> Option<RefreshToken> {
+    /// The successor that [`Self::seal_successor`] sealed with this token and retry key
+    /// for `family_id`. Valid: the 80 base64url characters it returns. Invalid: another
+    /// length, `=` padding, standard Base64 characters such as `+`, another family,
+    /// token or retry key, or any altered character.
+    pub fn open_successor(
+        &self,
+        retry_key: &RetryKey,
+        family_id: &str,
+        sealed: &str,
+    ) -> Option<RefreshToken> {
         let bytes = URL_SAFE_NO_PAD.decode(sealed).ok()?;
         if bytes.len() != SEALED_SUCCESSOR_BYTES || URL_SAFE_NO_PAD.encode(&bytes) != sealed {
             return None;
@@ -113,7 +105,7 @@ impl RefreshToken {
         let (nonce, ciphertext) = bytes.split_at(NONCE_LEN);
         let nonce = Nonce::try_assume_unique_for_key(nonce).ok()?;
         let mut data = Zeroizing::new(ciphertext.to_vec());
-        let key = self.successor_key(family_id).ok()?;
+        let key = retry_key.successor_key(&self.0, family_id).ok()?;
         let token = key.open_in_place(nonce, Aad::empty(), &mut data).ok()?;
         Some(Self(URL_SAFE_NO_PAD.encode(token)))
     }
@@ -375,24 +367,28 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn successors_open_only_with_their_predecessor_and_family() {
+    fn successors_open_only_with_their_predecessor_family_and_retry_key() {
+        let key = RetryKey::from_bytes([1; 32]);
         let previous = RefreshToken::generate().unwrap();
         let next = RefreshToken::generate().unwrap();
-        let sealed = previous.seal_successor("family", &next).unwrap();
+        let sealed = previous.seal_successor(&key, "family", &next).unwrap();
         assert_eq!(sealed.len(), 80);
         assert!(!sealed.contains(next.as_secret_str()));
-        let opened = previous.open_successor("family", &sealed).unwrap();
+        let opened = previous.open_successor(&key, "family", &sealed).unwrap();
         assert_eq!(opened.as_secret_str(), next.as_secret_str());
         // A fresh nonce each time; both open to the same token.
-        let again = previous.seal_successor("family", &next).unwrap();
+        let again = previous.seal_successor(&key, "family", &next).unwrap();
         assert_ne!(again, sealed);
-        let reopened = previous.open_successor("family", &again).unwrap();
+        let reopened = previous.open_successor(&key, "family", &again).unwrap();
         assert_eq!(reopened.as_secret_str(), next.as_secret_str());
         let mut bytes = URL_SAFE_NO_PAD.decode(&sealed).unwrap();
         *bytes.last_mut().unwrap() ^= 1;
         let tampered = URL_SAFE_NO_PAD.encode(&bytes);
-        assert!(previous.open_successor("familz", &sealed).is_none());
-        assert!(next.open_successor("family", &sealed).is_none());
+        assert!(previous.open_successor(&key, "familz", &sealed).is_none());
+        assert!(next.open_successor(&key, "family", &sealed).is_none());
+        // The predecessor alone, as a store copy and an old token give, opens nothing.
+        let other = RetryKey::from_bytes([2; 32]);
+        assert!(previous.open_successor(&other, "family", &sealed).is_none());
         for invalid in [
             tampered,
             format!("{sealed}="),
@@ -401,7 +397,7 @@ pub(super) mod tests {
             String::new(),
         ] {
             assert!(
-                previous.open_successor("family", &invalid).is_none(),
+                previous.open_successor(&key, "family", &invalid).is_none(),
                 "{invalid}"
             );
         }

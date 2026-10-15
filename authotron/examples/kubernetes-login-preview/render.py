@@ -99,6 +99,7 @@ SOURCE_FILES = (
     "authotron/src/oauth/refresh_durability.rs",
     "authotron/src/oauth/refresh_grant.rs",
     "authotron/src/oauth/refresh_store.rs",
+    "authotron/src/oauth/retry_key.rs",
     "authotron/src/oauth/runtime.rs",
     "authotron/src/oauth/store.rs",
     "authotron/src/oauth/tokens.rs",

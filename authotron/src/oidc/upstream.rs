@@ -21,7 +21,7 @@ use ring::{
     rand::{SecureRandom, SystemRandom},
 };
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
+use std::{borrow::Cow, path::Path};
 use zeroize::Zeroizing;
 
 /// Upper bound on a sealed token; the plaintext is at most an 8 KiB refresh token.
@@ -96,6 +96,12 @@ pub fn well_formed(sealed: &str) -> bool {
         && sealed.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
+/// A key file: exactly 32 bytes in standard Base64 with padding, read as
+/// [`read_secret_text`] reads secret files. `None` if unreadable or anything else.
+pub(crate) fn read_key_file(path: &Path) -> Option<Zeroizing<[u8; 32]>> {
+    read_secret_text(path, KEY_FILE_BYTES).and_then(|text| decode_key(&text))
+}
+
 /// Exactly 32 bytes in standard Base64 with padding.
 /// Valid: the 44 characters `openssl rand -base64 32` writes. Invalid: the same without
 /// `=` padding, 64 hex digits, or a 16-byte key.
@@ -134,8 +140,7 @@ impl UpstreamCipher {
             .keys
             .iter()
             .map(|key| {
-                read_secret_text(&key.key_file, KEY_FILE_BYTES)
-                    .and_then(|text| decode_key(&text))
+                read_key_file(&key.key_file)
                     .map(|bytes| (key.kid.clone(), bytes))
                     .ok_or_else(|| {
                         format!(

@@ -19,6 +19,7 @@ pub mod refresh;
 mod refresh_durability;
 pub mod refresh_grant;
 pub mod refresh_store;
+pub mod retry_key;
 pub mod runtime;
 pub mod store;
 pub mod tokens;
