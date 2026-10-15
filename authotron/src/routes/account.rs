@@ -60,6 +60,22 @@ async fn page(State(state): State<AppState>, uri: Uri, headers: HeaderMap) -> Re
         Ok(None) => return private_response(Redirect::to("/login").into_response()),
         Err(error) => return unavailable(error),
     };
+    let form_nonce = cookie_value(&headers, FORM_COOKIE)
+        .filter(|value| crate::browser::valid_id(value))
+        .unwrap_or_else(crate::browser::opaque_id);
+    // Without a form (forms limited or the store failing) the identity is still shown.
+    let csrf = match state.browser.account_form(&form_nonce).await {
+        Ok(csrf) => Some(csrf),
+        Err(error) => {
+            tracing::warn!(
+                event_name = "browser.account.forms_unavailable",
+                event_domain = "browser",
+                ?error,
+                "account page shows no forms: none could be issued"
+            );
+            None
+        }
+    };
     // A store failure hides only the logins, so that signing out still works.
     let logins = match state.oauth.as_deref().filter(|oauth| oauth.has_logins()) {
         Some(runtime) => {
@@ -76,13 +92,6 @@ async fn page(State(state): State<AppState>, uri: Uri, headers: HeaderMap) -> Re
             Some((runtime, logins.ok()))
         }
         None => None,
-    };
-    let form_nonce = cookie_value(&headers, FORM_COOKIE)
-        .filter(|value| crate::browser::valid_id(value))
-        .unwrap_or_else(crate::browser::opaque_id);
-    let csrf = match state.browser.account_form(&form_nonce).await {
-        Ok(csrf) => csrf,
-        Err(error) => return unavailable(error),
     };
     let expiry = session.expires_at_utc;
     let page = private_page(
@@ -110,23 +119,31 @@ async fn page(State(state): State<AppState>, uri: Uri, headers: HeaderMap) -> Re
             }
             p class="login-card-detail" { "Session expires at " (expiry.to_rfc3339()) ". Next sign-in requires verifying your identity again; there is no automatic refresh." }
             p class="login-card-detail" { "This session displays your Auth-O-Tron identity. Application sign-in handoff is separate." }
-            form class="key-form" method="post" action="/login/logout" {
-                input type="hidden" name="csrf" value=(csrf);
-                button class="login-action" type="submit" { "Sign out" }
+            @if let Some(csrf) = &csrf {
+                (sign_out_form(csrf))
+            } @else {
+                p class="login-card-message" role="status" { "Signing out and revoking logins are unavailable right now; reload this page to try again." }
             }
             @if let Some((runtime, logins)) = &logins {
-                (logins_section(&state, runtime, logins.as_deref(), &csrf))
+                (logins_section(&state, runtime, logins.as_deref(), csrf.as_deref()))
             }
         },
     );
     let mut response = private_response(Html(page).into_response());
-    set_cookie(
-        &mut response,
-        FORM_COOKIE,
-        form_nonce,
-        state.browser.transaction_ttl(),
-    );
+    if csrf.is_some() {
+        let ttl = state.browser.transaction_ttl();
+        set_cookie(&mut response, FORM_COOKIE, form_nonce, ttl);
+    }
     response
+}
+
+fn sign_out_form(csrf: &str) -> Markup {
+    html! {
+        form class="key-form" method="post" action="/login/logout" {
+            input type="hidden" name="csrf" value=(csrf);
+            button class="login-action" type="submit" { "Sign out" }
+        }
+    }
 }
 
 /// `ms` as an element `<time datetime="2026-10-15T13:12:42Z">2026-10-15 13:12 UTC</time>`.
@@ -146,12 +163,13 @@ fn time(ms: u64) -> Markup {
 
 /// "Your logins": each login with its client's display name, the label of its sign-in
 /// method (or the configured ids, if they were removed), its times and short reference,
-/// and a revoke form; then one form revoking them all. `None` when the store failed.
+/// and a revoke form; then one form revoking them all. `logins` is `None` when the store
+/// failed; without `csrf` there are no forms.
 fn logins_section(
     state: &AppState,
     runtime: &OAuthRuntime,
     logins: Option<&[FamilySummary]>,
-    csrf: &str,
+    csrf: Option<&str>,
 ) -> Markup {
     let client = |id: &str| {
         let client = runtime.config.clients.iter().find(|c| c.client_id == id);
@@ -185,19 +203,23 @@ fn logins_section(
                                 dt { "Expires at the latest" } dd { (time(login.absolute_expires_at_ms)) }
                                 dt { "Reference" } dd { code { (reference) } }
                             }
-                            form class="key-form" method="post" action=(REVOKE_PATH) {
-                                input type="hidden" name="csrf" value=(csrf);
-                                input type="hidden" name="login" value=(reference);
-                                button class="login-action" type="submit"
-                                    aria-label=(format!("Revoke the login of {name}, reference {reference}")) { "Revoke" }
+                            @if let Some(csrf) = csrf {
+                                form class="key-form" method="post" action=(REVOKE_PATH) {
+                                    input type="hidden" name="csrf" value=(csrf);
+                                    input type="hidden" name="login" value=(reference);
+                                    button class="login-action" type="submit"
+                                        aria-label=(format!("Revoke the login of {name}, reference {reference}")) { "Revoke" }
+                                }
                             }
                         }
                     }
                 }
-                form class="key-form" method="post" action=(REVOKE_PATH) {
-                    input type="hidden" name="csrf" value=(csrf);
-                    input type="hidden" name="login" value="all";
-                    button class="login-action" type="submit" { "Revoke all logins" }
+                @if let Some(csrf) = csrf {
+                    form class="key-form" method="post" action=(REVOKE_PATH) {
+                        input type="hidden" name="csrf" value=(csrf);
+                        input type="hidden" name="login" value="all";
+                        button class="login-action" type="submit" { "Revoke all logins" }
+                    }
                 }
             } @else if logins.is_some() {
                 p class="login-card-detail" { "No application is signed in." }

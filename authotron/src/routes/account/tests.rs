@@ -145,6 +145,23 @@ async fn signing_out_ends_the_session_and_clears_its_cookie() {
 }
 
 #[tokio::test]
+async fn without_an_account_form_the_identity_is_still_shown() {
+    // The sign-in form spends the only form of the window.
+    let fixture = fixture(|config| {
+        config["ui"]["browser_session"]["max_forms_per_window"] = 1.into();
+    })
+    .await;
+    let jar = signed_in(&fixture).await;
+    let response = get(&fixture.app, "/login/account", &jar).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get(header::SET_COOKIE).is_none());
+    let html = text(response).await;
+    assert!(html.contains("<dt>Username</dt><dd>alice</dd>"));
+    assert!(html.contains("Signing out and revoking logins are unavailable right now"));
+    assert!(!html.contains("<form"));
+}
+
+#[tokio::test]
 async fn sign_out_refuses_forged_requests_and_keeps_the_session() {
     let fixture = fixture(|_| {}).await;
     let mut jar = signed_in(&fixture).await;
@@ -441,7 +458,7 @@ async fn logins_of_other_users_and_forged_forms_are_never_revoked() {
 async fn a_store_failure_hides_only_the_logins() {
     let (fixture, _files) = offline_fixture(true).await;
     let runtime = fixture.state.oauth.as_ref().unwrap();
-    let section = super::logins_section(&fixture.state, runtime, None, "csrf").into_string();
+    let section = super::logins_section(&fixture.state, runtime, None, Some("csrf")).into_string();
     assert!(section.contains("Your logins cannot be shown right now"));
     assert!(!section.contains("<form"));
 }

@@ -89,6 +89,7 @@ The account page and its forms log store failures at WARN with the error kind on
 
 | Event | Meaning |
 |-------|---------|
+| `browser.account.forms_unavailable` | No account form could be issued (forms limited or the store failing); the page shows the identity without forms |
 | `browser.account.logins_unavailable` | The refresh-token store could not list the user's logins; the page shows Sign out without them |
 | `browser.account.revoke_failed` | Revoking logins failed, possibly after some were revoked; the form answers 503 |
 | `browser.account.sign_out_failed` | The session store did not end the session; the form answers 503 |
