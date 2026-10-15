@@ -29,6 +29,7 @@ use crate::{
 };
 use std::{sync::Arc, time::Duration};
 use tracing::Instrument;
+use zeroize::Zeroizing;
 
 /// How long a refresh waits for another replica's upstream refresh of the same family.
 const LOCK_WAIT: Duration = Duration::from_secs(2);
@@ -212,10 +213,18 @@ impl OAuthRuntime {
                 return Ok(Outcome::Unavailable);
             }
         };
-        if let Some(rotated) = refreshed.refresh_token {
+        // A rotated upstream token must be stored. A kept one is stored again only while
+        // an older key seals it, so that key can be retired; failing that, it stays
+        // usable under the older key, and the next refresh tries again.
+        let rotated = refreshed.refresh_token.is_some();
+        let replacement = refreshed.refresh_token.or_else(|| {
+            (!upstream.cipher.sealed_with_active(&state.sealed))
+                .then(|| Zeroizing::new(opened.refresh_token().to_owned()))
+        });
+        if let Some(token) = replacement {
             let sealed = upstream
                 .cipher
-                .seal(&binding, &UpstreamGrant::new(opened.subject(), rotated));
+                .seal(&binding, &UpstreamGrant::new(opened.subject(), token));
             let stored = match sealed {
                 Ok(sealed) => refresh_dispatch!(
                     backend,
@@ -223,18 +232,31 @@ impl OAuthRuntime {
                 ),
                 Err(_) => Ok(UpstreamStored::Stale),
             };
-            if !matches!(stored, Ok(UpstreamStored::Stored)) {
-                family_event!(
-                    error,
-                    grant,
-                    family,
-                    event_name = "oauth.upstream.rotation_lost",
-                    "rotated upstream refresh token could not be stored"
-                );
-                metrics.record_upstream_token(UpstreamTokenEvent::RotationLost);
-                return Ok(Outcome::Unavailable);
+            match (matches!(stored, Ok(UpstreamStored::Stored)), rotated) {
+                (true, true) => metrics.record_upstream_token(UpstreamTokenEvent::Rotated),
+                (true, false) => metrics.record_upstream_token(UpstreamTokenEvent::Resealed),
+                (false, true) => {
+                    family_event!(
+                        error,
+                        grant,
+                        family,
+                        event_name = "oauth.upstream.rotation_lost",
+                        "rotated upstream refresh token could not be stored"
+                    );
+                    metrics.record_upstream_token(UpstreamTokenEvent::RotationLost);
+                    return Ok(Outcome::Unavailable);
+                }
+                (false, false) => {
+                    family_event!(
+                        warn,
+                        grant,
+                        family,
+                        event_name = "oauth.upstream.reseal_failed",
+                        "upstream refresh token not resealed under the active key"
+                    );
+                    metrics.record_upstream_token(UpstreamTokenEvent::ResealFailed);
+                }
             }
-            metrics.record_upstream_token(UpstreamTokenEvent::Rotated);
         }
         Ok(match refreshed.identity {
             Ok(Some((subject, user)))

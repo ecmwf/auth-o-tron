@@ -220,6 +220,11 @@ pub enum UpstreamTokenEvent {
     Refreshed,
     /// The provider rotated the upstream refresh token and the new one was stored.
     Rotated,
+    /// The provider kept the upstream refresh token, which was sealed under an older
+    /// key and is now stored sealed under the active one.
+    Resealed,
+    /// That token could not be stored again; it stays under the older key.
+    ResealFailed,
     /// The provider refused the upstream grant, or it could not be opened: family revoked.
     InvalidGrant,
     /// The refreshed identity no longer matches the family: family and grant revoked.
@@ -238,9 +243,11 @@ pub enum UpstreamTokenEvent {
     RevocationSkipped,
 }
 impl UpstreamTokenEvent {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 12] = [
         Self::Refreshed,
         Self::Rotated,
+        Self::Resealed,
+        Self::ResealFailed,
         Self::InvalidGrant,
         Self::IdentityChanged,
         Self::Unavailable,
@@ -254,6 +261,8 @@ impl UpstreamTokenEvent {
         match self {
             Self::Refreshed => "refreshed",
             Self::Rotated => "rotated",
+            Self::Resealed => "resealed",
+            Self::ResealFailed => "reseal_failed",
             Self::InvalidGrant => "invalid_grant",
             Self::IdentityChanged => "identity_changed",
             Self::Unavailable => "unavailable",
@@ -707,6 +716,8 @@ mod tests {
         let output = metrics.render().unwrap();
         for (event, value) in [
             ("refreshed", 0),
+            ("resealed", 0),
+            ("reseal_failed", 0),
             ("rotation_lost", 0),
             ("revocation_sent", 0),
             ("revocation_unsupported", 0),

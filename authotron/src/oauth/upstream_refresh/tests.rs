@@ -14,10 +14,11 @@ use crate::{
         refresh::RefreshToken,
         upstream::tests::{Coupled, coupled},
     },
-    oidc::mock::SUBJECT,
+    oidc::{mock::SUBJECT, upstream::UpstreamCipher},
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::json;
-use std::{sync::atomic::Ordering, time::Duration};
+use std::{io::Write, sync::atomic::Ordering, time::Duration};
 
 /// The upstream refresh token the family of `token` currently holds.
 async fn held(coupled: &Coupled, token: &RefreshToken) -> String {
@@ -332,4 +333,115 @@ async fn a_cancelled_refresh_still_stores_the_rotation_and_releases_the_lock() {
     assert_ne!(rotated, original);
     assert!(state.refresh_token_live(&rotated));
     coupled.refresh(&token).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_kept_upstream_token_under_an_older_key_is_resealed_under_the_active_one() {
+    let mut second = tempfile::NamedTempFile::new().unwrap();
+    write!(second, "{}", STANDARD.encode([6u8; 32])).unwrap();
+    let coupled = coupled(|config| {
+        let encryption = &mut config["oauth"]["upstream_token_encryption"];
+        let keys = encryption["keys"].as_array_mut().unwrap();
+        keys.push(json!({"kid": "u2", "key_file": second.path()}));
+        encryption["active_kid"] = json!("u2");
+    })
+    .await;
+    let state = &coupled.idp.state;
+    state.rotate_refresh_tokens.store(false, Ordering::SeqCst);
+    // A grant sealed under `u1` before `u2` became active.
+    let upstream = state.offline_token(SUBJECT);
+    let before =
+        UpstreamCipher::from_keys("u1", vec![("u1".into(), Zeroizing::new([5u8; 32]))]).unwrap();
+    let method = coupled.browser.method("sso").unwrap().oidc().unwrap();
+    let grant = UpstreamGrant::new(SUBJECT, Zeroizing::new(upstream.clone()));
+    let sealed = before
+        .seal(&binding(&coupled.grant(), method), &grant)
+        .unwrap();
+    let Some(RefreshBackend::Memory(store)) = &coupled.runtime.refresh else {
+        unreachable!()
+    };
+    let now = coupled.runtime.now().await.unwrap();
+    let token = RefreshToken::generate().unwrap();
+    let policy = &coupled.config.oauth.clients[0].refresh_tokens;
+    store
+        .issue(&coupled.grant(), token.hash(), now, policy, Some(&sealed))
+        .await
+        .unwrap();
+    let runtime = &coupled.runtime;
+    let stored = |token: RefreshToken| async move {
+        let now = runtime.now().await.unwrap();
+        match store.lookup(&token.hash(), now).await.unwrap() {
+            Presented::Current(family) => (token, family.upstream.unwrap()),
+            other => panic!("expected a live family, got {other:?}"),
+        }
+    };
+    // The provider keeps its token; it is stored again, sealed under the active key.
+    let (next, resealed) = stored(coupled.refresh(&token).await.unwrap()).await;
+    assert!(resealed.sealed.starts_with("v1.u2.") && resealed.generation == 1);
+    assert_eq!(held(&coupled, &next).await, upstream);
+    assert_eq!(coupled.upstream_events("resealed"), 1);
+    assert_eq!(coupled.upstream_events("rotated"), 0);
+    // Under the active key already, a kept token is left as it is.
+    let (_, kept) = stored(coupled.refresh(&next).await.unwrap()).await;
+    assert_eq!(kept, resealed);
+    assert_eq!(coupled.upstream_events("resealed"), 1);
+}
+
+#[tokio::test]
+#[tracing_test::traced_test]
+async fn a_failed_reseal_is_reported_and_keeps_the_grant_under_its_old_key() {
+    let mut second = tempfile::NamedTempFile::new().unwrap();
+    write!(second, "{}", STANDARD.encode([6u8; 32])).unwrap();
+    let coupled = coupled(|config| {
+        let encryption = &mut config["oauth"]["upstream_token_encryption"];
+        let keys = encryption["keys"].as_array_mut().unwrap();
+        keys.push(json!({"kid": "u2", "key_file": second.path()}));
+        encryption["active_kid"] = json!("u2");
+    })
+    .await;
+    let state = &coupled.idp.state;
+    state.rotate_refresh_tokens.store(false, Ordering::SeqCst);
+    let upstream = state.offline_token(SUBJECT);
+    let before =
+        UpstreamCipher::from_keys("u1", vec![("u1".into(), Zeroizing::new([5u8; 32]))]).unwrap();
+    let method = coupled.browser.method("sso").unwrap().oidc().unwrap();
+    let grant = coupled.grant();
+    let binding = binding(&grant, method);
+    let seal = || {
+        let grant = UpstreamGrant::new(SUBJECT, Zeroizing::new(upstream.clone()));
+        before.seal(&binding, &grant).unwrap()
+    };
+    let Some(RefreshBackend::Memory(store)) = &coupled.runtime.refresh else {
+        unreachable!()
+    };
+    let now = coupled.runtime.now().await.unwrap();
+    let token = RefreshToken::generate().unwrap();
+    let policy = &coupled.config.oauth.clients[0].refresh_tokens;
+    store
+        .issue(&coupled.grant(), token.hash(), now, policy, Some(&seal()))
+        .await
+        .unwrap();
+    let Presented::Current(family) = store.lookup(&token.hash(), now).await.unwrap() else {
+        panic!("expected a live family");
+    };
+    // While the provider answers slowly, the stored grant changes generation, so the
+    // reseal no longer applies.
+    state.token_delay_ms.store(300, Ordering::SeqCst);
+    let replaced = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        store
+            .set_upstream(&family.family_id, 0, &seal(), now)
+            .await
+            .unwrap()
+    };
+    let (refreshed, replaced) = tokio::join!(coupled.refresh(&token), replaced);
+    assert_eq!(replaced, UpstreamStored::Stored);
+    let next = refreshed.unwrap();
+    assert_eq!(coupled.upstream_events("reseal_failed"), 1);
+    assert_eq!(coupled.upstream_events("resealed"), 0);
+    assert!(logs_contain("oauth.upstream.reseal_failed"));
+    let Presented::Current(family) = store.lookup(&next.hash(), now).await.unwrap() else {
+        panic!("expected a live family");
+    };
+    assert!(family.upstream.unwrap().sealed.starts_with("v1.u1."));
 }

@@ -170,6 +170,17 @@ impl UpstreamCipher {
         })
     }
 
+    /// Whether `sealed` names the active key id, without opening it.
+    /// Valid: `v1.upstream.2.<base64url>` under active key `upstream.2`. Not sealed with
+    /// the active key: `v1.upstream.1.<base64url>`, `v2.upstream.2.<base64url>`, `v1.x`.
+    pub fn sealed_with_active(&self, sealed: &str) -> bool {
+        sealed
+            .strip_prefix(FORMAT)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .and_then(|rest| rest.rsplit_once('.'))
+            .is_some_and(|(kid, _)| kid == self.active)
+    }
+
     fn key(&self, kid: &str) -> Option<&LessSafeKey> {
         self.keys
             .iter()
@@ -356,6 +367,17 @@ pub(crate) mod tests {
         );
         let removed = cipher("upstream.2", &["upstream.2"]);
         assert!(removed.open(&binding(), &sealed).is_err());
+        assert!(old.sealed_with_active(&sealed) && !rotated.sealed_with_active(&sealed));
+        let resealed = rotated.seal(&binding(), &grant()).unwrap();
+        assert!(rotated.sealed_with_active(&resealed));
+        let payload = resealed.rsplit_once('.').unwrap().1;
+        for other in [
+            format!("v2.upstream.2.{payload}"),
+            format!("v1.upstream.{payload}"),
+            "v1.upstream.2".into(),
+        ] {
+            assert!(!rotated.sealed_with_active(&other), "{other}");
+        }
         // Escaped characters round-trip too.
         let quoted = UpstreamGrant::new(r#"a"b"#, Zeroizing::new(r#"t\"k"#.into()));
         let resealed = rotated.seal(&binding(), &quoted).unwrap();
