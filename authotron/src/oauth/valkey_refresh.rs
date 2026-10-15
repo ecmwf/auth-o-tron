@@ -90,7 +90,10 @@ fn stored_hash(value: &[u8]) -> Result<[u8; 32], RefreshStoreError> {
         .try_into()
         .map_err(|_| RefreshStoreError::Unavailable)
 }
-/// A `repeated` reply: `current, sealed, retries, streak`; anything else is `None`.
+/// A `repeated` reply `current, sealed, retries, streak` as a repetition, and `stale` or
+/// `missing` as `None`. Valid: `repeated, <43-character hash>, <sealed>, 1, 1`, `stale`.
+/// Invalid, an error: `repeated` with three values, a count such as `-1` or `x`, a hash
+/// that is not canonical, or any other status.
 fn repetition(values: &[Vec<u8>]) -> Result<Option<Box<Repetition>>, RefreshStoreError> {
     let count = |bytes| u32::try_from(number(bytes)?).map_err(|_| RefreshStoreError::Unavailable);
     match values {

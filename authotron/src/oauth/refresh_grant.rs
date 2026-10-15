@@ -748,7 +748,7 @@ mod tests {
         let second = next(second.await.unwrap());
         let third = runtime.refresh(request(&second), &granting, &browser, &metrics);
         next(third.await.unwrap());
-        // The first token is neither current nor the grace predecessor: reuse.
+        // The first token is neither current nor the previous one: reuse.
         assert!(
             runtime
                 .refresh(request(&first), &granting, &browser, &metrics)

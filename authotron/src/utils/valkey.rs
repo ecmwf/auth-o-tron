@@ -238,10 +238,10 @@ impl ValkeyConnection {
     /// and revocations are idempotent, and one-use transitions (code issue and
     /// redemption, transaction transitions, form consumption, refresh rotation) compare
     /// against the state they expect, so a second run finds it consumed and reports
-    /// missing or stale; a second refresh rotation answers its own rotation again
-    /// within the retry window. Effects happen at most once: a lost reply can turn a
-    /// success into a definite failure, and quota or budget counters may count one
-    /// extra attempt.
+    /// missing or stale; a second refresh rotation finds its own rotation applied and
+    /// reports it done. Effects happen at most once: a lost reply can turn a success
+    /// into a definite failure, and quota or budget counters may count one extra
+    /// attempt.
     ///
     /// A command that times out after it was sent has an unknown outcome and is never
     /// resent. Its connection may be dead without having been closed (a crashed node,

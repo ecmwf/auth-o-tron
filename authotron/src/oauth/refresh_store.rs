@@ -628,7 +628,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn older_ancestors_are_reuse_even_within_grace() {
+    async fn older_ancestors_are_reuse_even_within_the_retry_window() {
         let store = MemoryRefreshStore::new(50);
         store
             .issue(&grant(), [1; 32], NOW, &policy(), None)
