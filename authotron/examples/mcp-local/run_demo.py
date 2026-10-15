@@ -95,11 +95,18 @@ class UsageError(ValueError):
 
 
 def check_ports(ports=LOCAL_PORTS) -> None:
+    """Raises OSError if another socket listens on one of `ports`.
+
+    Connections of an earlier run waiting in TIME_WAIT do not count: on POSIX the probe
+    binds with SO_REUSEADDR, as the servers do, which still refuses a listened port.
+    """
     sockets = []
     try:
         for port in ports:
             sock = socket.socket()
             sockets.append(sock)
+            if os.name == "posix":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(("127.0.0.1", port))
     finally:
         for sock in sockets:

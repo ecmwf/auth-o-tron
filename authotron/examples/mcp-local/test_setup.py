@@ -296,6 +296,20 @@ class NetworkTests(unittest.IsolatedAsyncioTestCase):
     os.environ.get("AUTHOTRON_DEMO_BIN"), "set AUTHOTRON_DEMO_BIN for process smoke test"
 )
 class ProcessTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "TIME_WAIT reuse is POSIX behaviour")
+    def test_port_check_ignores_time_wait_but_not_listeners(self):
+        with socket.create_server(("127.0.0.1", 0)) as listener:
+            port = listener.getsockname()[1]
+            with self.assertRaises(OSError):
+                run_demo.check_ports((port,))
+            client = socket.create_connection(("127.0.0.1", port))
+            accepted, _ = listener.accept()
+            # The server side closes first, so its end waits in TIME_WAIT.
+            accepted.close()
+            client.recv(1)
+            client.close()
+        run_demo.check_ports((port,))
+
     def test_startup_timeout_stops_children(self):
         with tempfile.TemporaryDirectory(prefix="authotron-timeout-") as temp:
             runtime = setup.prepare(Path(temp) / "runtime")
