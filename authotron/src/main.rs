@@ -45,8 +45,13 @@ async fn main() {
 
 /// `authotron admin ...`, whose exit status is 0 when done, 1 when it failed and 2 for
 /// invalid arguments. The report goes to standard output and the log to standard error.
+/// Help and invalid arguments are answered before the configuration is loaded.
 async fn run_admin(args: &[String]) -> i32 {
     let command = match admin::parse(args) {
+        Ok(admin::Command::Help) => {
+            println!("{}", admin::USAGE);
+            return 0;
+        }
         Ok(command) => command,
         Err(error) => {
             eprintln!("authotron admin: {error}\n{}", admin::USAGE);
