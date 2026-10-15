@@ -32,6 +32,18 @@ fn second_client(config: &mut Value) {
 /// Starts a family of `username` in `realm` for `client`, coupled to a live offline
 /// token at the provider when the realm is the method's. Returns the upstream token.
 async fn login(coupled: &Coupled, realm: &str, username: &str, client: &str) -> Option<String> {
+    let now = coupled.runtime.now().await.unwrap();
+    login_at(coupled, realm, username, client, now).await
+}
+
+/// The same, started at `now_ms`.
+async fn login_at(
+    coupled: &Coupled,
+    realm: &str,
+    username: &str,
+    client: &str,
+    now_ms: u64,
+) -> Option<String> {
     let grant = RefreshGrant {
         realm: realm.into(),
         username: username.into(),
@@ -42,12 +54,11 @@ async fn login(coupled: &Coupled, realm: &str, username: &str, client: &str) -> 
     let upstream = (realm == "idp").then(|| coupled.idp.state.offline_token(SUBJECT));
     let sealed = upstream.as_ref().map(|token| coupled.seal(&grant, token));
     let backend = coupled.runtime.refresh.as_ref().unwrap();
-    let now = coupled.runtime.now().await.unwrap();
     let policy = &coupled.config.oauth.clients[0].refresh_tokens;
     let token = RefreshToken::generate().unwrap();
     refresh_dispatch!(
         backend,
-        issue(&grant, token.hash(), now, policy, sealed.as_deref())
+        issue(&grant, token.hash(), now_ms, policy, sealed.as_deref())
     )
     .unwrap();
     upstream
@@ -170,9 +181,12 @@ async fn disposable_valkey_the_admin_command_lists_dry_runs_and_revokes_a_realm(
         second_client(config);
     })
     .await;
-    let alice = login(&coupled, "idp", "alice", "desktop").await.unwrap();
-    let bob = login(&coupled, "idp", "bob", "cli").await.unwrap();
-    login(&coupled, "other", "carol", "desktop").await;
+    // A millisecond apart, so that the order does not rest on a tie.
+    let now = coupled.runtime.now().await.unwrap();
+    let alice = login_at(&coupled, "idp", "alice", "desktop", now - 2).await;
+    let bob = login_at(&coupled, "idp", "bob", "cli", now - 1).await;
+    login_at(&coupled, "other", "carol", "desktop", now).await;
+    let (alice, bob) = (alice.unwrap(), bob.unwrap());
     let config = &coupled.config;
     let (result, listed) = command(config, "logins list --realm idp").await;
     result.unwrap();
