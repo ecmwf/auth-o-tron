@@ -218,10 +218,8 @@ mod tests {
         assert!(state.admitted(async { Ok(user()) }).await.is_ok());
     }
 
-    /// Run explicitly: cargo test -p authotron disposable_valkey -- --ignored --test-threads=1.
-    #[tokio::test]
-    #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
-    async fn disposable_valkey_atomic_cross_replica_expiry_quota_leases_and_outage() {
+    /// A disposable Valkey container and its URL, once it accepts connections.
+    async fn disposable(prefix: &str) -> (Fixture, String) {
         let fixture = Fixture(docker(&[
             "run",
             "--rm",
@@ -239,17 +237,68 @@ mod tests {
         ]));
         let address = docker(&["port", &fixture.0, "6379/tcp"]);
         let url = format!("redis://{address}/0");
-        let prefix = "authotron:browser:test";
         let settings = config(&url, prefix).ui.browser_session.unwrap().backend;
-        let mut ready = false;
         for _ in 0..100 {
             if Valkey::connect(&settings).await.is_ok() {
-                ready = true;
-                break;
+                return (fixture, url);
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(ready, "disposable Valkey did not become ready");
+        panic!("disposable Valkey did not become ready");
+    }
+
+    /// Run explicitly: cargo test -p authotron disposable_valkey -- --ignored --test-threads=1.
+    #[tokio::test]
+    #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+    async fn disposable_valkey_account_forms_and_ended_sessions_hold_across_replicas() {
+        let prefix = "authotron:browser:test";
+        let (_fixture, url) = disposable(prefix).await;
+        let (a, b) = (state(&url, prefix).await, state(&url, prefix).await);
+        let form_nonce = opaque_id();
+        let token = a.account_form(&form_nonce).await.unwrap();
+        // An account form is never a sign-in form of a method, whatever its id.
+        for flow in [
+            LoginFlow::basic("self"),
+            LoginFlow::api_key("self"),
+            LoginFlow::oidc("self"),
+        ] {
+            assert!(
+                !b.consume_with_nonce(&token, &form_nonce, &flow)
+                    .await
+                    .unwrap()
+            );
+        }
+        assert!(!b.consume_account_form(&token, &opaque_id()).await.unwrap());
+        assert!(b.consume_account_form(&token, &form_nonce).await.unwrap());
+        assert!(!a.consume_account_form(&token, &form_nonce).await.unwrap());
+        let sign_in = a
+            .form_with_nonce(&LoginFlow::basic("password"), &form_nonce)
+            .await
+            .unwrap();
+        assert!(!b.consume_account_form(&sign_in, &form_nonce).await.unwrap());
+
+        let sid = a.save_session(user(), None, None).await.unwrap();
+        assert!(b.lookup(&sid).await.unwrap().is_some());
+        b.end_session(&sid).await.unwrap();
+        assert!(a.lookup(&sid).await.unwrap().is_none());
+        let backend = a.valkey.as_ref().unwrap();
+        let key = format!("{prefix}:v3:session:{sid}");
+        assert_eq!(command::<usize>(backend, "EXISTS", &[&key]).await, 0);
+        let sessions = format!("{prefix}:v3:sessions");
+        assert_eq!(command::<usize>(backend, "ZCARD", &[&sessions]).await, 0);
+        // Ending it again, or a session that never existed, succeeds without effect.
+        a.end_session(&sid).await.unwrap();
+        a.end_session(&opaque_id()).await.unwrap();
+        // The freed slot admits the next session (max_sessions is 1).
+        a.save_session(user(), None, None).await.unwrap();
+    }
+
+    /// Run explicitly: cargo test -p authotron disposable_valkey -- --ignored --test-threads=1.
+    #[tokio::test]
+    #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+    async fn disposable_valkey_atomic_cross_replica_expiry_quota_leases_and_outage() {
+        let prefix = "authotron:browser:test";
+        let (fixture, url) = disposable(prefix).await;
         let a = state(&url, prefix).await;
         let b = state(&url, prefix).await;
         let backend = a.valkey.as_ref().unwrap();

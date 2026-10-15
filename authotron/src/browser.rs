@@ -274,8 +274,13 @@ impl Quota {
 struct FormTransaction {
     csrf: String,
     expires: Instant,
-    flow: LoginFlow,
+    /// [`LoginFlow::tag`] or [`ACCOUNT_FORM_TAG`].
+    tag: String,
 }
+
+/// Stored tag of the account page's forms. Sign-in tags start with `basic:`, `key:` or
+/// `oidc:`, so no sign-in form can be consumed as an account form or the reverse.
+const ACCOUNT_FORM_TAG: &str = "account:self";
 
 #[derive(Clone)]
 pub struct BrowserSession {
@@ -436,7 +441,7 @@ impl BrowserLoginState {
     /// Unbound transaction for backend unit tests; production forms always carry a nonce.
     #[cfg(test)]
     pub async fn form(&self, flow: &LoginFlow) -> Result<(String, String), BrowserVerifyError> {
-        self.create_transaction(flow, None).await
+        self.create_transaction(flow.tag(), None).await
     }
 
     /// Creates a transaction tied to the form-nonce cookie and returns the combined
@@ -446,13 +451,30 @@ impl BrowserLoginState {
         flow: &LoginFlow,
         form_nonce: &str,
     ) -> Result<String, BrowserVerifyError> {
-        let (sid, challenge) = self.create_transaction(flow, Some(form_nonce)).await?;
+        self.token_with_nonce(flow.tag(), form_nonce).await
+    }
+
+    /// The same for the forms of the account page, which share one transaction.
+    pub(crate) async fn account_form(
+        &self,
+        form_nonce: &str,
+    ) -> Result<String, BrowserVerifyError> {
+        self.token_with_nonce(ACCOUNT_FORM_TAG.into(), form_nonce)
+            .await
+    }
+
+    async fn token_with_nonce(
+        &self,
+        tag: String,
+        form_nonce: &str,
+    ) -> Result<String, BrowserVerifyError> {
+        let (sid, challenge) = self.create_transaction(tag, Some(form_nonce)).await?;
         Ok(format!("{sid}.{challenge}"))
     }
 
     async fn create_transaction(
         &self,
-        flow: &LoginFlow,
+        tag: String,
         form_nonce: Option<&str>,
     ) -> Result<(String, String), BrowserVerifyError> {
         let csrf = opaque_id();
@@ -469,7 +491,7 @@ impl BrowserLoginState {
                     "form".into(),
                     sid.clone(),
                     stored_csrf,
-                    flow.tag(),
+                    tag,
                     (s.transaction_ttl_seconds * 1000).to_string(),
                     s.max_forms.to_string(),
                     s.max_forms_per_window.to_string(),
@@ -509,7 +531,7 @@ impl BrowserLoginState {
                 sid.clone(),
                 FormTransaction {
                     csrf: stored_csrf,
-                    flow: flow.clone(),
+                    tag,
                     expires: now + Duration::from_secs(self.transaction_ttl()),
                 },
             );
@@ -519,24 +541,34 @@ impl BrowserLoginState {
 
     /// Compares the stored challenge directly; production callers go through
     /// [`Self::consume_with_nonce`].
+    #[cfg(test)]
     async fn consume(
         &self,
         sid: &str,
         csrf: &str,
         flow: &LoginFlow,
     ) -> Result<bool, BrowserVerifyError> {
+        self.consume_tagged(sid, csrf, &flow.tag()).await
+    }
+
+    async fn consume_tagged(
+        &self,
+        sid: &str,
+        csrf: &str,
+        tag: &str,
+    ) -> Result<bool, BrowserVerifyError> {
         if !valid_id(sid) || !valid_id(csrf) {
             return Ok(false);
         }
         if let Some(backend) = self.shared()? {
             Ok(backend
-                .call(&["consume".into(), sid.into(), csrf.into(), flow.tag()])
+                .call(&["consume".into(), sid.into(), csrf.into(), tag.into()])
                 .await?
                 .first()
                 .map(String::as_str)
                 == Some("ok"))
         } else {
-            self.consume_form_for(sid, csrf, flow)
+            self.consume_form_for(sid, csrf, tag)
         }
     }
 
@@ -546,13 +578,33 @@ impl BrowserLoginState {
         form_nonce: &str,
         flow: &LoginFlow,
     ) -> Result<bool, BrowserVerifyError> {
+        self.consume_token(token, form_nonce, &flow.tag()).await
+    }
+
+    /// Consumes the transaction of an account page form; see [`Self::account_form`].
+    pub(crate) async fn consume_account_form(
+        &self,
+        token: &str,
+        form_nonce: &str,
+    ) -> Result<bool, BrowserVerifyError> {
+        self.consume_token(token, form_nonce, ACCOUNT_FORM_TAG)
+            .await
+    }
+
+    async fn consume_token(
+        &self,
+        token: &str,
+        form_nonce: &str,
+        tag: &str,
+    ) -> Result<bool, BrowserVerifyError> {
         let Some((sid, csrf)) = split_form_token(token) else {
             return Ok(false);
         };
         if !valid_id(form_nonce) {
             return Ok(false);
         }
-        self.consume(sid, &nonce_csrf(form_nonce, csrf), flow).await
+        self.consume_tagged(sid, &nonce_csrf(form_nonce, csrf), tag)
+            .await
     }
 
     #[cfg(test)]
@@ -608,6 +660,28 @@ impl BrowserLoginState {
             Ok(sid)
         } else {
             self.memory_save_session(user, display_name, previous)
+        }
+    }
+
+    /// Ends the session `sid`. Ending a session that does not exist, or no longer does,
+    /// succeeds as well.
+    pub(crate) async fn end_session(&self, sid: &str) -> Result<(), BrowserVerifyError> {
+        if !valid_id(sid) {
+            return Ok(());
+        }
+        if let Some(backend) = self.shared()? {
+            let result = backend.call(&["end".into(), sid.into()]).await?;
+            match result.first().map(String::as_str) {
+                Some("ok") => Ok(()),
+                _ => Err(BrowserVerifyError::Unavailable),
+            }
+        } else {
+            self.entries
+                .lock()
+                .map_err(|_| BrowserVerifyError::Unavailable)?
+                .sessions
+                .remove(sid);
+            Ok(())
         }
     }
 
@@ -690,7 +764,7 @@ impl BrowserLoginState {
             FormTransaction {
                 csrf: csrf.clone(),
                 expires: now + Duration::from_secs(self.transaction_ttl()),
-                flow: flow.clone(),
+                tag: flow.tag(),
             },
         );
         Some((sid, csrf))
@@ -699,7 +773,7 @@ impl BrowserLoginState {
     /// Removal under one lock makes replay and concurrent submission one-use.
     #[cfg(test)]
     fn consume_form(&self, sid: &str, csrf: &str) -> bool {
-        self.consume_form_for(sid, csrf, &LoginFlow::api_key("ecmwf-api-key"))
+        self.consume_form_for(sid, csrf, &LoginFlow::api_key("ecmwf-api-key").tag())
             .unwrap()
     }
 
@@ -707,7 +781,7 @@ impl BrowserLoginState {
         &self,
         sid: &str,
         csrf: &str,
-        flow: &LoginFlow,
+        tag: &str,
     ) -> Result<bool, BrowserVerifyError> {
         let mut entries = self
             .entries
@@ -722,7 +796,7 @@ impl BrowserLoginState {
             entries.forms.remove(sid);
         }
         let matches = entries.forms.get(sid).is_some_and(|form| {
-            &form.flow == flow && bool::from(form.csrf.as_bytes().ct_eq(csrf.as_bytes()))
+            form.tag == tag && bool::from(form.csrf.as_bytes().ct_eq(csrf.as_bytes()))
         });
         if matches {
             entries.forms.remove(sid);
@@ -1514,6 +1588,47 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn account_forms_are_their_own_flow_and_ended_sessions_are_gone() {
+        let state = state();
+        let form_nonce = opaque_id();
+        let token = state.account_form(&form_nonce).await.unwrap();
+        for flow in [
+            LoginFlow::basic("self"),
+            LoginFlow::api_key("self"),
+            LoginFlow::oidc("self"),
+        ] {
+            assert!(
+                !state
+                    .consume_with_nonce(&token, &form_nonce, &flow)
+                    .await
+                    .unwrap()
+            );
+        }
+        let consume = |token: String, nonce: String| {
+            let state = &state;
+            async move { state.consume_account_form(&token, &nonce).await.unwrap() }
+        };
+        assert!(!consume(token.clone(), opaque_id()).await);
+        assert!(consume(token.clone(), form_nonce.clone()).await);
+        assert!(!consume(token, form_nonce.clone()).await, "one use");
+        let sign_in = state
+            .form_with_nonce(&LoginFlow::basic("self"), &form_nonce)
+            .await
+            .unwrap();
+        assert!(!consume(sign_in, form_nonce).await);
+
+        let user = User::new("ecmwf".into(), "public-user".into(), None, None, None, None);
+        let sid = state.create_session(user, None).unwrap();
+        let bob = User::new("ecmwf".into(), "bob".into(), None, None, None, None);
+        let other = state.create_session(bob, None).unwrap();
+        state.end_session(&sid).await.unwrap();
+        assert!(state.session(&sid).is_none());
+        assert!(state.session(&other).is_some());
+        state.end_session(&sid).await.unwrap();
+        state.end_session("not-a-session-id").await.unwrap();
+    }
+
     #[test]
     fn sessions_expire_rotate_and_do_not_refresh() {
         let state = state();
@@ -1544,7 +1659,7 @@ mod tests {
                 FormTransaction {
                     csrf: opaque_id(),
                     expires: Instant::now() + Duration::from_secs(FORM_TTL),
-                    flow: LoginFlow::api_key("ecmwf-api-key"),
+                    tag: LoginFlow::api_key("ecmwf-api-key").tag(),
                 },
             );
         }

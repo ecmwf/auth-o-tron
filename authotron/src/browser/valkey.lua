@@ -1,5 +1,6 @@
 -- A run resent after a lost reply never consumes a form twice ('missing'); form, session
--- and lease writes rewrite the same keys, and quotas may count one extra attempt.
+-- and lease writes rewrite the same keys, ending a session twice ends it once, and
+-- quotas may count one extra attempt.
 local prefix = KEYS[1]
 local op = ARGV[1]
 local session_wire_bytes_limit = tonumber(ARGV[#ARGV - 1])
@@ -58,6 +59,9 @@ elseif op == 'session' then
 elseif op == 'consume' or op == 'discard' then
   allowed('DEL', prefix .. ':form:' .. ARGV[2])
   allowed('ZREM', forms, ARGV[2])
+elseif op == 'end' then
+  allowed('DEL', prefix .. ':session:' .. ARGV[2])
+  allowed('ZREM', sessions, ARGV[2])
 elseif op == 'admit' or op == 'quota' then
   quota_permissions(prefix .. ':verify-quota')
   if op == 'admit' then
@@ -72,7 +76,7 @@ if op == 'form' or op == 'consume' or op == 'discard' then
   typed(forms, 'zset')
   typed(prefix .. ':form:' .. ARGV[2], 'hash')
   if op == 'form' then typed(prefix .. ':form-quota', 'hash') end
-elseif op == 'session' then
+elseif op == 'session' or op == 'end' then
   typed(sessions, 'zset')
   typed(prefix .. ':session:' .. ARGV[2], 'string')
 elseif op == 'read' then
@@ -87,11 +91,14 @@ if op == 'form' then
   local ttl, cap, limit, window = tonumber(ARGV[5]), tonumber(ARGV[6]), tonumber(ARGV[7]), tonumber(ARGV[8])
   if not ttl or ttl <= 0 or not cap or cap <= 0 or not limit or limit <= 0 or not window or window <= 0 then return redis.error_reply('invalid arguments') end
   -- Flow tag is `<kind>:<id>` with kind `basic`, `key` or `oidc` and a 1-32 byte method
-  -- id matching ^[a-z0-9][a-z0-9-]*$ (at most 38 bytes in total).
-  -- Valid: `basic:password`, `key:ecmwf-api-key`, `oidc:demo-sso`. Invalid:
-  -- `Basic:password`, `basic:-x`, `basic:Password`, `saml:sso`, a 33-byte id.
+  -- id matching ^[a-z0-9][a-z0-9-]*$ (at most 38 bytes in total), or the account
+  -- page's `account:self`.
+  -- Valid: `basic:password`, `key:ecmwf-api-key`, `oidc:demo-sso`, `account:self`.
+  -- Invalid: `Basic:password`, `basic:-x`, `basic:Password`, `saml:sso`, `account:x`,
+  -- a 33-byte id.
   local kind, id = string.match(ARGV[4], '^(%l+):([%l%d][%l%d%-]*)$')
-  if string.len(ARGV[4]) > 38 or (kind ~= 'basic' and kind ~= 'key' and kind ~= 'oidc') or string.len(id) > 32 then return redis.error_reply('invalid arguments') end
+  local method = kind == 'basic' or kind == 'key' or kind == 'oidc'
+  if string.len(ARGV[4]) > 38 or not (method or ARGV[4] == 'account:self') or string.len(id) > 32 then return redis.error_reply('invalid arguments') end
   prune(forms)
   if redis.call('ZCARD', forms) >= cap then return {'capacity'} end
   if not quota(prefix .. ':form-quota', limit, window) then return {'limited'} end
@@ -127,6 +134,10 @@ elseif op == 'session' then
     redis.call('DEL', prefix .. ':session:' .. previous)
     redis.call('ZREM', sessions, previous)
   end
+  return {'ok'}
+elseif op == 'end' then
+  redis.call('DEL', prefix .. ':session:' .. ARGV[2])
+  redis.call('ZREM', sessions, ARGV[2])
   return {'ok'}
 elseif op == 'read' then
   local key = prefix .. ':session:' .. ARGV[2]

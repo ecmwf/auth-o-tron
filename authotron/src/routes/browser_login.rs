@@ -166,6 +166,15 @@ pub(super) async fn current_session(
     state.browser.lookup(&sid).await
 }
 
+/// Whether the request carries exactly one `Origin`, the configured public origin.
+/// Valid: `Origin: https://login.example.org` for that origin. Invalid: no `Origin`,
+/// `null`, another origin, or two `Origin` headers.
+pub(super) fn same_origin(state: &AppState, headers: &HeaderMap) -> bool {
+    let mut origins = headers.get_all(header::ORIGIN).iter();
+    origins.next().and_then(|o| o.to_str().ok()) == state.browser.origin.as_deref()
+        && origins.next().is_none()
+}
+
 pub(super) fn unavailable(error: BrowserVerifyError) -> Response {
     let outcome = error_outcome(&error);
     let mut response = private_response(
@@ -385,11 +394,7 @@ async fn submit_inner(
     attempt: &mut BrowserAttemptGuard,
 ) -> Response {
     let flow = &method.flow;
-    let mut origins = headers.get_all(header::ORIGIN).iter();
-    let origin_valid = origins.next().and_then(|o| o.to_str().ok())
-        == state.browser.origin.as_deref()
-        && origins.next().is_none();
-    if !origin_valid {
+    if !same_origin(state, &headers) {
         attempt.outcome = BrowserOutcome::Origin;
         return private_response((StatusCode::FORBIDDEN, flow_error(flow)).into_response());
     }

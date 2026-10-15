@@ -37,6 +37,8 @@ static AVISO_LOGO: LazyLock<Vec<u8>> = LazyLock::new(|| {
     STANDARD.decode(encoded).expect("bundled Aviso logo base64")
 });
 const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; style-src 'self'; img-src 'self' https:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+/// Where signing out leads: the sign-in page with its signed-out notice.
+pub(super) const SIGNED_OUT_LOCATION: &str = "/login?signed-out";
 
 pub fn routes(config: &UiConfig) -> Router<AppState> {
     if !config.enabled {
@@ -74,7 +76,14 @@ pub(super) fn canonical_redirect(location: &str, form: bool) -> Response {
     secure_response(Redirect::permanent(location).into_response(), form)
 }
 
-async fn login(State(state): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+/// Shows the signed-out notice only for the exact query of [`SIGNED_OUT_LOCATION`];
+/// the text is fixed, never taken from the request. Valid: `/login?signed-out`.
+/// Invalid (no notice): `/login?signed-out=1`, `/login?Signed-out`, `/login?a&signed-out`.
+async fn login(
+    State(state): State<AppState>,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+) -> Response {
     if let Some(response) = super::oauth::login_entry_recovery(&state, &headers).await {
         return response;
     }
@@ -112,8 +121,11 @@ async fn login(State(state): State<AppState>, headers: axum::http::HeaderMap) ->
                 .is_none_or(|oidc| oidc.availability() != Availability::Unavailable),
         })
         .collect();
-    let mut response =
-        secure_response(Html(render_login(&config, &methods)).into_response(), false);
+    let signed_out = uri.query() == Some("signed-out");
+    let mut response = secure_response(
+        Html(render_login(&config, &methods, signed_out)).into_response(),
+        false,
+    );
     if direct_login {
         response.headers_mut().insert(
             header::CONTENT_SECURITY_POLICY,
@@ -195,7 +207,7 @@ struct ChooserMethod<'a> {
 }
 
 /// `methods` are in chooser order; labels are escaped.
-fn render_login(config: &UiConfig, methods: &[ChooserMethod]) -> String {
+fn render_login(config: &UiConfig, methods: &[ChooserMethod], signed_out: bool) -> String {
     let direct_login = !methods.is_empty();
     render_page_with_dialog(
         config,
@@ -212,6 +224,9 @@ fn render_login(config: &UiConfig, methods: &[ChooserMethod]) -> String {
                 }
             }
             h2 id="login-card-title" { "Sign in" }
+            @if signed_out {
+                p class="login-card-message" role="status" { "You are signed out." }
+            }
             @if !direct_login {
                 p id="login-status" class="login-card-message" {
                     "Interactive sign-in is not available on this page."
