@@ -10,7 +10,7 @@
 
 use super::refresh::{
     EndedFamily, MAX_ROTATED_HASHES, Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant,
-    RefreshStoreError, Revocation, Rotated, UpstreamState, UpstreamStored, deadline,
+    RefreshStoreError, Revocation, Rotated, Rotation, UpstreamState, UpstreamStored, deadline,
     initial_expiry, random_id,
 };
 use crate::config::RefreshTokenPolicy;
@@ -177,28 +177,36 @@ impl MemoryRefreshStore {
         };
         Ok(Presented::Reused(Box::new(family.ended(id))))
     }
-    /// Compare-and-swap from `presented` to `next`; `ceiling` is the current absolute expiry.
+    /// Rotates the family of `presented` if that token is still its current one.
     pub async fn rotate(
         &self,
-        family_id: &str,
         presented: &[u8; 32],
-        next: [u8; 32],
+        rotation: &Rotation<'_>,
         now_ms: u64,
-        idle_ttl_seconds: u64,
-        ceiling: u64,
     ) -> Result<Rotated, RefreshStoreError> {
+        let Rotation {
+            next,
+            grant,
+            idle_ttl_seconds,
+            ceiling,
+        } = *rotation;
         let idle_ms = deadline(now_ms, idle_ttl_seconds, Some(ceiling))
             .ok_or(RefreshStoreError::Unavailable)?;
+        grant.encode()?;
         let mut inner = self.lock()?;
         if inner.tokens.contains_key(&next) {
             return Err(RefreshStoreError::Unavailable);
         }
-        let Some(family) = inner.families.get_mut(family_id) else {
+        let Some((family_id, _)) = inner.tokens.get(presented).cloned() else {
+            return Ok(Rotated::Stale);
+        };
+        let Some(family) = inner.families.get_mut(&family_id) else {
             return Ok(Rotated::Stale);
         };
         if !family.live(now_ms) || family.current != *presented || now_ms >= ceiling {
             return Ok(Rotated::Stale);
         }
+        family.grant = grant.clone();
         family.previous = Some((*presented, now_ms));
         family.current = next;
         family.idle_ms = idle_ms;
@@ -210,8 +218,10 @@ impl MemoryRefreshStore {
         if let Some(forgotten) = forgotten {
             inner.tokens.remove(&forgotten);
         }
-        inner.tokens.insert(*presented, (family_id.into(), idle_ms));
-        inner.tokens.insert(next, (family_id.into(), idle_ms));
+        inner
+            .tokens
+            .insert(*presented, (family_id.clone(), idle_ms));
+        inner.tokens.insert(next, (family_id, idle_ms));
         Ok(Rotated::Rotated)
     }
     /// Replaces the sealed upstream grant of a live family while `generation` is its
@@ -320,7 +330,7 @@ impl MemoryRefreshStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth::refresh::tests::grant;
+    use crate::oauth::refresh::tests::{grant, rotation};
 
     const NOW: u64 = 1_700_000_000_000;
 
@@ -350,11 +360,10 @@ mod tests {
         assert_eq!(family.grant, grant());
         assert_eq!(family.absolute_expires_at_ms, NOW + 3_600_000);
         let rotate = |presented, next, at| {
-            let id = family.family_id.clone();
             let store = &store;
             async move {
                 store
-                    .rotate(&id, &presented, next, at, 600, NOW + 3_600_000)
+                    .rotate(&presented, &rotation(next, &grant(), NOW + 3_600_000), at)
                     .await
                     .unwrap()
             }
@@ -387,12 +396,11 @@ mod tests {
             .issue(&grant(), [1; 32], NOW, &policy(), None)
             .await
             .unwrap();
-        let id = current(store.lookup(&[1; 32], NOW).await.unwrap()).family_id;
         let ceiling = NOW + 3_600_000;
         for (from, to) in [([1; 32], [2; 32]), ([2; 32], [3; 32])] {
             assert_eq!(
                 store
-                    .rotate(&id, &from, to, NOW, 600, ceiling)
+                    .rotate(&from, &rotation(to, &grant(), ceiling), NOW)
                     .await
                     .unwrap(),
                 Rotated::Rotated
@@ -415,14 +423,17 @@ mod tests {
             .issue(&grant(), [0; 32], NOW, &policy(), None)
             .await
             .unwrap();
-        let id = current(store.lookup(&[0; 32], NOW).await.unwrap()).family_id;
         let ceiling = NOW + 3_600_000;
         let hash = |step: usize| [step as u8; 32];
         let rotations = MAX_ROTATED_HASHES + 2;
         for step in 0..rotations {
             let at = NOW + step as u64 * 1_000;
             let rotated = store
-                .rotate(&id, &hash(step), hash(step + 1), at, 600, ceiling)
+                .rotate(
+                    &hash(step),
+                    &rotation(hash(step + 1), &grant(), ceiling),
+                    at,
+                )
                 .await
                 .unwrap();
             assert_eq!(rotated, Rotated::Rotated);
@@ -471,7 +482,6 @@ mod tests {
             .issue(&grant(), [2; 32], NOW, &policy(), None)
             .await
             .unwrap();
-        let id = current(store.lookup(&[2; 32], NOW).await.unwrap()).family_id;
         let mut token = [2; 32];
         let ceiling = NOW + 3_600_000;
         for step in 1..=6u8 {
@@ -484,7 +494,7 @@ mod tests {
             };
             assert_eq!(
                 store
-                    .rotate(&id, &token, next, at, 600, ceiling)
+                    .rotate(&token, &rotation(next, &grant(), ceiling), at)
                     .await
                     .unwrap(),
                 expected
@@ -499,13 +509,54 @@ mod tests {
             .issue(&grant(), [3; 32], NOW, &policy(), None)
             .await
             .unwrap();
-        let id = current(store.lookup(&[3; 32], NOW).await.unwrap()).family_id;
         assert_eq!(
             store
-                .rotate(&id, &[3; 32], [4; 32], NOW + 1, 600, NOW + 1)
+                .rotate(&[3; 32], &rotation([4; 32], &grant(), NOW + 1), NOW + 1)
                 .await
                 .unwrap(),
             Rotated::Stale
+        );
+    }
+
+    #[tokio::test]
+    async fn rotation_stores_the_grant_its_successor_carries() {
+        let store = MemoryRefreshStore::new(50);
+        let coupled = RefreshGrant {
+            upstream_coupled: true,
+            ..grant()
+        };
+        store
+            .issue(&coupled, [1; 32], NOW, &policy(), Some("v1.k.first"))
+            .await
+            .unwrap();
+        let ceiling = NOW + 3_600_000;
+        let rotate = |next, grant| {
+            let store = &store;
+            async move {
+                store
+                    .rotate(&[1; 32], &rotation(next, grant, ceiling), NOW)
+                    .await
+            }
+        };
+        let oversized = RefreshGrant {
+            provider_roles: vec!["r".repeat(64); 1024],
+            ..coupled.clone()
+        };
+        assert!(rotate([2; 32], &oversized).await.is_err());
+        let refreshed = RefreshGrant {
+            provider_roles: vec!["writer".into()],
+            ..coupled.clone()
+        };
+        assert_eq!(rotate([2; 32], &refreshed).await, Ok(Rotated::Rotated));
+        assert_eq!(
+            current(store.lookup(&[2; 32], NOW).await.unwrap()).grant,
+            refreshed
+        );
+        // A stale rotation leaves the stored grant alone.
+        assert_eq!(rotate([3; 32], &coupled).await, Ok(Rotated::Stale));
+        assert_eq!(
+            current(store.lookup(&[2; 32], NOW).await.unwrap()).grant,
+            refreshed
         );
     }
 
@@ -588,7 +639,7 @@ mod tests {
         );
         // The family's own rotation does not block a replacement for its generation.
         store
-            .rotate(&id, &[1; 32], [2; 32], NOW, 600, NOW + 3_600_000)
+            .rotate(&[1; 32], &rotation([2; 32], &coupled, NOW + 3_600_000), NOW)
             .await
             .unwrap();
         assert_eq!(set(&id, 1, "v1.k.third", NOW).await, UpstreamStored::Stored);
@@ -664,9 +715,8 @@ mod tests {
             .issue(&grant(), [1; 32], NOW, &policy(), None)
             .await
             .unwrap();
-        let id = current(store.lookup(&[1; 32], NOW).await.unwrap()).family_id;
         store
-            .rotate(&id, &[1; 32], [2; 32], NOW, 600, NOW + 3_600_000)
+            .rotate(&[1; 32], &rotation([2; 32], &grant(), NOW + 3_600_000), NOW)
             .await
             .unwrap();
         assert!(matches!(
@@ -750,9 +800,13 @@ mod tests {
             other => panic!("{other:?}"),
         }
         issue(4).await;
-        let id = current(store.lookup(&[4; 32], NOW).await.unwrap()).family_id;
+        let coupled_4 = coupled(4);
         store
-            .rotate(&id, &[4; 32], [5; 32], NOW + 4, 600, NOW + 3_600_000)
+            .rotate(
+                &[4; 32],
+                &rotation([5; 32], &coupled_4, NOW + 3_600_000),
+                NOW + 4,
+            )
             .await
             .unwrap();
         match store

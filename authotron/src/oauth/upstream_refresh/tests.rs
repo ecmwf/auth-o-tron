@@ -200,6 +200,17 @@ async fn refreshed_roles_replace_the_family_roles_and_need_an_id_token() {
     .await;
     let (token, _) = live_family(&coupled).await;
     let token = coupled.refresh(&token).await.unwrap();
+    // The rotation keeps the refreshed roles, which the sign-in snapshot lacked.
+    let Some(RefreshBackend::Memory(store)) = &coupled.runtime.refresh else {
+        unreachable!()
+    };
+    let now = coupled.runtime.now().await.unwrap();
+    let Presented::Current(family) = store.lookup(&token.hash(), now).await.unwrap() else {
+        panic!("expected a live family");
+    };
+    let mut expected = coupled.grant();
+    expected.provider_roles = vec!["reader".into()];
+    assert_eq!(family.grant, expected);
     // Without an ID token the mapped roles cannot be re-checked: 503, family kept.
     coupled
         .idp

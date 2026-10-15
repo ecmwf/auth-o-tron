@@ -10,7 +10,7 @@
 
 use super::refresh::{
     EndedFamily, MAX_ROTATED_HASHES, Presented, REUSE_GRACE_MS, RefreshFamily, RefreshGrant,
-    RefreshStoreError, Revocation, Rotated, UpstreamState, UpstreamStored, deadline,
+    RefreshStoreError, Revocation, Rotated, Rotation, UpstreamState, UpstreamStored, deadline,
     initial_expiry, random_id,
 };
 use super::refresh_durability::{self, Durability};
@@ -209,18 +209,22 @@ impl ValkeyRefreshStore {
             _ => return Err(RefreshStoreError::Unavailable),
         })
     }
-    /// Compare-and-swap from `presented` to `next`; `ceiling` is the current absolute expiry.
+    /// Rotates the family of `presented` if that token is still its current one.
     pub async fn rotate(
         &self,
-        family_id: &str,
         presented: &[u8; 32],
-        next: [u8; 32],
+        rotation: &Rotation<'_>,
         now_ms: u64,
-        idle_ttl_seconds: u64,
-        ceiling: u64,
     ) -> Result<Rotated, RefreshStoreError> {
+        let Rotation {
+            next,
+            grant,
+            idle_ttl_seconds,
+            ceiling,
+        } = *rotation;
         let idle = deadline(now_ms, idle_ttl_seconds, Some(ceiling))
             .ok_or(RefreshStoreError::Unavailable)?;
+        let payload = grant.encode()?;
         let reply = self
             .run(
                 &[self.token_key(presented), self.token_key(&next)],
@@ -231,7 +235,7 @@ impl ValkeyRefreshStore {
                     URL_SAFE_NO_PAD.encode(next).as_bytes(),
                     idle.to_string().as_bytes(),
                     ceiling.to_string().as_bytes(),
-                    family_id.as_bytes(),
+                    &payload,
                     MAX_ROTATED_HASHES.to_string().as_bytes(),
                 ],
             )
@@ -352,7 +356,7 @@ impl ValkeyRefreshStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oauth::refresh::tests::grant;
+    use crate::oauth::refresh::tests::{grant, rotation};
     use std::{process::Command, time::Duration};
 
     struct Fixture(String);
@@ -473,7 +477,7 @@ mod tests {
         // A rotation sent on a closed connection runs once: a second run would be stale.
         close_other_connections(&a).await;
         assert_eq!(
-            b.rotate(&id, &[1; 32], [2; 32], now + 1, 600, ceiling)
+            b.rotate(&[1; 32], &rotation([2; 32], &grant(), ceiling), now + 1)
                 .await
                 .unwrap(),
             Rotated::Rotated
@@ -493,7 +497,7 @@ mod tests {
             assert_eq!(ttl as u64, now + 600_001);
         }
         assert_eq!(
-            a.rotate(&id, &[1; 32], [3; 32], now + 2, 600, ceiling)
+            a.rotate(&[1; 32], &rotation([3; 32], &grant(), ceiling), now + 2)
                 .await
                 .unwrap(),
             Rotated::Stale
@@ -562,7 +566,11 @@ mod tests {
         let rotations = MAX_ROTATED_HASHES + 2;
         for step in 0..rotations {
             let rotated = b
-                .rotate(&id, &hash(step), hash(step + 1), now, 600, ceiling)
+                .rotate(
+                    &hash(step),
+                    &rotation(hash(step + 1), &bounded, ceiling),
+                    now,
+                )
                 .await
                 .unwrap();
             assert_eq!(rotated, Rotated::Rotated);
@@ -650,11 +658,26 @@ mod tests {
             (state.sealed.as_str(), state.generation),
             ("v1.k.second", 1)
         );
+        // The rotation stores the grant its successor carries.
+        let mut refreshed = coupled.clone();
+        refreshed.provider_roles = vec!["writer".into()];
+        let mut oversized = coupled.clone();
+        oversized.provider_roles = vec!["r".repeat(64); 1024];
+        let ceiling = now + 3_600_000;
+        assert!(
+            a.rotate(&[1; 32], &rotation([2; 32], &oversized, ceiling), now)
+                .await
+                .is_err()
+        );
         assert_eq!(
-            a.rotate(&id, &[1; 32], [2; 32], now, 600, now + 3_600_000)
+            a.rotate(&[1; 32], &rotation([2; 32], &refreshed, ceiling), now)
                 .await
                 .unwrap(),
             Rotated::Rotated
+        );
+        assert_eq!(
+            family(b.lookup(&[2; 32], now).await.unwrap()).grant,
+            refreshed
         );
         // The family's own rotation does not block a replacement for its generation.
         assert_eq!(
@@ -760,10 +783,14 @@ mod tests {
                 }
             }
         }
-        let id = family(a.lookup(&[4; 32], now).await.unwrap()).family_id;
-        a.rotate(&id, &[4; 32], [5; 32], now + 4, 600, now + 3_600_000)
-            .await
-            .unwrap();
+        let coupled_4 = coupled(4);
+        a.rotate(
+            &[4; 32],
+            &rotation([5; 32], &coupled_4, now + 3_600_000),
+            now + 4,
+        )
+        .await
+        .unwrap();
         match b.lookup(&[4; 32], now + 4 + REUSE_GRACE_MS).await.unwrap() {
             Presented::Reused(ended) => assert_eq!(named(*ended), expected(4)),
             other => panic!("{other:?}"),

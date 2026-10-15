@@ -21,9 +21,9 @@ use std::{collections::BTreeMap, path::PathBuf};
 /// implemented by [`valid_claim_path`].
 pub const CLAIM_PATH_PATTERN: &str = r"^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+){0,3}$";
 const MAX_SCOPES: usize = 16;
-const MAX_ROLE_MAP: usize = 64;
+pub(crate) const MAX_ROLE_MAP: usize = 64;
 const MAX_ENDPOINT_ORIGINS: usize = 8;
-const IDENTITY_TEXT_BYTES: usize = 128;
+pub(crate) const IDENTITY_TEXT_BYTES: usize = 128;
 
 /// One identity provider offered as a browser sign-in method. The redirect URI
 /// registered at the provider is `<public_origin>/login/method/<id>/callback`.

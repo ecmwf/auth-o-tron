@@ -13,7 +13,7 @@ use super::{
     audit::{FamilyEnd, NO_FAMILY},
     authentication::projection,
     refresh::{
-        Presented, RefreshGrant, RefreshStoreError, RefreshToken, Revocation, Rotated,
+        Presented, RefreshGrant, RefreshStoreError, RefreshToken, Revocation, Rotated, Rotation,
         effective_absolute,
     },
     refresh_store::MemoryRefreshStore,
@@ -265,7 +265,7 @@ impl OAuthRuntime {
         let user = User::new(
             family.grant.realm.clone(),
             family.grant.username.clone(),
-            Some(provider_roles),
+            Some(provider_roles.clone()),
             None,
             None,
             None,
@@ -293,17 +293,18 @@ impl OAuthRuntime {
                 _ => Unavailable,
             })?;
         let next = RefreshToken::generate()?;
-        match refresh_dispatch!(
-            backend,
-            rotate(
-                &family.family_id,
-                &hash,
-                next.hash(),
-                now,
-                policy.idle_ttl_seconds,
-                ceiling
-            )
-        )? {
+        // The successor carries the provider roles this refresh started from.
+        let grant = RefreshGrant {
+            provider_roles,
+            ..family.grant.clone()
+        };
+        let rotation = Rotation {
+            next: next.hash(),
+            grant: &grant,
+            idle_ttl_seconds: policy.idle_ttl_seconds,
+            ceiling,
+        };
+        match refresh_dispatch!(backend, rotate(&hash, &rotation, now))? {
             Rotated::Rotated => {
                 metrics.record_refresh_token(RefreshTokenEvent::Rotated);
                 Ok(response.with_refresh_token(&next))

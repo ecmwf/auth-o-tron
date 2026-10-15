@@ -61,7 +61,9 @@ pub(super) fn random_id() -> Result<String, RefreshStoreError> {
     Ok(URL_SAFE_NO_PAD.encode(random))
 }
 
-/// Immutable authorization snapshot captured at login and re-evaluated on every refresh.
+/// Authorization snapshot captured at login and re-evaluated on every refresh. Only the
+/// provider roles of a coupled family change: each rotation stores those of its
+/// upstream refresh, which the role map bounds (see the size test below).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RefreshGrant {
@@ -157,6 +159,17 @@ pub enum Revocation {
     Revoked(Box<EndedFamily>),
 }
 
+/// A compare-and-swap of a family's current token from the presented one to `next`.
+pub struct Rotation<'a> {
+    pub next: [u8; 32],
+    /// Becomes the family's grant: the same client, identity and method, with the
+    /// provider roles this refresh started from.
+    pub grant: &'a RefreshGrant,
+    pub idle_ttl_seconds: u64,
+    /// The current absolute expiry, which caps the new idle deadline.
+    pub ceiling: u64,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Rotated {
     Rotated,
@@ -196,6 +209,20 @@ pub(super) fn effective_absolute(
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    /// A rotation to `next` carrying `grant`, with a 600-second idle lifetime.
+    pub(in crate::oauth) fn rotation(
+        next: [u8; 32],
+        grant: &RefreshGrant,
+        ceiling: u64,
+    ) -> Rotation<'_> {
+        Rotation {
+            next,
+            grant,
+            idle_ttl_seconds: 600,
+            ceiling,
+        }
+    }
 
     pub(in crate::oauth) fn grant() -> RefreshGrant {
         RefreshGrant {
@@ -263,6 +290,26 @@ pub(super) mod tests {
         let mut b = grant;
         (b.realm, b.username) = ("a".into(), "bc".into());
         assert_ne!(a.user_key(), b.user_key());
+    }
+
+    /// The largest grant configuration allows: identifiers and resource at their
+    /// bounds, every scope of a binding, and a coupled family's provider roles, which
+    /// only an OIDC method's role map grants, all made of characters JSON escapes.
+    #[test]
+    fn the_largest_grant_a_refresh_can_store_fits() {
+        use crate::config::oidc::{IDENTITY_TEXT_BYTES, MAX_ROLE_MAP};
+        let text = |bytes: usize| "\"".repeat(bytes);
+        let grant = RefreshGrant {
+            client_id: "c".repeat(128),
+            resource: format!("https://{}", "r".repeat(2040)),
+            scopes: vec![text(64); 32],
+            username: text(IDENTITY_TEXT_BYTES),
+            realm: text(IDENTITY_TEXT_BYTES),
+            provider_roles: vec![text(IDENTITY_TEXT_BYTES); MAX_ROLE_MAP],
+            method: text(IDENTITY_TEXT_BYTES),
+            upstream_coupled: true,
+        };
+        assert!(grant.encode().unwrap().len() < MAX_REFRESH_GRANT_BYTES);
     }
 
     #[test]

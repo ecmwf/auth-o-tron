@@ -129,17 +129,18 @@ if op == 'lookup' then
     if redis.call('HGET', key, 'previous') == hash and rotated and now < rotated + grace then return {'grace'} end
     return append({'reused'}, revoke(id))
 end
+-- Rotation: ARGV[9] is the grant the next token carries, replacing the family's.
 if op == 'rotate' then
     local next_hash, next_token, idle, ceiling = ARGV[6], KEYS[2], tonumber(ARGV[7]), tonumber(ARGV[8])
-    local keep = tonumber(ARGV[10])
+    local grant, keep = ARGV[9], tonumber(ARGV[10])
     if not integer(idle) or not integer(ceiling) or idle > ceiling or not integer(keep) then return {'unavailable'} end
-    if id ~= ARGV[9] or current ~= hash or now >= ceiling then return {'stale'} end
+    if current ~= hash or now >= ceiling then return {'stale'} end
     if redis.call('EXISTS', next_token) == 1 then return {'unavailable'} end
     local absolute = math.min(tonumber(redis.call('HGET', key, 'absolute')), ceiling)
     local hashes = history(key)
     hashes[#hashes + 1] = hash
     while #hashes > keep do redis.call('DEL', token_key(table.remove(hashes, 1))) end
-    redis.call('HSET', key, 'current', next_hash, 'previous', hash, 'rotated', decimal(now),
+    redis.call('HSET', key, 'grant', grant, 'current', next_hash, 'previous', hash, 'rotated', decimal(now),
         'idle', decimal(idle), 'absolute', decimal(absolute), 'history', table.concat(hashes, ' '))
     redis.call('PEXPIREAT', key, decimal(idle))
     redis.call('PEXPIREAT', token, decimal(idle))
