@@ -13,7 +13,10 @@
 -- A run resent after a lost reply never applies twice: rotate finds its own rotation, the
 -- presented token previous and the next one current, and reports it 'rotated', issue
 -- finds the token key present, set_upstream recognises its own replacement, and
--- revocation is idempotent.
+-- revocation is idempotent. Idempotent is not lossless: the families a lost reply would
+-- have reported are gone when the resent run looks, so their end is not logged or
+-- counted and their upstream grants are not revoked at the provider. The client cannot
+-- tell a lost reply from a command that was never sent, so neither can the caller.
 local token = KEYS[1]
 local op, prefix, now, window_max = ARGV[1], ARGV[2], tonumber(ARGV[3]), tonumber(ARGV[4])
 local function integer(n) return n and n > 0 and n <= 253402300799999 and n % 1 == 0 end

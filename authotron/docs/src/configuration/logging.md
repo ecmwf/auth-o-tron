@@ -118,7 +118,10 @@ revealing the id. Tokens, codes and sealed upstream grants are never logged.
 | `upstream_unusable` | WARN | The sealed upstream grant is missing or cannot be opened |
 | `identity_changed` | WARN | The refreshed identity no longer matches the family |
 
-Families that expire, or are lost with backend data, are not logged.
+Families that expire, or are lost with backend data, are not logged. Neither are
+families a revocation ended in Valkey when its reply was lost with a closed connection:
+the command is sent once more, finds nothing left to end and reports nothing, and the
+upstream grants of such families are not revoked at the provider either.
 
 | Event | Level | Meaning |
 |-------|-------|---------|
