@@ -96,6 +96,7 @@ revealing the id. Tokens, codes and sealed upstream grants are never logged.
 |--------|-------|-------|
 | `client_revoke` | INFO | The client revoked one of the family's tokens (`/oauth/revoke`) |
 | `user_revoke` | INFO | The user revoked the login on the account page |
+| `admin_revoke` | INFO | An operator revoked it with `authotron admin logins revoke` |
 | `reuse_detected` | WARN | An already-rotated refresh token was presented again |
 | `per_user_cap` | INFO | A newer sign-in exceeded `max_refresh_token_families_per_user` |
 | `client_disabled` | INFO | The client no longer has refresh tokens enabled |

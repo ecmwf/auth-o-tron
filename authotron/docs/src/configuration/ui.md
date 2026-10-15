@@ -532,7 +532,8 @@ cannot reach another user's; the notice afterwards is the same whether it matche
 A revoked login cannot refresh any more: its application signs in again once its
 current access token expires. Revocations are logged with `reason="user_revoke"`,
 and the upstream grant of a family coupled to an OIDC offline session is revoked at
-the provider in the background, as for any other revocation.
+the provider in the background, as for any other revocation. See
+[Revoking logins](oauth.md#revoking-logins) for the other ways.
 Only `ecmwf-email`, `email` and `display_name` are displayed; arbitrary attributes
 and scopes are not rendered. These are operator-controlled display data, not
 verified-email claims. Do not put sensitive data in these display fields.

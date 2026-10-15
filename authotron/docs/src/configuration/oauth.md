@@ -403,7 +403,8 @@ keys expire at the family's idle deadline. The `v3` record adds the sealed succe
 retry counters of the latest rotation; moving from an earlier namespace drops existing
 families, and users must log in again. Restricted ACLs must allow `EVAL`, `GET`,
 `SET`, `DEL`, `EXISTS`, `TYPE`, the hash commands `HSET`/`HGET`, the sorted-set commands
-`ZADD`/`ZRANGE`/`ZREM`/`ZCARD`, and `PEXPIREAT`/`PEXPIRETIME` under that prefix. A family
+`ZADD`/`ZRANGE`/`ZREM`/`ZCARD`, and `PEXPIREAT`/`PEXPIRETIME` under that prefix, and
+`SCAN` for [admin commands](#revoking-logins) without `--username`. A family
 coupled to an OIDC offline session also keeps its sealed upstream grant in the family
 hash, and an upstream refresh holds a short-lived `lock:<family>` key.
 
@@ -515,8 +516,8 @@ family. It never rejects the new login.
 authentication; public clients) revokes the whole family of any refresh token it
 belongs to. Unknown, malformed, foreign-client or access tokens return 200 with no
 effect (RFC 7009 §2.2). Signed access tokens cannot be revoked and remain valid until
-their `exp`. Users can revoke their own logins on the account page
-([Your logins](ui.md)).
+their `exp`. Users and operators can revoke logins too; see
+[Revoking logins](#revoking-logins).
 
 **Caveats.**
 
@@ -534,6 +535,58 @@ their `exp`. Users can revoke their own logins on the account page
   `authotron_oauth_upstream_tokens_total{event}` for coupled families.
 - Every revoked family is logged as `oauth.refresh_token.family_revoked` with its
   reason ([audit events](logging.md#oauth-audit-events)).
+
+### Revoking logins
+
+A *login* is a refresh-token family: one sign-in of one user at one client, with every
+refresh token it rotates through. Revoking it ends all of them at once and, for a
+family coupled to an OIDC offline session, revokes its upstream grant at the provider.
+Access tokens already issued stay valid until their `exp`. Every revocation is logged
+as `oauth.refresh_token.family_revoked` with its
+[reason](logging.md#oauth-audit-events). There are three ways:
+
+- **The user**, on the account page ([Your logins](ui.md)): one login or all of their
+  own, matched by exactly the session's realm and username (`user_revoke`).
+- **The client**, with `POST /oauth/revoke` and any token of the family, as above
+  (`client_revoke`).
+- **An operator**, with `authotron admin logins`, a command of the server binary
+  (`admin_revoke`). It reads the same configuration file (`AOT_CONFIG_PATH`) and
+  reaches the same Valkey, so it opens no listener and adds no endpoint. Run it where
+  the server runs; the image keeps the binary at `/app/authotron`, and `kubectl exec`
+  gets the container's environment, `AOT_CONFIG_PATH` included:
+
+```sh
+kubectl exec deploy/authotron -- /app/authotron admin logins list --realm ecmwf --username alice
+kubectl exec deploy/authotron -- /app/authotron admin logins revoke --realm ecmwf --username alice --dry-run
+kubectl exec deploy/authotron -- /app/authotron admin logins revoke --realm ecmwf --username alice
+kubectl exec deploy/authotron -- /app/authotron admin logins revoke --realm ecmwf --all-users --client mcp-cli
+```
+
+`--realm` is always required; `--username` and `--client` narrow the selection, each
+compared exactly. Revoking without `--username` reaches every user of the realm and
+must say so with `--all-users`. `list` prints client, method, realm, username, when the
+login started, was last used (its latest refresh) and expires if unused and at the
+latest, and the family reference of the audit log, newest first and at most `--limit`
+rows (default 100, at most 10000); it never prints a token or a family id.
+`revoke --dry-run` prints the logins `revoke` would end. `revoke` ends them, then
+revokes the upstream grants of coupled families at the provider itself, eight at a
+time and waiting at most ten seconds for each answer, and prints how many logins
+ended and how the upstream revocations went: revoked, not supported by the provider,
+failed or timed out, or skipped because no configured key and method open the grant
+any more. A login that ended meanwhile is not counted. The command logs to standard
+error in the configured `logging` format and level, including the store's durability
+check of a server start, and writes its report to standard output. Its exit status is
+0 when done, 1 when it failed and 2 for invalid arguments; after a failure during
+`revoke`, run it again. With the Memory backend it fails: families live inside each
+server process, and restarting the server ends them all.
+
+**Cost.** With `--username`, the command reads that user's family index only. Without,
+nothing indexes families by realm or client, so it scans: one
+`SCAN ... MATCH <key_prefix>:oauth:refresh-tokens:v3:family:* COUNT 500` and one
+short script per step. No single command holds up Valkey, but a scan visits every key
+of the database once, whatever its prefix, and takes time in proportion to the
+database's size. A login started during a scan may be missed; run the command again
+to catch it.
 
 ### Durable refresh-token storage
 

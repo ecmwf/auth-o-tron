@@ -90,6 +90,19 @@ podAnnotations:
   prometheus.io/port: "9090"
 ```
 
+## Revoking Logins
+
+With OAuth refresh tokens in Valkey, an operator revokes logins from inside a server
+pod with the binary's admin command, which reads the pod's configuration and needs no
+extra endpoint:
+
+```sh
+kubectl exec deploy/authotron -- /app/authotron admin logins revoke --realm ecmwf --username alice
+```
+
+See [Revoking logins](../configuration/oauth.md#revoking-logins) for its filters,
+dry run and cost.
+
 ## Health Probes
 
 Liveness and readiness probes are configured automatically on the `/health` endpoint. When `metrics.enabled: true`, `/health` is available on both the application and metrics ports. Otherwise it is only on the application port.
