@@ -12,7 +12,7 @@
 
 use super::{
     refresh::{Presented, RefreshGrant, RefreshToken},
-    refresh_grant::{RefreshBackend, RefreshGrantError},
+    refresh_grant::{RefreshBackend, RefreshGrantError, refresh_dispatch},
     runtime::OAuthRuntime,
     upstream::tests::{Coupled, RESOURCE, coupled},
 };
@@ -69,14 +69,21 @@ impl Coupled {
     }
     /// The access and refresh token of a refresh of `token`.
     async fn refreshed(&self, token: &RefreshToken) -> (String, RefreshToken) {
+        self.refreshed_by(&self.runtime, token).await
+    }
+    /// The same, refreshed by the replica `runtime`.
+    async fn refreshed_by(
+        &self,
+        runtime: &Arc<OAuthRuntime>,
+        token: &RefreshToken,
+    ) -> (String, RefreshToken) {
         let request = super::refresh_grant::RefreshRequest {
             token: token.as_secret_str(),
             client_id: "desktop",
             scope: None,
             resource: None,
         };
-        let response = self
-            .runtime
+        let response = runtime
             .refresh(request, &self.auth, &self.browser, &self.metrics)
             .await
             .unwrap();
@@ -104,11 +111,9 @@ impl Coupled {
     }
     /// The sealed upstream grant the family of `token` holds.
     async fn sealed(&self, token: &RefreshToken) -> String {
-        let Some(RefreshBackend::Memory(store)) = &self.runtime.refresh else {
-            unreachable!()
-        };
+        let backend = self.runtime.refresh.as_ref().unwrap();
         let now = self.runtime.now().await.unwrap();
-        match store.lookup(&token.hash(), now).await.unwrap() {
+        match refresh_dispatch!(backend, lookup(&token.hash(), now)).unwrap() {
             Presented::Current(family) => family.upstream.unwrap().sealed,
             other => panic!("expected a live family, got {other:?}"),
         }
@@ -218,4 +223,99 @@ async fn upstream_keys_rotate_by_resealing_and_removing_one_ends_its_families() 
     assert_eq!(coupled.upstream_events("revocation_skipped"), 1);
     assert!(logs_contain("oauth.upstream.unopenable"));
     assert!(logs_contain("reason=\"upstream_unusable\""));
+}
+
+struct Container(String);
+impl Drop for Container {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("docker")
+            .args(["rm", "-f", &self.0])
+            .output();
+    }
+}
+fn docker(args: &[&str]) -> String {
+    let output = std::process::Command::new("docker")
+        .args(args)
+        .output()
+        .expect("Docker CLI required for disposable Valkey tests");
+    assert!(output.status.success(), "Docker fixture command failed");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
+#[tokio::test]
+#[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+async fn disposable_valkey_replicas_on_different_active_upstream_keys_reseal_in_turn() {
+    let container = Container(docker(&[
+        "run",
+        "--rm",
+        "-d",
+        "-p",
+        "127.0.0.1::6379",
+        "valkey/valkey:8",
+        "valkey-server",
+        "--requirepass",
+        "public-disposable-fixture",
+        "--save",
+        "",
+        "--appendonly",
+        "no",
+    ]));
+    let address = docker(&["port", &container.0, "6379/tcp"]);
+    let added = file(&STANDARD.encode([6u8; 32]));
+    // Replica `a` already seals with `u2`; replica `b` still with `u1`, as during step 2
+    // of the rotation or after rolling it back. Both have both keys.
+    let mut coupled = coupled(|config| {
+        config["ui"]["browser_session"]["backend"] = json!({"type": "valkey",
+            "url": format!("redis://{address}/0"), "key_prefix": "authotron:rotation-test",
+            "password": "public-disposable-fixture"});
+        let encryption = &mut config["oauth"]["upstream_token_encryption"];
+        let keys = encryption["keys"].as_array_mut().unwrap();
+        keys.push(json!({"kid": "u2", "key_file": added.path()}));
+        encryption["active_kid"] = json!("u2");
+    })
+    .await;
+    let encryption = coupled
+        .config
+        .oauth
+        .upstream_token_encryption
+        .as_mut()
+        .unwrap();
+    encryption.active_kid = "u1".into();
+    let b = OAuthRuntime::initialize(&coupled.config)
+        .await
+        .unwrap()
+        .unwrap();
+    let encryption = coupled
+        .config
+        .oauth
+        .upstream_token_encryption
+        .as_mut()
+        .unwrap();
+    encryption.active_kid = "u2".into();
+    let grant = coupled.grant();
+    let sealed = coupled.seal(&grant, &coupled.idp.state.offline_token(SUBJECT));
+    let token = RefreshToken::generate().unwrap();
+    let backend = coupled.runtime.refresh.as_ref().unwrap();
+    let now = coupled.runtime.now().await.unwrap();
+    let policy = &coupled.config.oauth.clients[0].refresh_tokens;
+    refresh_dispatch!(
+        backend,
+        issue(&grant, token.hash(), now, policy, Some(&sealed))
+    )
+    .unwrap();
+    assert!(coupled.sealed(&token).await.starts_with("v1.u2."));
+    // Each replica opens what the other sealed and stores the grant under its own
+    // active key, whether the provider rotated its token or kept it.
+    let (_, token) = coupled.refreshed_by(&b, &token).await;
+    assert!(coupled.sealed(&token).await.starts_with("v1.u1."));
+    let (_, token) = coupled.refreshed(&token).await;
+    assert!(coupled.sealed(&token).await.starts_with("v1.u2."));
+    let state = &coupled.idp.state;
+    state.rotate_refresh_tokens.store(false, Ordering::SeqCst);
+    let (_, token) = coupled.refreshed_by(&b, &token).await;
+    assert!(coupled.sealed(&token).await.starts_with("v1.u1."));
+    assert_eq!(coupled.upstream_events("resealed"), 1);
+    assert_eq!(coupled.upstream_events("rotated"), 2);
+    assert_eq!(coupled.upstream_events("reseal_failed"), 0);
 }
