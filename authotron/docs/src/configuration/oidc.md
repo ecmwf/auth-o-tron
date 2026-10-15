@@ -330,8 +330,9 @@ Metrics: `authotron_oauth_upstream_tokens_total{event}` (see
 ## Limitations
 
 - **Sessions are not federated.** Signing out at the provider does not end an
-  Auth-O-Tron browser session; it expires after `session_ttl_seconds`.
-  Auth-O-Tron has no logout endpoint of its own.
+  Auth-O-Tron browser session; it expires after `session_ttl_seconds`, or ends
+  with the account page's [Sign out](ui.md), which in turn does not sign out at
+  the provider.
 - **Refresh tokens of uncoupled families are not re-verified at the provider.**
   Use [upstream offline access](#upstream-offline-access) or
   `refresh_max_lifetime_seconds` on the method to bound how long a disabled

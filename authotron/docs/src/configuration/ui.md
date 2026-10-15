@@ -372,8 +372,9 @@ command that finds it closed reconnects and is sent once more within the same
 client cannot tell an unsent command from one whose reply was lost, so the resend
 may run a script twice. Scripts are guarded so that a second run never applies a
 one-use step twice: a repeated form consumption finds the form gone (retry with a
-fresh form), session and lease writes rewrite the same record, and rate quotas may
-count one extra attempt. Timeouts and server error replies are never resent; a
+fresh form), session and lease writes rewrite the same record, ending a session
+twice ends it once, and rate quotas may count one extra attempt. Timeouts and
+server error replies are never resent; a
 command timeout can have an ambiguous outcome. After a timeout the connection must
 answer a PING within the shorter of one second and `operation_timeout_ms`; one that
 stays silent may be dead without having been closed (a crashed node, dropped
@@ -505,6 +506,17 @@ before session storage and redirecting to `/login/account`.
 The account view starts with "Signed in as": the display name of an OIDC sign-in
 ([`display_name_claim`](oidc.md#identity)), or else the username. It escapes
 that name, username, realm, roles and displayed attribute values.
+
+**Sign out.** The account view's "Sign out" button posts to `POST /login/logout`
+with the same protections as a sign-in form: the exact public Origin, the
+form-nonce cookie and a one-use CSRF token, issued for the account page only (it
+cannot sign in, and no sign-in form can sign out). Signing out deletes the session
+from the backend, so it ends on every replica at once, clears the session cookie
+and shows the sign-in page with a "You are signed out." notice. It is idempotent:
+without a session it still clears the cookie. A refused form changes nothing and
+shows a generic page. Signing out ends only the browser session: applications that
+hold [refresh tokens](oauth.md#refresh-tokens) stay signed in, and the provider
+session of an OIDC method is not ended.
 Only `ecmwf-email`, `email` and `display_name` are displayed; arbitrary attributes
 and scopes are not rendered. These are operator-controlled display data, not
 verified-email claims. Do not put sensitive data in these display fields.

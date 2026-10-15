@@ -119,6 +119,8 @@ credential form (`/login/method/{id}`) in a same-page dialog, with standalone
 navigation as the JavaScript-free fallback; an OIDC method navigates to its
 provider. An existing browser session redirects to `/login/account` only when
 exactly one browser method is configured; otherwise the chooser stays visible.
+`GET /login?signed-out` (that exact query) adds a fixed "You are signed out." notice;
+any other query is ignored.
 With opt-in OAuth enabled and a bound authorization transaction, the same method
 forms perform fresh strict verification and continue to explicit consent instead
 of creating an ordinary browser session. See [OAuth](../configuration/oauth.md)
@@ -203,7 +205,7 @@ auth_duration_seconds_bucket{result="success",realm="internal",le="0.1"} 35
 When `ui.enabled` and at least one `plain` or `ecmwf-api` provider has a
 `browser: {id, label}` block,
 `ui.browser_session` with an explicit `backend.type` (`memory` or `valkey`) is required and the application port serves `GET/POST /login/method/{id}` for each
-browser method, plus `GET /login/account`. `id` is the method's configured
+browser method, plus `GET /login/account` and `POST /login/logout`. `id` is the method's configured
 `browser.id` (`^[a-z0-9][a-z0-9-]{0,31}$`, for example `ecmwf-api-key`), matched
 exactly and independent of provider order or label; unknown ids return 404.
 API-only providers have no route. See [Choosing browser methods](../configuration/ui.md#choosing-browser-methods).
@@ -232,7 +234,8 @@ They return 404 when disabled. See [Login UI](../configuration/ui.md).
 | `GET /login/method/{id}/callback` | OIDC methods only: provider redirect target; 303 `/login/account` (browser session) or `/oauth/continue` (authorization request), otherwise a generic 400/403/503 page |
 | `POST /login/method/{id}` (`plain`) | URL-encoded `username`, `password`, `csrf` (plus `oauth_transaction` during OAuth) only; username ≤256 UTF-8 bytes, password ≤1,024 UTF-8 bytes; Unicode/whitespace password preserved |
 | `POST /login/method/{id}` (`ecmwf-api`) | URL-encoded `api_key`, `csrf` (plus `oauth_transaction` during OAuth) only; key ≤512 bytes |
-| `GET /login/account` | Session-only augmented identity, escaped roles, and allowlisted `ecmwf-email`, `email`, `display_name`; no session →303 `/login` |
+| `GET /login/account` | Session-only augmented identity, escaped roles, and allowlisted `ecmwf-email`, `email`, `display_name`, with a "Sign out" form; sets the form-nonce cookie, and all forms of one page view share one CSRF transaction; no session →303 `/login` |
+| `POST /login/logout` | URL-encoded `csrf` of the account page only; exact Origin and form-nonce cookie as for sign-in forms. Deletes the browser session from the backend, clears the session cookie (same attributes, `Max-Age=0`) and answers 303 `/login?signed-out`, also when there is no session. A refused form gets a generic 400/403 page and changes nothing; backend failure is 503. Refresh-token families are not affected |
 
 POSTs are limited to 8 KiB. Successful POST →303 `/login/account` with a rotated
 Secure/HttpOnly/SameSite=Lax host-only opaque session cookie. Failures are generic:
@@ -272,3 +275,4 @@ Session cookies are not accepted by `/authenticate`, `/whoami`, or token APIs.
 | GET/POST | /login/method/{id} | 8080 | Form + CSRF on POST | Browser login for the method whose id is `id`; OIDC methods answer GET only |
 | GET | /login/method/{id}/callback | 8080 | Bound sign-in state | OIDC provider callback |
 | GET | /login/account | 8080 | Browser session | Augmented browser identity view |
+| POST | /login/logout | 8080 | Form + CSRF | Ends the browser session |
