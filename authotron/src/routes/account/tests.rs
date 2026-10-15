@@ -473,15 +473,36 @@ async fn logins_of_other_users_and_forged_forms_are_never_revoked() {
     jar.update(&response);
     let csrf = hidden(&text(response).await, "csrf");
     let token = csrf.as_str();
-    let refused: [Refusal; 7] = [
+    // A sign-in transaction of this browser's form nonce.
+    let browser = &fixture.state.browser;
+    let flow = &browser.method("demo-sso").unwrap().flow;
+    let nonce = &jar.0["__Host-authotron_form"];
+    let sign_in = browser.form_with_nonce(flow, nonce).await.unwrap();
+    let foreign = "https://attacker.example.test";
+    let refused: [Refusal; 10] = [
         (
             None,
             &[("csrf", token), ("login", "all")],
             StatusCode::FORBIDDEN,
         ),
         (
+            Some("null"),
+            &[("csrf", token), ("login", "all")],
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            Some(foreign),
+            &[("csrf", token), ("login", "all")],
+            StatusCode::FORBIDDEN,
+        ),
+        (
             Some(ORIGIN),
             &[("csrf", "forged"), ("login", "all")],
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            Some(ORIGIN),
+            &[("csrf", &sign_in), ("login", "all")],
             StatusCode::FORBIDDEN,
         ),
         (Some(ORIGIN), &[("csrf", token)], StatusCode::BAD_REQUEST),
@@ -511,6 +532,13 @@ async fn logins_of_other_users_and_forged_forms_are_never_revoked() {
         assert_eq!(response.status(), status, "{origin:?} {fields:?}");
         assert!(text(response).await.contains("Request not completed"));
     }
+    // The page's own token, without its form-nonce cookie.
+    let mut without_nonce = jar.clone();
+    without_nonce.0.remove("__Host-authotron_form");
+    let fields = [("csrf", token), ("login", "all")];
+    let response = post(&fixture, REVOKE, &without_nonce, Some(ORIGIN), &fields).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(listed(&fixture, SUBJECT).await.len(), 1);
     // A forged reference to another user's login is accepted as a form, but matches
     // none of this user's logins.
     let fields = [("csrf", token), ("login", other.as_str())];
@@ -519,7 +547,17 @@ async fn logins_of_other_users_and_forged_forms_are_never_revoked() {
     assert_eq!(refreshing(&fixture, &mut theirs).await, 1);
     assert_eq!(refreshing(&fixture, &mut mine).await, 1);
     assert!(fixture.idp.state.revoked.lock().unwrap().is_empty());
-    let counts = [("success", 1), ("origin", 1), ("csrf", 1), ("malformed", 5)];
+    // Revoking all of them revokes this user's only.
+    let response = get(&fixture.app, "/login/account", &jar).await;
+    let csrf = hidden(&text(response).await, "csrf");
+    let fields = [("csrf", csrf.as_str()), ("login", "all")];
+    let response = post(&fixture, REVOKE, &jar, Some(ORIGIN), &fields).await;
+    assert_eq!(location(&response), "/login/account?revoked");
+    assert_eq!(revoked(&fixture, 1).await.len(), 1);
+    assert_eq!(refreshing(&fixture, &mut mine).await, 0);
+    assert_eq!(refreshing(&fixture, &mut theirs).await, 1);
+    assert_eq!(listed(&fixture, "other-subject").await.len(), 1);
+    let counts = [("success", 2), ("origin", 3), ("csrf", 3), ("malformed", 5)];
     counted(&fixture, "revoke", &counts);
 }
 
