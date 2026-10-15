@@ -714,6 +714,42 @@ mod tests {
     /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
     #[tokio::test]
     #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
+    async fn disposable_valkey_expired_families_leave_the_per_user_index() {
+        let (_fixture, _, store) = disposable(2).await;
+        let now = server_now(&store).await;
+        for (index, token) in [[1; 32], [2; 32]].into_iter().enumerate() {
+            store
+                .issue(&grant(), token, now + index as u64, &policy(), None)
+                .await
+                .unwrap();
+        }
+        // The newer family expires: Valkey removes its key, but not its index entry.
+        let id = family(store.lookup(&[2; 32], now).await.unwrap()).family_id;
+        let _: usize = store
+            .connection
+            .query(redis::cmd("DEL").arg(store.family_key(&id)))
+            .await
+            .unwrap();
+        // It no longer counts against the cap of two, so the older family stays.
+        let evicted = store
+            .issue(&grant(), [3; 32], now + 2, &policy(), None)
+            .await
+            .unwrap();
+        assert!(evicted.is_empty());
+        family(store.lookup(&[1; 32], now + 2).await.unwrap());
+        let index = format!("{}user:{}", store.prefix, grant().user_key());
+        let members: Vec<String> = store
+            .connection
+            .query(redis::cmd("ZRANGE").arg(&index).arg(0).arg(-1))
+            .await
+            .unwrap();
+        assert_eq!(members.len(), 2);
+        assert!(!members.contains(&id));
+    }
+
+    /// Run explicitly: cargo test -p authotron disposable -- --ignored --test-threads=1.
+    #[tokio::test]
+    #[ignore = "requires Docker; starts and removes its own isolated Valkey container"]
     async fn disposable_valkey_previous_tokens_repeat_within_window_and_cap() {
         let (_fixture, backend, a) = disposable(50).await;
         let b = ValkeyRefreshStore::new(&backend, 50).await.unwrap();

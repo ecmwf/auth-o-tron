@@ -53,6 +53,16 @@ local function live(key)
     if not integer(idle) or not integer(absolute) then return nil end
     return now < idle and now < absolute
 end
+-- Removes the families of a per-user index that are no longer live. A family whose key
+-- expired took its "user" field along, so revoke() cannot find its index entry.
+local function prune_index(index)
+    for _, member in ipairs(redis.call('ZRANGE', index, 0, -1)) do
+        if not live(family_key(member)) then
+            revoke(member)
+            redis.call('ZREM', index, member)
+        end
+    end
+end
 
 if op == 'issue' then
     local id, user, hash, grant = ARGV[5], ARGV[6], ARGV[7], ARGV[8]
@@ -60,9 +70,7 @@ if op == 'issue' then
     if not integer(absolute) or not integer(idle) or not integer(cap) or idle > absolute then return {'unavailable'} end
     if redis.call('EXISTS', token) == 1 then return {'unavailable'} end
     local index = index_key(user)
-    for _, member in ipairs(redis.call('ZRANGE', index, 0, -1)) do
-        if not live(family_key(member)) then revoke(member) end
-    end
+    prune_index(index)
     local excess = redis.call('ZCARD', index) + 1 - cap
     local reply = {'ok'}
     if excess > 0 then
