@@ -60,9 +60,7 @@ async fn page(State(state): State<AppState>, uri: Uri, headers: HeaderMap) -> Re
         Ok(None) => return private_response(Redirect::to("/login").into_response()),
         Err(error) => return unavailable(error),
     };
-    let form_nonce = cookie_value(&headers, FORM_COOKIE)
-        .filter(|value| crate::browser::valid_id(value))
-        .unwrap_or_else(crate::browser::opaque_id);
+    let form_nonce = form_nonce(&headers);
     // Without a form (forms limited or the store failing) the identity is still shown.
     let csrf = match state.browser.account_form(&form_nonce).await {
         Ok(csrf) => Some(csrf),
@@ -135,6 +133,13 @@ async fn page(State(state): State<AppState>, uri: Uri, headers: HeaderMap) -> Re
         set_cookie(&mut response, FORM_COOKIE, form_nonce, ttl);
     }
     response
+}
+
+/// The browser's form-nonce cookie if it is well-formed, else a new nonce.
+fn form_nonce(headers: &HeaderMap) -> String {
+    cookie_value(headers, FORM_COOKIE)
+        .filter(|value| crate::browser::valid_id(value))
+        .unwrap_or_else(crate::browser::opaque_id)
 }
 
 fn sign_out_form(csrf: &str) -> Markup {
@@ -242,6 +247,30 @@ fn refused(state: &AppState, status: StatusCode) -> Response {
     private_response((status, Html(private_page(state, card))).into_response())
 }
 
+/// A same-origin sign-out whose form expired or lost its nonce cookie: refused like any
+/// account form, but while the browser still has a session the page carries a fresh
+/// sign-out form, so that signing out takes one more click instead of a detour.
+async fn sign_out_refused(state: &AppState, headers: &HeaderMap) -> Response {
+    let Ok(Some(_)) = current_session(state, headers).await else {
+        return refused(state, StatusCode::FORBIDDEN);
+    };
+    let form_nonce = form_nonce(headers);
+    let Ok(csrf) = state.browser.account_form(&form_nonce).await else {
+        return refused(state, StatusCode::FORBIDDEN);
+    };
+    let card = html! {
+        h2 id="login-card-title" { "Request not completed" }
+        p class="login-card-detail" { "This form has expired or did not come from this page. Nothing was changed: you are still signed in." }
+        (sign_out_form(&csrf))
+        p { a href="/login/account" { "Back to your account" } }
+    };
+    let mut response =
+        private_response((StatusCode::FORBIDDEN, Html(private_page(state, card))).into_response());
+    let ttl = state.browser.transaction_ttl();
+    set_cookie(&mut response, FORM_COOKIE, form_nonce, ttl);
+    response
+}
+
 /// An account form the backend could not complete: 429 when it limits forms, else 503,
 /// with one neutral page; part of the request may have been applied.
 fn not_completed(state: &AppState, error: BrowserVerifyError) -> Response {
@@ -294,7 +323,7 @@ async fn sign_out(
     };
     match consumed(&state, &headers, &form.csrf).await {
         Ok(true) => {}
-        Ok(false) => return refused(&state, StatusCode::FORBIDDEN),
+        Ok(false) => return sign_out_refused(&state, &headers).await,
         Err(error) => return not_completed(&state, error),
     }
     if let Some(sid) = cookie_value(&headers, SESSION_COOKIE)

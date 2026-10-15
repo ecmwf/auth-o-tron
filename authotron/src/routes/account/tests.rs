@@ -174,53 +174,69 @@ async fn sign_out_refuses_forged_requests_and_keeps_the_session() {
     without_nonce.0.remove("__Host-authotron_form");
     let other = "https://attacker.example.test";
     let (token, forged) = (csrf.as_str(), sign_in.as_str());
-    // The browser, Origin, fields and the status of its refusal.
+    // The browser, Origin, fields, the status of its refusal and whether the page
+    // offers a fresh sign-out form: only to a same-origin form with a stale token.
     type Attempt<'a> = (
         &'a Jar,
         Option<&'a str>,
         &'a [(&'a str, &'a str)],
         StatusCode,
+        bool,
     );
     let refused: [Attempt; 8] = [
-        (&jar, None, &[("csrf", token)], StatusCode::FORBIDDEN),
+        (&jar, None, &[("csrf", token)], StatusCode::FORBIDDEN, false),
         (
             &jar,
             Some("null"),
             &[("csrf", token)],
             StatusCode::FORBIDDEN,
+            false,
         ),
-        (&jar, Some(other), &[("csrf", token)], StatusCode::FORBIDDEN),
+        (
+            &jar,
+            Some(other),
+            &[("csrf", token)],
+            StatusCode::FORBIDDEN,
+            false,
+        ),
         (
             &jar,
             Some(ORIGIN),
             &[("csrf", forged)],
             StatusCode::FORBIDDEN,
+            true,
         ),
         (
             &without_nonce,
             Some(ORIGIN),
             &[("csrf", token)],
             StatusCode::FORBIDDEN,
+            true,
         ),
-        (&jar, Some(ORIGIN), &[], StatusCode::BAD_REQUEST),
+        (&jar, Some(ORIGIN), &[], StatusCode::BAD_REQUEST, false),
         (
             &jar,
             Some(ORIGIN),
             &[("csrf", token), ("csrf", token)],
             StatusCode::BAD_REQUEST,
+            false,
         ),
         (
             &jar,
             Some(ORIGIN),
             &[("csrf", token), ("session", "x")],
             StatusCode::BAD_REQUEST,
+            false,
         ),
     ];
-    for (jar, origin, fields, status) in refused {
+    for (jar, origin, fields, status, fresh) in refused {
         let response = post(&fixture, "/login/logout", jar, origin, fields).await;
         assert_eq!(response.status(), status, "{origin:?} {fields:?}");
-        assert!(response.headers().get(header::SET_COOKIE).is_none());
-        assert!(text(response).await.contains("Request not completed"));
+        let cookie = response.headers().get(header::SET_COOKIE).is_some();
+        let html = text(response).await;
+        assert!(html.contains("Request not completed"));
+        assert_eq!(html.contains("action=\"/login/logout\""), fresh);
+        assert_eq!(cookie, fresh);
     }
     assert!(signed_in_still(&fixture, &jar).await);
     // An account form cannot sign in either.
@@ -257,6 +273,36 @@ async fn sign_out_refuses_forged_requests_and_keeps_the_session() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn an_expired_sign_out_form_is_answered_with_a_fresh_one() {
+    let fixture = fixture(|_| {}).await;
+    let mut jar = signed_in(&fixture).await;
+    account_csrf(&fixture, &mut jar).await;
+    let expired = format!("{}.{}", "0".repeat(64), "0".repeat(64));
+    let mut anonymous = jar.clone();
+    anonymous.0.remove(SESSION);
+    let fields = [("csrf", expired.as_str())];
+    let response = post(&fixture, "/login/logout", &anonymous, Some(ORIGIN), &fields).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(!text(response).await.contains("<form"));
+    let response = post(&fixture, "/login/logout", &jar, Some(ORIGIN), &fields).await;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    jar.update(&response);
+    let html = text(response).await;
+    assert!(html.contains("you are still signed in"));
+    assert!(signed_in_still(&fixture, &jar).await);
+    let csrf = hidden(&html, "csrf");
+    let response = post(
+        &fixture,
+        "/login/logout",
+        &jar,
+        Some(ORIGIN),
+        &[("csrf", &csrf)],
+    )
+    .await;
+    assert_eq!(location(&response), "/login?signed-out");
 }
 
 #[tokio::test]

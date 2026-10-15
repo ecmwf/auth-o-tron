@@ -514,10 +514,12 @@ cannot sign in, and no sign-in form can sign out). Signing out deletes the sessi
 from the backend, so it ends on every replica at once, clears the session cookie
 and shows the sign-in page with a "You are signed out." notice. It is idempotent:
 without a session it still clears the cookie. A refused form changes nothing and
-shows a generic page. When no form can be issued (the form quota is spent, or the
-store fails), the account view still shows the identity, without forms. Signing out
-ends only the browser session: applications that
-hold [refresh tokens](oauth.md#refresh-tokens) stay signed in, and the provider
+shows a generic page; when a same-origin Sign out was refused for its token (the
+page was left open longer than `transaction_ttl_seconds`, say) and the browser still
+has a session, that page carries a fresh "Sign out" button. When no form can be
+issued (the form quota is spent, or the store fails), the account view still shows
+the identity, without forms. Signing out ends only the browser session: applications
+that hold [refresh tokens](oauth.md#refresh-tokens) stay signed in, and the provider
 session of an OIDC method is not ended.
 
 **Your logins.** When a client has refresh tokens, the account view also lists the
