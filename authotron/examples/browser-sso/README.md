@@ -42,19 +42,26 @@ offline sessions end at their next refresh, and users sign in again.
 
 ## Render and review
 
-Run from the workspace root:
+Run from the workspace root. `SECRETS_DIR` is a private directory outside the
+repository for generated credentials, `OUT_DIR` the directory for rendered files,
+and `<ingress-pod-cidr>` the network of the ingress controller pods (see below):
 
 ```bash
+SECRETS_DIR=~/.local/share/authotron-playground/secrets
+OUT_DIR=~/.local/share/authotron-playground/sso
+mkdir -p -m 0700 "$SECRETS_DIR"
 python3 authotron/examples/browser-sso/render_sso.py \
   --ui-host authotron-playground.lumi.apps.dte.destination-earth.eu \
   --issuer-host authotron-sso-playground.lumi.apps.dte.destination-earth.eu \
-  --trusted-proxy-addresses 10.70.0.0/16 \
-  --secret-file /tmp/opencode/authotron-sso-secrets.json \
-  --output-dir /tmp/opencode/authotron-sso
+  --trusted-proxy-addresses <ingress-pod-cidr> \
+  --secret-file "$SECRETS_DIR"/authotron-sso-secrets.json \
+  --output-dir "$OUT_DIR"
 ```
 
-Trusted proxy addresses are canonical addresses or networks of the ingress peers;
-on the playground that is the ingress pod range `10.70.0.0/16`, so rescheduled
+Trusted proxy addresses are canonical addresses or networks of the ingress peers.
+On the playground the ingress controllers are ordinary pods, so the peer is a pod
+address: give the cluster's pod network, or the part of it the ingress pods are
+scheduled in, as `<ingress-pod-cidr>` (for example `10.0.0.0/16`), so rescheduled
 ingress pods stay trusted. Keycloak runs with `--proxy-headers=xforwarded` and
 `--proxy-trusted-addresses`, and takes the scheme and client address from
 `X-Forwarded-*` headers only from these peers: requests from any other peer are

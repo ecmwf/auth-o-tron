@@ -30,14 +30,16 @@ fixture's signing-secret value is public demo data, not a production credential.
 
 Run from the Cargo workspace root. Resolve the official `rust:1.90-bookworm`
 multi-platform image digest, for example with `docker buildx imagetools inspect`,
-then supply the immutable reference:
+then supply the immutable reference. `OUT_DIR` is the directory for the rendered
+files, outside the repository:
 
 ```bash
+OUT_DIR=~/.local/share/authotron-playground/preview
 python3 authotron/examples/kubernetes-login-preview/render.py \
   --chart ../auth-o-tron-chart \
   --host authotron-playground.lumi.apps.dte.destination-earth.eu \
   --build-image docker.io/library/rust@sha256:<resolved-digest> \
-  --output-dir /tmp/opencode/authotron-playground
+  --output-dir "$OUT_DIR"
 ```
 
 The renderer creates `namespace.yaml`, `resources.yaml`, `source.tar.gz`,
@@ -47,23 +49,24 @@ Preserve the generated archive and script rather than copying build commands.
 
 ## Apply only to the playground
 
-For this cluster, every Kubernetes command must explicitly select this kubeconfig,
-context and namespace. Do not use these commands for another namespace:
+Every Kubernetes command must explicitly select the playground cluster's kubeconfig
+(`<kubeconfig>`), its context (`<context>`) and the namespace. Do not use these
+commands for another cluster or namespace:
 
 ```bash
-export KUBECONFIG=~/.kube/lumi-rke2-cls.yaml
-kubectl --kubeconfig="$KUBECONFIG" --context=lumi-rke2-cls \
+export KUBECONFIG=<kubeconfig>
+kubectl --kubeconfig="$KUBECONFIG" --context=<context> \
   --namespace=authotron-playground apply --server-side \
   --field-manager=authotron-playground-preview \
-  -f /tmp/opencode/authotron-playground/namespace.yaml
-kubectl --kubeconfig="$KUBECONFIG" --context=lumi-rke2-cls \
+  -f "$OUT_DIR"/namespace.yaml
+kubectl --kubeconfig="$KUBECONFIG" --context=<context> \
   --namespace=authotron-playground apply --server-side --dry-run=server \
   --field-manager=authotron-playground-preview \
-  -f /tmp/opencode/authotron-playground/resources.yaml
-kubectl --kubeconfig="$KUBECONFIG" --context=lumi-rke2-cls \
+  -f "$OUT_DIR"/resources.yaml
+kubectl --kubeconfig="$KUBECONFIG" --context=<context> \
   --namespace=authotron-playground apply --server-side \
   --field-manager=authotron-playground-preview \
-  -f /tmp/opencode/authotron-playground/resources.yaml
+  -f "$OUT_DIR"/resources.yaml
 ```
 
 Server-side apply avoids placing a second copy of the source archive into a

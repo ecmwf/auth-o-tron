@@ -46,15 +46,21 @@ requires no browser request to an external logo host, including during sign-in.
 
 Requirements: Python 3, PyYAML 6, Helm, and a chart with its locked dependencies
 already prepared. Run from the Cargo workspace root. Supply the resolved digest
-of the official Rust build image (for example `rust:1.90-bookworm`):
+of the official Rust build image (for example `rust:1.90-bookworm`). The commands
+below keep generated credentials in `SECRETS_DIR`, a private directory outside the
+repository, and write the rendered files to `OUT_DIR`, which the renderer creates
+with mode `0700`:
 
 ```bash
+SECRETS_DIR=~/.local/share/authotron-playground/secrets
+OUT_DIR=~/.local/share/authotron-playground/api-key
+mkdir -p -m 0700 "$SECRETS_DIR"
 python3 authotron/examples/ecmwf-api-key/render_api_key.py \
   --chart ../auth-o-tron-chart \
   --host authotron-playground.lumi.apps.dte.destination-earth.eu \
   --build-image docker.io/library/rust@sha256:<resolved-digest> \
-  --secret-file /tmp/opencode/ecmwf-browser-signing.json \
-  --output-dir /tmp/opencode/ecmwf-direct-playground
+  --secret-file "$SECRETS_DIR"/authotron-api-key-signing.json \
+  --output-dir "$OUT_DIR"
 ```
 
 To add the Keycloak demo SSO (`../browser-sso`) as an OIDC sign-in method, render
@@ -62,8 +68,8 @@ the SSO stack first and then add, together with the OAuth profile below:
 
 ```bash
 --sso-issuer https://authotron-sso-playground.lumi.apps.dte.destination-earth.eu/realms/aviso-demo \
---sso-secret-file /tmp/opencode/authotron-sso-secrets.json \
---upstream-key-file /tmp/opencode/authotron-upstream-key.json
+--sso-secret-file "$SECRETS_DIR"/authotron-sso-secrets.json \
+--upstream-key-file "$SECRETS_DIR"/authotron-upstream-key.json
 ```
 
 The three options go together and need `--oauth-secret-file`. The method is
@@ -93,7 +99,7 @@ session. Password and API-key sign-ins are unaffected.
 To add Basic login alongside the API-key button and optional demo SSO, also add:
 
 ```bash
---basic-secret-file /tmp/opencode/authotron-basic-demo.json
+--basic-secret-file "$SECRETS_DIR"/authotron-basic-demo.json
 ```
 
 This creates a private, reusable JSON file with username `browser-demo` and a
@@ -119,7 +125,7 @@ for uids explicitly listed with `--oauth-allow-ecmwf-uid`.
 To render dedicated Valkey-backed browser state and two application replicas, add:
 
 ```bash
---valkey-secret-file /tmp/opencode/authotron-browser-valkey.json \
+--valkey-secret-file "$SECRETS_DIR"/authotron-browser-valkey.json \
 --replicas 2 \
 --session-ttl-seconds 300 \
 --transaction-ttl-seconds 300
@@ -224,14 +230,14 @@ python3 authotron/examples/ecmwf-api-key/render_api_key.py \
   --chart ../auth-o-tron-chart \
   --host authotron-playground.lumi.apps.dte.destination-earth.eu \
   --build-image docker.io/library/rust@sha256:<resolved-digest> \
-  --secret-file /tmp/opencode/authotron-api-key-signing.json \
-  --basic-secret-file /tmp/opencode/authotron-basic-demo.json \
-  --valkey-secret-file /tmp/opencode/authotron-browser-valkey.json \
-  --oauth-secret-file /tmp/opencode/authotron-oauth-signing.json \
-  --retry-key-file /tmp/opencode/authotron-retry-key.json \
+  --secret-file "$SECRETS_DIR"/authotron-api-key-signing.json \
+  --basic-secret-file "$SECRETS_DIR"/authotron-basic-demo.json \
+  --valkey-secret-file "$SECRETS_DIR"/authotron-browser-valkey.json \
+  --oauth-secret-file "$SECRETS_DIR"/authotron-oauth-signing.json \
+  --retry-key-file "$SECRETS_DIR"/authotron-retry-key.json \
   --oauth-allow-ecmwf-uid <ecmwf-uid> \
   --oauth-aviso-resource https://aviso-mcp-dev.lumi.apps.dte.destination-earth.eu/mcp \
-  --output-dir /tmp/opencode/authotron-api-key
+  --output-dir "$OUT_DIR"
 ```
 
 `--oauth-allow-ecmwf-uid UID` is optional and repeatable (at most 32 unique uids,
