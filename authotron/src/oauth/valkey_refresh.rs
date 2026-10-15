@@ -379,6 +379,7 @@ mod tests {
             idle_ttl_seconds: 600,
             absolute_ttl_seconds: 3600,
             upstream_offline_access: false,
+            retry_window_seconds: 30,
         }
     }
     fn family(presented: Presented) -> RefreshFamily {

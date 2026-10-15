@@ -211,6 +211,8 @@ pub struct OAuthClient {
 
 /// Longest permitted refresh-token family lifetime (400 days).
 pub const MAX_REFRESH_TOKEN_ABSOLUTE_TTL_SECONDS: u64 = 400 * 86_400;
+/// Longest permitted retry window of a rotated refresh token.
+pub const MAX_REFRESH_RETRY_WINDOW_SECONDS: u64 = 30;
 
 /// Per-client opt-in for rotating refresh tokens. A family ends at the earlier of
 /// `idle_ttl_seconds` after its last use and `absolute_ttl_seconds` after the login.
@@ -226,6 +228,12 @@ pub struct RefreshTokenPolicy {
     /// provider's offline session: refreshes renew it, and the family ends with it.
     /// Requires `enabled` and `oauth.upstream_token_encryption`.
     pub upstream_offline_access: bool,
+    /// For how long after a rotation the rotated token, presented again while its
+    /// successor is unused, is answered with that successor: a refresh whose response
+    /// was lost, or a concurrent one. Later, or with 0, presenting it is reuse and
+    /// revokes the family.
+    #[schemars(range(min = 0, max = 30))]
+    pub retry_window_seconds: u64,
 }
 
 impl Default for RefreshTokenPolicy {
@@ -235,6 +243,7 @@ impl Default for RefreshTokenPolicy {
             idle_ttl_seconds: 30 * 86_400,
             absolute_ttl_seconds: 90 * 86_400,
             upstream_offline_access: false,
+            retry_window_seconds: MAX_REFRESH_RETRY_WINDOW_SECONDS,
         }
     }
 }
@@ -254,6 +263,9 @@ impl RefreshTokenPolicy {
         }
         if self.upstream_offline_access && !self.enabled {
             return Err("OAuth refresh_tokens upstream_offline_access requires enabled");
+        }
+        if self.retry_window_seconds > MAX_REFRESH_RETRY_WINDOW_SECONDS {
+            return Err("OAuth refresh_tokens retry_window_seconds must be between 0 and 30");
         }
         Ok(())
     }
@@ -628,11 +640,22 @@ mod tests {
                 enabled: true,
                 idle_ttl_seconds: idle,
                 absolute_ttl_seconds: absolute,
-                upstream_offline_access: false,
+                ..RefreshTokenPolicy::default()
             };
             assert_eq!(client.validate().is_ok(), valid, "{idle} {absolute}");
         }
         assert!(serde_json::from_value::<RefreshTokenPolicy>(json!({"enable": true})).is_err());
+        assert_eq!(defaults.retry_window_seconds, 30);
+        let window = &schema["properties"]["retry_window_seconds"];
+        assert_eq!(
+            (&window["minimum"], &window["maximum"]),
+            (&json!(0), &json!(30))
+        );
+        for (seconds, valid) in [(0, true), (30, true), (31, false)] {
+            let mut client = client("https://app.example.org/cb");
+            client.refresh_tokens.retry_window_seconds = seconds;
+            assert_eq!(client.validate().is_ok(), valid, "{seconds}");
+        }
     }
 
     #[test]

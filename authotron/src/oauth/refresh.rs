@@ -415,6 +415,7 @@ pub(super) mod tests {
             idle_ttl_seconds: 300,
             absolute_ttl_seconds: 600,
             upstream_offline_access: false,
+            retry_window_seconds: 30,
         };
         assert_eq!(initial_expiry(1_000, &policy), Some((601_000, 301_000)));
         assert_eq!(deadline(500_000, 300, Some(601_000)), Some(601_000));

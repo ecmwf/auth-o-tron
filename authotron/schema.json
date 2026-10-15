@@ -1433,7 +1433,8 @@
             "enabled": false,
             "idle_ttl_seconds": 2592000,
             "absolute_ttl_seconds": 7776000,
-            "upstream_offline_access": false
+            "upstream_offline_access": false,
+            "retry_window_seconds": 30
           }
         }
       },
@@ -1499,6 +1500,14 @@
           "description": "Couple each family started by an OIDC sign-in with `offline_access` to the\nprovider's offline session: refreshes renew it, and the family ends with it.\nRequires `enabled` and `oauth.upstream_token_encryption`.",
           "type": "boolean",
           "default": false
+        },
+        "retry_window_seconds": {
+          "description": "For how long after a rotation the rotated token, presented again while its\nsuccessor is unused, is answered with that successor: a refresh whose response\nwas lost, or a concurrent one. Later, or with 0, presenting it is reuse and\nrevokes the family.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "maximum": 30,
+          "default": 30
         }
       },
       "additionalProperties": false
