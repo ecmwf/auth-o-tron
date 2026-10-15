@@ -24,6 +24,7 @@ use crate::{
     browser::BrowserLoginState,
     metrics::{Metrics, UpstreamTokenEvent},
     oidc::{
+        OidcError,
         method::OidcMethod,
         upstream::{UpstreamBinding, UpstreamCipher, UpstreamGrant},
     },
@@ -87,9 +88,29 @@ struct Revocation {
 }
 
 impl Revocation {
-    async fn run(self) {
+    /// A revocation within the span of the current request.
+    fn new(
+        method: &Arc<OidcMethod>,
+        refresh_token: Zeroizing<String>,
+        audit: RevocationAudit,
+        metrics: &Metrics,
+    ) -> Self {
+        Self {
+            method: method.clone(),
+            refresh_token,
+            metrics: metrics.clone(),
+            audit,
+            span: tracing::Span::current(),
+        }
+    }
+    async fn run(self) -> UpstreamTokenEvent {
+        let outcome = self.method.revoke(&self.refresh_token).await;
+        self.report(outcome)
+    }
+    /// Logs and counts the provider's answer.
+    fn report(&self, outcome: Result<bool, OidcError>) -> UpstreamTokenEvent {
         let audit = &self.audit;
-        let event = match self.method.revoke(&self.refresh_token).await {
+        let event = match outcome {
             Ok(true) => {
                 family_event!(
                     info,
@@ -123,6 +144,7 @@ impl Revocation {
             }
         };
         self.metrics.record_upstream_token(event);
+        event
     }
 }
 
@@ -148,21 +170,9 @@ impl Upstream {
         }
     }
     /// Queues a revocation; on a full queue it is returned for the skip log.
-    fn queue(
-        &self,
-        method: &Arc<OidcMethod>,
-        refresh_token: Zeroizing<String>,
-        audit: RevocationAudit,
-        metrics: &Metrics,
-    ) -> Result<(), RevocationAudit> {
+    fn queue(&self, revocation: Revocation) -> Result<(), RevocationAudit> {
         self.revocations
-            .try_send(Revocation {
-                method: method.clone(),
-                refresh_token,
-                metrics: metrics.clone(),
-                audit,
-                span: tracing::Span::current(),
-            })
+            .try_send(revocation)
             .map_err(|error| error.into_inner().audit)
     }
 }
@@ -211,7 +221,8 @@ impl OAuthRuntime {
         let Some(upstream) = &self.upstream else {
             return audit.skipped(metrics);
         };
-        if let Err(audit) = upstream.queue(method, refresh_token, audit, metrics) {
+        let revocation = Revocation::new(method, refresh_token, audit, metrics);
+        if let Err(audit) = upstream.queue(revocation) {
             audit.skipped(metrics);
         }
     }
@@ -251,6 +262,25 @@ impl OAuthRuntime {
         browser: &BrowserLoginState,
         metrics: &Metrics,
     ) {
+        let Some((upstream, revocation)) = self.revocation(grant, sealed, family, browser, metrics)
+        else {
+            return;
+        };
+        if let Err(audit) = upstream.queue(revocation) {
+            audit.skipped(metrics);
+        }
+    }
+
+    /// The revocation of the sealed grant of `grant`, or `None`, logged and counted as
+    /// skipped, when no configured method and key open it any more.
+    fn revocation(
+        &self,
+        grant: &RefreshGrant,
+        sealed: &str,
+        family: &str,
+        browser: &BrowserLoginState,
+        metrics: &Metrics,
+    ) -> Option<(&Upstream, Revocation)> {
         let audit = RevocationAudit::of(grant, family);
         let opened = self.upstream.as_ref().and_then(|upstream| {
             let method = browser.method(&grant.method)?.oidc()?;
@@ -258,12 +288,14 @@ impl OAuthRuntime {
             Some((upstream, method, opened))
         });
         let Some((upstream, method, opened)) = opened else {
-            return audit.skipped(metrics);
+            audit.skipped(metrics);
+            return None;
         };
         let refresh_token = Zeroizing::new(opened.refresh_token().to_owned());
-        if let Err(audit) = upstream.queue(method, refresh_token, audit, metrics) {
-            audit.skipped(metrics);
-        }
+        Some((
+            upstream,
+            Revocation::new(method, refresh_token, audit, metrics),
+        ))
     }
 }
 

@@ -107,6 +107,33 @@ macro_rules! family_event {
 }
 pub(super) use family_event;
 
+/// Logs and counts the end of a family; returns its reference.
+pub(super) fn family_ended(family: &EndedFamily, reason: FamilyEnd, metrics: &Metrics) -> String {
+    let reference = family_ref(&family.family_id);
+    let label = reason.label();
+    if reason.warns() {
+        family_event!(
+            warn,
+            family.grant,
+            reference,
+            event_name = "oauth.refresh_token.family_revoked",
+            reason = label,
+            "refresh token family revoked"
+        );
+    } else {
+        family_event!(
+            info,
+            family.grant,
+            reference,
+            event_name = "oauth.refresh_token.family_revoked",
+            reason = label,
+            "refresh token family revoked"
+        );
+    }
+    metrics.record_refresh_token(RefreshTokenEvent::FamilyRevoked);
+    reference
+}
+
 impl OAuthRuntime {
     /// Logs and counts the end of each family and queues revocation of a coupled
     /// family's upstream grant.
@@ -118,28 +145,7 @@ impl OAuthRuntime {
         metrics: &Metrics,
     ) {
         for family in ended {
-            let reference = family_ref(&family.family_id);
-            let label = reason.label();
-            if reason.warns() {
-                family_event!(
-                    warn,
-                    family.grant,
-                    reference,
-                    event_name = "oauth.refresh_token.family_revoked",
-                    reason = label,
-                    "refresh token family revoked"
-                );
-            } else {
-                family_event!(
-                    info,
-                    family.grant,
-                    reference,
-                    event_name = "oauth.refresh_token.family_revoked",
-                    reason = label,
-                    "refresh token family revoked"
-                );
-            }
-            metrics.record_refresh_token(RefreshTokenEvent::FamilyRevoked);
+            let reference = family_ended(&family, reason, metrics);
             if let Some(sealed) = &family.sealed {
                 self.revoke_sealed(&family.grant, sealed, &reference, browser, metrics);
             }
