@@ -35,6 +35,12 @@ pub struct JWTAuthConfig {
     pub realm: String,
     pub name: String,
     pub iam_realm: String,
+    /// Required `aud` claim. Not checked when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    /// Required `iss` claim. Not checked when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
 }
 
 /// Provider that validates JWTs using downloaded keys (JWK) from `cert_uri`.
@@ -147,7 +153,19 @@ impl Provider for JWTProvider {
             .map_err(|_| "Failed to create decoding key from JWK".to_string())?;
 
         let mut validation = Validation::new(alg.parse::<Algorithm>().unwrap());
-        validation.validate_aud = false; // Possibly enable if you want to check "aud"
+        let mut required_claims = vec!["exp"];
+        match &self.config.audience {
+            Some(audience) => {
+                validation.set_audience(&[audience]);
+                required_claims.push("aud");
+            }
+            None => validation.validate_aud = false,
+        }
+        if let Some(issuer) = &self.config.issuer {
+            validation.set_issuer(&[issuer]);
+            required_claims.push("iss");
+        }
+        validation.set_required_spec_claims(&required_claims);
 
         let decoded = decode::<Claims>(token, &decoding_key, &validation)
             .map_err(|e| format!("Failed to decode JWT: {}", e))?;
@@ -317,6 +335,8 @@ mod tests {
             realm: "test".to_string(),
             name: "TestJWT".to_string(),
             iam_realm: "test".to_string(),
+            audience: None,
+            issuer: None,
         };
         let provider = JWTProvider::new(&config);
         let result = provider.authenticate("invalid.token").await;
@@ -344,6 +364,8 @@ mod tests {
             realm: "test".to_string(),
             name: "TestJWT".to_string(),
             iam_realm: "test".to_string(),
+            audience: None,
+            issuer: None,
         };
         let provider = JWTProvider::new(&config);
 
@@ -376,5 +398,82 @@ mod tests {
             user.attributes.get("nested"),
             Some(&"{\"flag\":true}".to_string())
         );
+    }
+    /// Builds a provider with the given audience and issuer, backed by a mock JWKS.
+    async fn provider_with_checks(
+        server: &mut Server,
+        audience: Option<&str>,
+        issuer: Option<&str>,
+    ) -> JWTProvider {
+        server
+            .mock("GET", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"keys": [{"kty": "oct", "k": "c2VjcmV0", "alg": "HS512", "kid": "testkid"}]}"#,
+            )
+            .create_async()
+            .await;
+        JWTProvider::new(&JWTAuthConfig {
+            cert_uri: server.url(),
+            realm: "test".to_string(),
+            name: "TestJWT".to_string(),
+            iam_realm: "test".to_string(),
+            audience: audience.map(str::to_string),
+            issuer: issuer.map(str::to_string),
+        })
+    }
+
+    fn token_with(extra: serde_json::Value) -> String {
+        let mut claims = json!({"sub": "user1", "scope": "", "exp": 4102444800usize});
+        for (k, v) in extra.as_object().unwrap() {
+            claims[k] = v.clone();
+        }
+        let mut header = jsonwebtoken::Header::new(Algorithm::HS512);
+        header.kid = Some("testkid".to_string());
+        jsonwebtoken::encode(
+            &header,
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(b"secret"),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_jwt_provider_accepts_matching_audience_and_issuer() {
+        let mut server = Server::new_async().await;
+        let provider =
+            provider_with_checks(&mut server, Some("polytope"), Some("https://iam")).await;
+        let token = token_with(json!({"aud": ["polytope", "account"], "iss": "https://iam"}));
+        assert!(provider.authenticate(&token).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_jwt_provider_rejects_wrong_or_missing_audience() {
+        let mut server = Server::new_async().await;
+        let provider = provider_with_checks(&mut server, Some("polytope"), None).await;
+        let wrong = token_with(json!({"aud": "other-app"}));
+        let missing = token_with(json!({}));
+        assert!(provider.authenticate(&wrong).await.is_err());
+        assert!(provider.authenticate(&missing).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_jwt_provider_rejects_wrong_or_missing_issuer() {
+        let mut server = Server::new_async().await;
+        let provider = provider_with_checks(&mut server, None, Some("https://iam")).await;
+        let wrong = token_with(json!({"iss": "https://evil"}));
+        let missing = token_with(json!({}));
+        assert!(provider.authenticate(&wrong).await.is_err());
+        assert!(provider.authenticate(&missing).await.is_err());
+    }
+
+    /// Without audience and issuer, any aud and iss are accepted, as before.
+    #[tokio::test]
+    async fn test_jwt_provider_unchecked_by_default() {
+        let mut server = Server::new_async().await;
+        let provider = provider_with_checks(&mut server, None, None).await;
+        let token = token_with(json!({"aud": "other-app", "iss": "https://anything"}));
+        assert!(provider.authenticate(&token).await.is_ok());
     }
 }
