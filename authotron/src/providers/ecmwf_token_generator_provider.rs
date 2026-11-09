@@ -67,10 +67,13 @@ impl EcmwfTokenGeneratorProvider {
 
 /// Validates a token using the ECMWF Token Generator validate-token endpoint.
 /// Caches results for 240 seconds (tokens valid for 300) to reduce load on the token generator.
+/// At most 10,000 tokens are kept: rejected tokens are cached too, and expired
+/// entries are only dropped when the same token is looked up again.
 #[cfg_attr(
     not(test),
     cached(
         time = 240,
+        size = 10_000,
         result = true,
         with_cached_flag = true,
         sync_writes = "default"
@@ -124,6 +127,7 @@ async fn validate_token_with_generator(
     not(test),
     cached(
         time = 240,
+        size = 10_000,
         result = true,
         with_cached_flag = true,
         sync_writes = "default"

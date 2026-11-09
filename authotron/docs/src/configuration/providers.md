@@ -137,6 +137,8 @@ This provider handles OpenID Connect offline tokens, commonly used with Keycloak
 
 The flow is: introspect the offline token, exchange for an access token, validate the access token via JWKS.
 
+Introspection results are cached for 120 seconds and access tokens for 10 seconds, each for at most 10,000 tokens.
+
 **Example:**
 
 ```yaml

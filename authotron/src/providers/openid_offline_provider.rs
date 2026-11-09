@@ -74,10 +74,15 @@ impl OpenIDOfflineProvider {
 }
 
 /// Checks if the given token has "offline_access" scope. If valid, returns true.
+///
+/// The token caches are bounded: the presented token is part of the key, and
+/// expired entries are only dropped when the same key is looked up again, so an
+/// unbounded cache would keep every unknown token in memory.
 #[cfg_attr(
     not(test),
     cached(
         time = 120,
+        size = 10_000,
         result = true,
         with_cached_flag = true,
         sync_writes = "default"
@@ -121,6 +126,7 @@ async fn check_offline_access_token(
     not(test),
     cached(
         time = 10,
+        size = 10_000,
         result = true,
         with_cached_flag = true,
         sync_writes = "default"
