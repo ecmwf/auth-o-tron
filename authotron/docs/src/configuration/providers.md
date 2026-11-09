@@ -130,12 +130,19 @@ This provider handles OpenID Connect offline tokens, commonly used with Keycloak
 | Field | Type | Description |
 |-------|------|-------------|
 | cert_uri | string | URL to the JWKS endpoint |
-| public_client_id | string | Client ID for public token introspection |
-| private_client_id | string | Client ID for private token exchange |
-| private_client_secret | string | Secret for the private client |
+| public_client_id | string | Client the offline tokens were issued to; used for the token exchange |
+| private_client_id | string | Confidential client used for introspection (and sent with the exchange when set). Required unless `skip_introspection` is set |
+| private_client_secret | string | Secret for the private client. Required unless `skip_introspection` is set |
 | iam_url | string | Base URL of the identity management server |
+| iam_realm | string | Optional. Realm on the identity server. Defaults to `realm`. Set it to give users a different realm in Auth-O-Tron than on the identity server |
+| skip_introspection | bool | Optional, default `false`. Exchange the token without introspecting it first (see below) |
 
 The flow is: introspect the offline token, exchange for an access token, validate the access token via JWKS.
+
+**Without a confidential client:** with `skip_introspection: true` the token is exchanged directly, using only `public_client_id`. This needs no secret, but has two drawbacks:
+
+- Any refresh token of the public client is accepted, not only offline tokens.
+- Unknown tokens are no longer filtered out by introspection, so each new token causes a call to the token endpoint.
 
 **Example:**
 
@@ -149,6 +156,20 @@ providers:
     private_client_id: private-client
     private_client_secret: super-secret-value
     iam_url: https://keycloak.example.com
+```
+
+Without a confidential client, with users in realm `mch` for the identity server realm `example.com`:
+
+```yaml
+providers:
+  - type: openid-offline
+    name: keycloak_offline
+    realm: mch
+    iam_realm: example.com
+    cert_uri: https://keycloak.example.com/realms/example.com/protocol/openid-connect/certs
+    public_client_id: api-token
+    iam_url: https://keycloak.example.com
+    skip_introspection: true
 ```
 
 ### 6. ECMWF Token Generator Provider

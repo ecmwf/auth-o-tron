@@ -286,27 +286,46 @@
           "type": "string"
         },
         "public_client_id": {
+          "description": "Client the offline tokens were issued to; used for the token exchange.",
           "type": "string"
         },
         "private_client_id": {
-          "type": "string"
+          "description": "Confidential client used for introspection. Not needed with `skip_introspection`.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "private_client_secret": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "iam_url": {
           "type": "string"
         },
         "realm": {
+          "description": "Realm given to authenticated users.",
           "type": "string"
+        },
+        "iam_realm": {
+          "description": "Realm on the identity server. Defaults to `realm`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skip_introspection": {
+          "description": "Exchange the token without introspecting it first. Use only when no\nconfidential client is available: any refresh token of the public client\nis then accepted, not only offline tokens.",
+          "type": "boolean",
+          "default": false
         }
       },
       "required": [
         "name",
         "cert_uri",
         "public_client_id",
-        "private_client_id",
-        "private_client_secret",
         "iam_url",
         "realm"
       ]
@@ -593,7 +612,7 @@
         },
         "service_version": {
           "type": "string",
-          "default": "0.2.12"
+          "default": "0.3.8"
         }
       },
       "required": [
