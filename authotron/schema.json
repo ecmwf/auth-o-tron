@@ -266,6 +266,20 @@
         },
         "iam_realm": {
           "type": "string"
+        },
+        "audience": {
+          "description": "Required `aud` claim. Not checked when unset.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "issuer": {
+          "description": "Required `iss` claim. Not checked when unset.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -299,6 +313,20 @@
         },
         "realm": {
           "type": "string"
+        },
+        "audience": {
+          "description": "Required `aud` claim of the exchanged access token.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "issuer": {
+          "description": "Required `iss` claim of the exchanged access token.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -593,7 +621,7 @@
         },
         "service_version": {
           "type": "string",
-          "default": "0.2.12"
+          "default": "0.3.8"
         }
       },
       "required": [

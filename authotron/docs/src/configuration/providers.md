@@ -56,9 +56,13 @@ The JWT provider validates JSON Web Tokens using a JWKS (JSON Web Key Set) endpo
 | Field | Type | Description |
 |-------|------|-------------|
 | cert_uri | string | URL to the JWKS endpoint |
-| iam_realm | string | The realm/issuer to validate against |
+| iam_realm | string | Realm name on the identity server (not checked against the token) |
+| audience | string | Optional. Required `aud` claim. Not checked when unset |
+| issuer | string | Optional. Required `iss` claim. Not checked when unset |
 
 The provider caches the JWKS for 600 seconds to avoid repeated requests to the certificate endpoint.
+
+Without `audience` and `issuer`, any token signed by a key in the JWKS is accepted, including tokens issued to other clients of the same identity server realm. Set both when the realm is shared with other applications.
 
 **Example:**
 
@@ -134,6 +138,8 @@ This provider handles OpenID Connect offline tokens, commonly used with Keycloak
 | private_client_id | string | Client ID for private token exchange |
 | private_client_secret | string | Secret for the private client |
 | iam_url | string | Base URL of the identity management server |
+| audience | string | Optional. Required `aud` claim of the access token |
+| issuer | string | Optional. Required `iss` claim of the access token |
 
 The flow is: introspect the offline token, exchange for an access token, validate the access token via JWKS.
 
