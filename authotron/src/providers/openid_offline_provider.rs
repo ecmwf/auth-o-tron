@@ -104,19 +104,34 @@ async fn check_offline_access_token(
         .form(&[("token", token)])
         .send()
         .await
-        .map_err(|e| format!("Failed to call introspection endpoint: {}", e))?
+        .map_err(|e| format!("Failed to call introspection endpoint: {}", e))?;
+
+    // A failed call (e.g. wrong client credentials) is an error, not an invalid
+    // token: it must not be cached as a negative result.
+    if !resp.status().is_success() {
+        return Err(format!(
+            "Introspection endpoint returned status {}",
+            resp.status()
+        ));
+    }
+    let body = resp
         .json::<Value>()
         .await
         .map_err(|e| format!("Failed to parse introspection JSON: {}", e))?;
 
-    // If "active" is true and "scope" includes "offline_access", we consider it valid
-    let active = resp["active"].as_bool().unwrap_or(false);
-    let scope = resp["scope"].as_str().unwrap_or("");
+    // Valid if "active" is true and "offline_access" is one of the scopes
+    let active = body["active"].as_bool().unwrap_or(false);
+    let has_offline_scope = body["scope"]
+        .as_str()
+        .unwrap_or("")
+        .split_whitespace()
+        .any(|s| s == "offline_access");
 
-    Ok(Return::new(active && scope.contains("offline_access")))
+    Ok(Return::new(active && has_offline_scope))
 }
 
 /// Exchanges the offline token for a regular access token using a refresh call.
+/// Returns `None` when the identity server rejects the token.
 #[cfg_attr(
     not(test),
     cached(
@@ -129,7 +144,7 @@ async fn check_offline_access_token(
 async fn get_access_token(
     config: OpenIDOfflineProviderConfig,
     refresh_token: String,
-) -> Result<Return<String>, String> {
+) -> Result<Return<Option<String>>, String> {
     debug!(
         event_name = "providers.openid_offline.exchange.started",
         event_domain = "providers",
@@ -155,6 +170,24 @@ async fn get_access_token(
         .await
         .map_err(|e| format!("Failed to exchange token: {}", e))?;
 
+    let status = resp.status();
+    // RFC 6749 section 5.2: a rejected grant is a 400 with error "invalid_grant",
+    // cached like a valid result. Other errors (e.g. "invalid_client") point at
+    // our configuration and are not cached.
+    if status == reqwest::StatusCode::BAD_REQUEST {
+        let body = resp.json::<Value>().await.unwrap_or_default();
+        if body["error"].as_str() == Some("invalid_grant") {
+            return Ok(Return::new(None));
+        }
+        return Err(format!(
+            "Token exchange failed: {}",
+            body["error"].as_str().unwrap_or("unknown error")
+        ));
+    }
+    if !status.is_success() {
+        return Err(format!("Token endpoint returned status {}", status));
+    }
+
     let json_body = resp
         .json::<Value>()
         .await
@@ -166,7 +199,7 @@ async fn get_access_token(
         .ok_or_else(|| "Failed to retrieve access token from response".to_string())?
         .to_string();
 
-    Ok(Return::new(access_token))
+    Ok(Return::new(Some(access_token)))
 }
 
 #[async_trait::async_trait]
@@ -230,7 +263,10 @@ impl Provider for OpenIDOfflineProvider {
                 "offline token exchange served from cache"
             );
         }
-        self.jwt_auth.authenticate(&access_token).await
+        let access_token = access_token
+            .as_ref()
+            .ok_or_else(|| "Offline token rejected by the identity server".to_string())?;
+        self.jwt_auth.authenticate(access_token).await
     }
 }
 
@@ -338,6 +374,92 @@ mod tests {
         let result = get_access_token(config, "dummy_refresh_token".to_string()).await;
         m.assert_async().await;
         assert!(result.is_ok());
-        assert_eq!(*result.unwrap(), "new_access_token".to_string());
+        assert_eq!(*result.unwrap(), Some("new_access_token".to_string()));
+    }
+
+    fn config_for(server: &Server) -> OpenIDOfflineProviderConfig {
+        OpenIDOfflineProviderConfig {
+            name: "TestOpenID".to_string(),
+            cert_uri: "".to_string(),
+            public_client_id: "public".to_string(),
+            private_client_id: "private".to_string(),
+            private_client_secret: "secret".to_string(),
+            iam_url: server.url(),
+            realm: "test".to_string(),
+        }
+    }
+
+    async fn mock_post(
+        server: &mut Server,
+        path: &str,
+        status: usize,
+        body: &str,
+    ) -> mockito::Mock {
+        server
+            .mock("POST", path)
+            .with_status(status)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await
+    }
+
+    const INTROSPECT_PATH: &str = "/realms/test/protocol/openid-connect/token/introspect";
+    const TOKEN_PATH: &str = "/realms/test/protocol/openid-connect/token";
+
+    /// The scope must contain "offline_access" as a whole word.
+    #[tokio::test]
+    async fn test_check_offline_access_token_rejects_scope_substring() {
+        let mut server = Server::new_async().await;
+        let body = r#"{"active": true, "scope": "openid no_offline_access_x"}"#;
+        let m = mock_post(&mut server, INTROSPECT_PATH, 200, body).await;
+        let result = check_offline_access_token(config_for(&server), "dummy".to_string()).await;
+        m.assert_async().await;
+        assert!(!*result.unwrap());
+    }
+
+    /// A failed introspection call is an error, so it is not cached as an invalid token.
+    #[tokio::test]
+    async fn test_check_offline_access_token_error_status() {
+        let mut server = Server::new_async().await;
+        let body = r#"{"error": "invalid_request", "error_description": "Authentication failed."}"#;
+        let m = mock_post(&mut server, INTROSPECT_PATH, 401, body).await;
+        let result = check_offline_access_token(config_for(&server), "dummy".to_string()).await;
+        m.assert_async().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_access_token_invalid_grant() {
+        let mut server = Server::new_async().await;
+        let body = r#"{"error": "invalid_grant", "error_description": "Invalid refresh token"}"#;
+        let m = mock_post(&mut server, TOKEN_PATH, 400, body).await;
+        let result = get_access_token(config_for(&server), "dummy".to_string()).await;
+        m.assert_async().await;
+        assert_eq!(*result.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_get_access_token_invalid_client() {
+        let mut server = Server::new_async().await;
+        let m = mock_post(
+            &mut server,
+            TOKEN_PATH,
+            400,
+            r#"{"error": "invalid_client"}"#,
+        )
+        .await;
+        let result = get_access_token(config_for(&server), "dummy".to_string()).await;
+        m.assert_async().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_access_token_server_error() {
+        let mut server = Server::new_async().await;
+        let m = mock_post(&mut server, TOKEN_PATH, 503, "").await;
+        let result = get_access_token(config_for(&server), "dummy".to_string()).await;
+        m.assert_async().await;
+        assert!(result.is_err());
     }
 }
