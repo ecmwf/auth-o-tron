@@ -137,6 +137,8 @@ This provider handles OpenID Connect offline tokens, commonly used with Keycloak
 
 The flow is: introspect the offline token, exchange for an access token, validate the access token via JWKS.
 
+The introspection must report the token as active with `offline_access` among its scopes. A token rejected by the exchange (`invalid_grant`) is cached like a valid one; other errors from the identity server are not cached.
+
 **Example:**
 
 ```yaml
