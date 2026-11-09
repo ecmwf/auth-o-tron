@@ -35,6 +35,10 @@ pub struct JWTAuthConfig {
     pub realm: String,
     pub name: String,
     pub iam_realm: String,
+    /// Only take client roles from this `resource_access` entry. When unset, the
+    /// roles of every client in the token are used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles_client: Option<String>,
 }
 
 /// Provider that validates JWTs using downloaded keys (JWK) from `cert_uri`.
@@ -165,9 +169,18 @@ impl Provider for JWTProvider {
         let mut roles = claims.realm_access.map(|ra| ra.roles).unwrap_or_default();
 
         roles.extend(claims.entitlements.unwrap_or_default());
-        if let Some(resource_access) = claims.resource_access {
-            for (_, roles_container) in resource_access {
-                roles.extend(roles_container.roles);
+        if let Some(mut resource_access) = claims.resource_access {
+            match &self.config.roles_client {
+                Some(client) => {
+                    if let Some(roles_container) = resource_access.remove(client) {
+                        roles.extend(roles_container.roles);
+                    }
+                }
+                None => {
+                    for (_, roles_container) in resource_access {
+                        roles.extend(roles_container.roles);
+                    }
+                }
             }
         }
 
@@ -317,6 +330,7 @@ mod tests {
             realm: "test".to_string(),
             name: "TestJWT".to_string(),
             iam_realm: "test".to_string(),
+            roles_client: None,
         };
         let provider = JWTProvider::new(&config);
         let result = provider.authenticate("invalid.token").await;
@@ -344,6 +358,7 @@ mod tests {
             realm: "test".to_string(),
             name: "TestJWT".to_string(),
             iam_realm: "test".to_string(),
+            roles_client: None,
         };
         let provider = JWTProvider::new(&config);
 
@@ -375,6 +390,62 @@ mod tests {
         assert_eq!(
             user.attributes.get("nested"),
             Some(&"{\"flag\":true}".to_string())
+        );
+    }
+    async fn roles_for(roles_client: Option<&str>) -> Vec<String> {
+        let mut server = Server::new_async().await;
+        server
+            .mock("GET", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"keys": [{"kty": "oct", "k": "c2VjcmV0", "alg": "HS512", "kid": "testkid"}]}"#,
+            )
+            .create_async()
+            .await;
+        let provider = JWTProvider::new(&JWTAuthConfig {
+            cert_uri: server.url(),
+            realm: "test".to_string(),
+            name: "TestJWT".to_string(),
+            iam_realm: "test".to_string(),
+            roles_client: roles_client.map(str::to_string),
+        });
+        let claims = json!({
+            "sub": "user1",
+            "scope": "",
+            "exp": 4102444800usize,
+            "realm_access": {"roles": ["realm_role"]},
+            "resource_access": {
+                "polytope": {"roles": ["polytope_read"]},
+                "other-app": {"roles": ["polytope_admin"]}
+            }
+        });
+        let mut header = jsonwebtoken::Header::new(Algorithm::HS512);
+        header.kid = Some("testkid".to_string());
+        let token = jsonwebtoken::encode(
+            &header,
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(b"secret"),
+        )
+        .unwrap();
+        let mut roles = provider.authenticate(&token).await.unwrap().roles;
+        roles.sort();
+        roles
+    }
+
+    #[tokio::test]
+    async fn test_jwt_provider_roles_from_one_client() {
+        assert_eq!(
+            roles_for(Some("polytope")).await,
+            vec!["polytope_read", "realm_role"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_jwt_provider_roles_from_all_clients_by_default() {
+        assert_eq!(
+            roles_for(None).await,
+            vec!["polytope_admin", "polytope_read", "realm_role"]
         );
     }
 }

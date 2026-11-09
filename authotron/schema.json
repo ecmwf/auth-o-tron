@@ -266,6 +266,13 @@
         },
         "iam_realm": {
           "type": "string"
+        },
+        "roles_client": {
+          "description": "Only take client roles from this `resource_access` entry. When unset, the\nroles of every client in the token are used.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -299,6 +306,13 @@
         },
         "realm": {
           "type": "string"
+        },
+        "roles_client": {
+          "description": "Only take client roles from this `resource_access` entry.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -593,7 +607,7 @@
         },
         "service_version": {
           "type": "string",
-          "default": "0.2.12"
+          "default": "0.3.8"
         }
       },
       "required": [

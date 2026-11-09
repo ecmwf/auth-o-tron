@@ -38,6 +38,9 @@ pub struct OpenIDOfflineProviderConfig {
     pub private_client_secret: String,
     pub iam_url: String,
     pub realm: String,
+    /// Only take client roles from this `resource_access` entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles_client: Option<String>,
 }
 
 /// A provider that validates offline_access tokens and then fetches
@@ -64,6 +67,7 @@ impl OpenIDOfflineProvider {
             realm: config.realm.clone(),
             name: config.name.clone(),
             iam_realm: config.realm.clone(),
+            roles_client: config.roles_client.clone(),
         });
 
         Self {
@@ -269,6 +273,7 @@ mod tests {
             private_client_secret: "secret".to_string(),
             iam_url: server.url(),
             realm: realm.to_string(),
+            roles_client: None,
         };
 
         let result = check_offline_access_token(config, "dummy_token".to_string()).await;
@@ -301,6 +306,7 @@ mod tests {
             private_client_secret: "secret".to_string(),
             iam_url: server.url(),
             realm: realm.to_string(),
+            roles_client: None,
         };
 
         let result = check_offline_access_token(config, "dummy_token".to_string()).await;
@@ -333,6 +339,7 @@ mod tests {
             private_client_secret: "secret".to_string(),
             iam_url: server.url(),
             realm: realm.to_string(),
+            roles_client: None,
         };
 
         let result = get_access_token(config, "dummy_refresh_token".to_string()).await;

@@ -56,6 +56,7 @@ impl EcmwfTokenGeneratorProvider {
             realm: config.realm.clone(),
             name: config.name.clone(),
             iam_realm: config.realm.clone(),
+            roles_client: None,
         });
 
         Self {
