@@ -6,6 +6,9 @@
 // granted to it by virtue of its status as an intergovernmental organisation nor
 // does it submit to any jurisdiction.
 
+use std::error::Error;
+use std::fmt::{Display, Formatter};
+
 use tracing::level_filters::LevelFilter;
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::fmt::format::Writer;
@@ -143,49 +146,137 @@ where
     }
 }
 
-pub fn init_logging(logging_config: &LoggingConfig) {
-    // Parse level string -> LevelFilter
-    let level_filter = match logging_config.level.trim().to_lowercase().as_str() {
-        "trace" => LevelFilter::TRACE,
-        "debug" => LevelFilter::DEBUG,
-        "info" => LevelFilter::INFO,
-        "warn" => LevelFilter::WARN,
-        "error" => LevelFilter::ERROR,
-        _ => {
-            panic!(
-                "Invalid logging.level '{}'. Valid values: trace, debug, info, warn, error",
-                logging_config.level
-            );
-        }
-    };
+/// Errors that can occur while configuring the global tracing subscriber.
+#[derive(Debug)]
+pub enum LoggingInitError {
+    /// The configured logging level is not supported.
+    InvalidLevel { level: String },
+    /// The tracing subscriber could not be installed globally.
+    SubscriberInitialization {
+        source: Box<dyn Error + Send + Sync>,
+    },
+}
 
-    // This can be used to allow env-based overrides, plus the default:
+impl Display for LoggingInitError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidLevel { level } => write!(
+                formatter,
+                "invalid logging.level '{level}'; valid values: trace, debug, info, warn, error"
+            ),
+            Self::SubscriberInitialization { source } => {
+                write!(
+                    formatter,
+                    "could not initialize logging subscriber: {source}"
+                )
+            }
+        }
+    }
+}
+
+impl Error for LoggingInitError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidLevel { .. } => None,
+            Self::SubscriberInitialization { source } => Some(source.as_ref()),
+        }
+    }
+}
+
+type BoxedSubscriber = Box<dyn Subscriber + Send + Sync>;
+
+fn parse_level(level: &str) -> Result<LevelFilter, LoggingInitError> {
+    match level.trim().to_lowercase().as_str() {
+        "trace" => Ok(LevelFilter::TRACE),
+        "debug" => Ok(LevelFilter::DEBUG),
+        "info" => Ok(LevelFilter::INFO),
+        "warn" => Ok(LevelFilter::WARN),
+        "error" => Ok(LevelFilter::ERROR),
+        _ => Err(LoggingInitError::InvalidLevel {
+            level: level.to_owned(),
+        }),
+    }
+}
+
+fn init_logging_with(
+    logging_config: &LoggingConfig,
+    initialize: impl FnOnce(BoxedSubscriber) -> Result<(), Box<dyn Error + Send + Sync>>,
+) -> Result<(), LoggingInitError> {
+    let level_filter = parse_level(&logging_config.level)?;
     let filter_layer = EnvFilter::default().add_directive(level_filter.into());
 
-    match logging_config.format.to_lowercase().as_str() {
-        "json" => {
-            // OTel-aligned structured JSON output
+    let subscriber: BoxedSubscriber = match logging_config.format.to_lowercase().as_str() {
+        "json" => Box::new(tracing_subscriber::registry().with(filter_layer).with(
+            fmt::layer().event_format(OtelJsonEventFormatter {
+                service_name: logging_config.service_name.clone(),
+                service_version: logging_config.service_version.clone(),
+            }),
+        )),
+        _ => Box::new(
             tracing_subscriber::registry()
                 .with(filter_layer)
-                .with(fmt::layer().event_format(OtelJsonEventFormatter {
-                    service_name: logging_config.service_name.clone(),
-                    service_version: logging_config.service_version.clone(),
-                }))
-                .init();
+                .with(fmt::layer().pretty()),
+        ),
+    };
+
+    initialize(subscriber).map_err(|source| LoggingInitError::SubscriberInitialization { source })
+}
+
+/// Configure and install the process-wide tracing subscriber.
+pub fn init_logging(logging_config: &LoggingConfig) -> Result<(), LoggingInitError> {
+    init_logging_with(logging_config, |subscriber| {
+        tracing::subscriber::set_global_default(subscriber)
+            .map_err(|error| Box::new(error) as Box<dyn Error + Send + Sync>)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::*;
+
+    fn logging_config(level: &str) -> LoggingConfig {
+        LoggingConfig {
+            level: level.to_owned(),
+            format: "console".to_owned(),
+            service_name: "authotron-test".to_owned(),
+            service_version: "test".to_owned(),
         }
-        "console" => {
-            // Human-readable console output with ANSI colors
-            tracing_subscriber::registry()
-                .with(filter_layer)
-                .with(fmt::layer().pretty())
-                .init();
+    }
+
+    #[test]
+    fn accepts_all_supported_levels() {
+        for level in ["trace", "debug", "info", "warn", "error"] {
+            let result = init_logging_with(&logging_config(level), |_| Ok(()));
+            assert!(result.is_ok(), "expected {level} to be supported");
         }
-        _ => {
-            // Fallback to console if unknown
-            tracing_subscriber::registry()
-                .with(filter_layer)
-                .with(fmt::layer().pretty())
-                .init();
-        }
+    }
+
+    #[test]
+    fn rejects_invalid_level() {
+        let result = init_logging_with(&logging_config("verbose"), |_| Ok(()));
+
+        assert!(matches!(
+            result,
+            Err(LoggingInitError::InvalidLevel { level }) if level == "verbose"
+        ));
+    }
+
+    #[test]
+    fn reports_subscriber_initialization_failure() {
+        let result = init_logging_with(&logging_config("info"), |_| {
+            Err(Box::new(io::Error::other("subscriber already installed"))
+                as Box<dyn Error + Send + Sync>)
+        });
+
+        assert!(matches!(
+            &result,
+            Err(LoggingInitError::SubscriberInitialization { .. })
+        ));
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "could not initialize logging subscriber: subscriber already installed"
+        );
     }
 }

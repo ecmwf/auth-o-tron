@@ -6,12 +6,16 @@
 // granted to it by virtue of its status as an intergovernmental organisation nor
 // does it submit to any jurisdiction.
 
+use std::sync::LazyLock;
+
 use crate::state::AppState;
 use axum::{Router, http::header, response::IntoResponse, routing::get};
 
 const TEMPLATE: &str = include_str!("../static/index.html");
 const LOGO: &[u8] = include_bytes!("../static/logo.png");
 const FAVICON: &[u8] = include_bytes!("../static/favicon.ico");
+static HOMEPAGE: LazyLock<String> =
+    LazyLock::new(|| TEMPLATE.replace("{{version}}", env!("CARGO_PKG_VERSION")));
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -21,8 +25,10 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn index() -> impl IntoResponse {
-    let html = TEMPLATE.replace("{{version}}", env!("CARGO_PKG_VERSION"));
-    ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html)
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        HOMEPAGE.as_str(),
+    )
 }
 
 async fn logo() -> impl IntoResponse {
