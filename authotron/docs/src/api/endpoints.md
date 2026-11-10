@@ -138,13 +138,13 @@ Prometheus metrics endpoint.
 Example output:
 
 ```
-# HELP auth_requests_total Total authentication requests
-# TYPE auth_requests_total counter
-auth_requests_total{result="success",realm="internal"} 42
+# HELP authotron_auth_requests_total Total authentication requests
+# TYPE authotron_auth_requests_total counter
+authotron_auth_requests_total{result="success",realm="internal"} 42
 
-# HELP auth_duration_seconds Authentication latency
-# TYPE auth_duration_seconds histogram
-auth_duration_seconds_bucket{result="success",realm="internal",le="0.1"} 35
+# HELP authotron_auth_duration_seconds Authentication latency
+# TYPE authotron_auth_duration_seconds histogram
+authotron_auth_duration_seconds_bucket{result="success",realm="internal",le="0.1"} 35
 ```
 
 ## Endpoint Summary
