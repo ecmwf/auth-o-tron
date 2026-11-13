@@ -297,6 +297,7 @@
           ]
         },
         "private_client_secret": {
+          "description": "Secret of the private client. Not needed with `skip_introspection`.",
           "type": [
             "string",
             "null"

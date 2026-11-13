@@ -38,6 +38,7 @@ pub struct OpenIDOfflineProviderConfig {
     /// Confidential client used for introspection. Not needed with `skip_introspection`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_client_id: Option<String>,
+    /// Secret of the private client. Not needed with `skip_introspection`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_client_secret: Option<String>,
     pub iam_url: String,
@@ -235,7 +236,30 @@ impl Provider for OpenIDOfflineProvider {
     /// and finally calls the internal `jwt_auth` to authenticate.
     async fn authenticate(&self, credentials: &str) -> Result<User, String> {
         if !self.config.skip_introspection {
-            self.check_offline_token(credentials).await?;
+            let offline_check =
+                check_offline_access_token(self.config.clone(), credentials.to_string()).await?;
+            if offline_check.was_cached
+                && let Some(suppressed_count) = should_emit(
+                    "providers.openid_offline.introspection.cache.hit",
+                    CACHE_HIT_LOG_WINDOW,
+                )
+            {
+                debug!(
+                    event_name = "providers.openid_offline.introspection.cache.hit",
+                    event_domain = "providers",
+                    provider_name = self.config.name.as_str(),
+                    realm = self.config.realm.as_str(),
+                    cache_result = "hit",
+                    cache_ttl_seconds = 120,
+                    cache_key_type = "token",
+                    suppressed_count,
+                    "offline token introspection served from cache"
+                );
+            }
+
+            if !*offline_check {
+                return Err("Not a valid offline_access token".into());
+            }
         }
 
         let access_token = get_access_token(self.config.clone(), credentials.to_string()).await?;
@@ -258,37 +282,6 @@ impl Provider for OpenIDOfflineProvider {
             );
         }
         self.jwt_auth.authenticate(&access_token).await
-    }
-}
-
-impl OpenIDOfflineProvider {
-    /// Introspects the token and fails unless it is an active offline token.
-    async fn check_offline_token(&self, credentials: &str) -> Result<(), String> {
-        let offline_check =
-            check_offline_access_token(self.config.clone(), credentials.to_string()).await?;
-        if offline_check.was_cached
-            && let Some(suppressed_count) = should_emit(
-                "providers.openid_offline.introspection.cache.hit",
-                CACHE_HIT_LOG_WINDOW,
-            )
-        {
-            debug!(
-                event_name = "providers.openid_offline.introspection.cache.hit",
-                event_domain = "providers",
-                provider_name = self.config.name.as_str(),
-                realm = self.config.realm.as_str(),
-                cache_result = "hit",
-                cache_ttl_seconds = 120,
-                cache_key_type = "token",
-                suppressed_count,
-                "offline token introspection served from cache"
-            );
-        }
-
-        if !*offline_check {
-            return Err("Not a valid offline_access token".into());
-        }
-        Ok(())
     }
 }
 
@@ -401,7 +394,8 @@ mod tests {
         let mut server = Server::new_async().await;
         let m = server
             .mock("POST", TOKEN_PATH)
-            .match_header("authorization", Matcher::Regex("^Basic ".to_string()))
+            // base64("private:secret")
+            .match_header("authorization", "Basic cHJpdmF0ZTpzZWNyZXQ=")
             .match_body(Matcher::UrlEncoded(
                 "client_id".to_string(),
                 "public".to_string(),
@@ -425,6 +419,10 @@ mod tests {
         let m = server
             .mock("POST", TOKEN_PATH)
             .match_header("authorization", Matcher::Missing)
+            .match_body(Matcher::UrlEncoded(
+                "client_id".to_string(),
+                "public".to_string(),
+            ))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(r#"{"access_token": "new_access_token"}"#)
